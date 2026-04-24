@@ -1,8 +1,38 @@
 # D26 — Time-Accurate V10 Staking Accounting
 
 **Status**: implemented in PR #240 (branch `v10-pr97-spec-impl`).
+**Code-review follow-ups**: all H/M/L findings from [`CODE_REVIEW_V10_D26.md`](./CODE_REVIEW_V10_D26.md) have been applied in the same PR (contract versions bumped accordingly).
 **Spec**: [`/Users/aleatoric/.cursor/plans/v10_time-accurate_staking_accounting_801da0cd.plan.md`](../../../.cursor/plans/v10_time-accurate_staking_accounting_801da0cd.plan.md)
-**Scope**: `ConvictionStakingStorage.sol` (v3.0.0), `RandomSamplingStorage.sol` (v2.0.0), `RandomSampling.submitProof`, `StakingV10._claim` / `_prepareForStakeChangeV10`, `DKGStakingConvictionNFT` (unchanged wrapper surface).
+**Scope**: `ConvictionStakingStorage.sol` (v3.1.0), `RandomSamplingStorage.sol` (v3.0.0), `RandomSampling.submitProof`, `StakingV10.sol` (v2.3.0) — `_claim` / `_prepareForStakeChangeV10`, `DKGStakingConvictionNFT.sol` (v1.2.0).
+
+---
+
+## 0. Glossary — read this first
+
+Every diagram in this doc uses these terms. If any line is unclear, jump back here.
+
+| Term | What it means |
+| ---- | ------------- |
+| **identityId** | The node's on-chain numeric id (uint72). In the examples we use `42` for NodeAlpha. |
+| **tokenId** | The ERC-721 token id of a V10 staking position. Each delegator stake is a separate NFT. |
+| **raw** | The literal TRAC amount the delegator staked, in wei. No multiplier applied. |
+| **mult18** | The tier's boost multiplier, scaled by 1e18. `1.5x` = `1.5e18`. |
+| **effBoosted** | `raw * mult18 / 1e18` — the delegator's contribution to the node's denominator **while the lock is active**. |
+| **effBase** | `raw` — the delegator's contribution to the denominator **after the lock expires** (post-boost 1x). |
+| **boostDrop** | `effBoosted - effBase` — the amount the denominator must shrink by the instant the lock expires. For Alice: `3000 - 2000 = 1000`. |
+| **expiryTimestamp** | Wall-clock second at which the delegator's lock expires. For Alice: `T0 + 30 days`. Stored on `Position` (uint40). |
+| **expiryEpoch** | Convenience derivation: `chronos.epochAtTimestamp(expiryTimestamp)`. The one epoch that *contains* the expiry instant. For Alice: epoch 104. |
+| **runningNodeEffectiveStake[id]** | The node's current denominator. Updated in place by mutators; only valid as of `nodeLastSettledAt[id]`. |
+| **nodeLastSettledAt[id]** | Wall-clock timestamp the running stake has been advanced to. Everything `≤` this ts has already been applied. |
+| **Expiry queue** | A per-node sorted list of upcoming `(expiryTs, dropAmount)` pairs. Stored as `nodeExpiryTimes[id]` (ascending array) and `nodeExpiryDrop[id][ts]` (coalesced drop per ts). Walked forward by `nodeExpiryHead[id]`. |
+| **Drain (or "drain fires")** | `settleNodeTo(id, ts)` walks the expiry queue from `head` forward and, for every queue entry with `entry.ts ≤ ts`, subtracts that entry's `drop` from the running stake and advances `head`. The running stake shrinks exactly as many locks have expired since the previous settle. |
+| **settleNodeTo(id, ts)** | Public trigger for the drain. Called by `submitProof` every proof, and by every CSS mutator right before it reads or writes the running stake. Idempotent. |
+| **Checkpoint** | A `(timestamp, scorePerStake36)` pair written once per proof into `nodeEpochIndex[id][epoch].mid[]`. Lets `_claim` binary-search the score at any mid-epoch instant. |
+| **scorePerStake36** | Cumulative score per unit effective stake, scaled by 1e36. Epoch-local: starts at 0 each epoch, grows monotonically. |
+| **lastScorePerStake36** | Latest value of the cumulative score per unit stake in an epoch. Equals the tail of `mid[]` (by invariant). |
+| **findScorePerStakeAt(id, epoch, ts)** | Binary-searches `mid[]` for the at-or-before checkpoint at `ts`. Returns the cumulative score-per-stake at that instant. |
+| **delegatorLastSettledNodeEpochScorePerStake** | A per-(delegator, node, epoch) cursor. Tracks the value of `scorePerStake36` at which we last paid this delegator. Subtracting this from the current value gives "score earned since last touch". |
+| **\_prepareForStakeChangeV10** | Internal helper that fires *before* every stake mutation. Settles the delegator's earned score for the current epoch so subsequent math reads a fresh baseline. |
 
 ---
 
@@ -123,9 +153,12 @@ Epoch 104 is the only one that triggers the binary-search claim branch. Every ot
 
 ## 5. Sequence diagrams
 
-### 5.1 createConviction — Alice opens a 30-day boosted position at `T0`
+Every diagram uses `autonumber` — the `(n)` references in the walk-throughs below map directly to the numbered arrows.
+
+### 5.1 `createConviction` — Alice opens a 30-day boosted position at `T0`
 
 ```mermaid
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 15, 'actorMargin': 70 } } }%%
 sequenceDiagram
     autonumber
     actor Alice
@@ -136,82 +169,113 @@ sequenceDiagram
     participant CSS as ConvictionStakingStorage
     participant RSS as RandomSamplingStorage
 
-    Alice->>NFT: createConviction(identityId=42, amount=2000, lockTier=1)
+    Alice->>NFT: createConviction(id=42, amount=2000, lockTier=1)
     NFT->>NFT: tokenId = _nextTokenId++ = 1
     NFT->>NFT: _mint(Alice, tokenId=1)
-    NFT->>SV10: stake(Alice, tokenId=1, 42, 2000, lockTier=1)
+    NFT->>SV10: stake(Alice, 1, 42, 2000, 1)
 
-    activate SV10
     SV10->>CSS: expectedMultiplier18(1) → 1.5e18
     SV10->>CSS: getNodeStakeV10(42) → 5000
-    Note over SV10: 5000 + 2000 = 7000 ≤ maxStake ✓
+    Note over SV10: max-stake check: 5000 + 2000 ≤ cap
 
-    SV10->>SV10: _prepareForStakeChangeV10(epoch=100, tokenId=1, 42)
-    Note over SV10,RSS: tokenId is fresh → no prior delegator score to settle.<br/>Just writes lastSettledIndex36 := current lastScorePerStake36.
+    SV10->>SV10: _prepareForStakeChangeV10(epoch=100, 1, 42)
+    Note over SV10,RSS: Fresh tokenId, no prior score. Seeds delegator cursor.
 
-    SV10->>TOKEN: transferFrom(Alice, StakingStorage, 2000 TRAC)
+    SV10->>TOKEN: transferFrom(Alice, StakingStorage, 2000)
 
-    SV10->>CSS: createPosition(1, 42, 2000, lockTier=1, 1.5e18, 0)
-    activate CSS
-    CSS->>CSS: positions[1] = { raw: 2000, expiryTimestamp: T0+30d, ... }
-    CSS->>CSS: _increaseNodeStakeV10(42, +2000)   // raw aggregate
-    CSS->>CSS: _settleNodeTo(42, T0)              // brings running state to T0
-    CSS->>CSS: _applyNodeStakeDelta(42, +3000)    // full effBoosted
-    CSS->>CSS: _scheduleNodeExpiry(42, T_expiry, 1000)  // sorted insert
-    Note over CSS: runningNodeEffectiveStake[42] += 3000<br/>nodeExpiryTimes[42].push(T_expiry)<br/>nodeExpiryDrop[42][T_expiry] = 1000
-    CSS-->>SV10: PositionCreated emitted
-    deactivate CSS
+    SV10->>CSS: createPosition(1, 42, 2000, 1, 1.5e18, 0)
+    CSS->>CSS: positions[1] = { raw:2000, expiryTimestamp:T0+30d, ... }
+    CSS->>CSS: _increaseNodeStakeV10(42, +2000)
+    CSS->>CSS: _settleNodeTo(42, T0)
+    Note over CSS: No pending drops before T0 → just bumps cursor.
+    CSS->>CSS: _applyNodeStakeDelta(42, +3000)
+    Note over CSS: +3000 = effBoosted. Denominator now 8000.
+    CSS->>CSS: _scheduleNodeExpiry(42, T0+30d, 1000)
+    Note over CSS: Sorted insert: queue = [T0+30d], drop = 1000.
+    CSS-->>SV10: PositionCreated
 
-    SV10->>SV10: sharding-table + ask recalc (if thresholds crossed)
+    SV10->>SV10: sharding-table + ask recalc if needed
     SV10-->>NFT: Staked(1, Alice, 42, 2000, 1)
-    deactivate SV10
     NFT-->>Alice: ConvictionCreated(tokenId=1, ...)
 ```
 
+**Line-by-line walk-through:**
+
+1. **`Alice → NFT: createConviction(id=42, 2000, 1)`** — Alice calls the outer NFT wrapper. `id=42` is NodeAlpha's `identityId`. `2000` is the TRAC raw amount. `1` is tier 1 (30 days, 1.5x).
+2. **`NFT: tokenId = _nextTokenId++`** — the wrapper allocates a fresh NFT id. Monotone counter, no reuse.
+3. **`NFT: _mint(Alice, 1)`** — standard ERC-721 mint. Alice now owns the NFT that represents this position.
+4. **`NFT → SV10: stake(...)`** — forwards to `StakingV10`, passing Alice's address explicitly (the business-logic contract never trusts `msg.sender`).
+5. **`SV10 → CSS: expectedMultiplier18(1) → 1.5e18`** — read the tier multiplier from storage. `1.5e18` = 1.5x at fixed-point scale 1e18.
+6. **`SV10 → CSS: getNodeStakeV10(42) → 5000`** — read the node's current aggregate raw stake (other delegators already on NodeAlpha).
+7. **Max-stake note** — pre-flight check: `5000 + 2000 ≤ maximumStake`. Rejects early if it would push the node over cap.
+8. **`SV10 → SV10: _prepareForStakeChangeV10(100, 1, 42)`** — settles the delegator's unclaimed score in the *current* epoch before we mutate state. For a fresh tokenId there's nothing to settle — the helper just writes the initial value of the score cursor so later claims compute a clean delta.
+9. **`SV10 → TOKEN: transferFrom(Alice, StakingStorage, 2000)`** — TRAC leaves Alice's wallet and lands in the `StakingStorage` vault. Alice must have pre-approved.
+10. **`SV10 → CSS: createPosition(1, 42, 2000, 1, 1.5e18, 0)`** — CSS is the authoritative ledger. The `0` is `migrationEpoch` (not a V8 migrant).
+11. **`CSS: positions[1] = { raw:2000, expiryTimestamp:T0+30d, ... }`** — write the per-tokenId record. `expiryTimestamp` is derived from `_computeExpiryTimestamp(1)` = `block.timestamp + tier.duration`.
+12. **`CSS: _increaseNodeStakeV10(42, +2000)`** — update the *raw* aggregate. This is the unboosted total (used by `calculateNodeScore`'s `S(t)` factor).
+13. **`CSS: _settleNodeTo(42, T0)`** — bring the per-node running state up to the current wall-clock. Since no expiries are queued yet and we're at the birth of the universe for this node, this is a no-op beyond bumping `nodeLastSettledAt[42] := T0`.
+14. **`CSS: _applyNodeStakeDelta(42, +3000)`** — add Alice's **boosted** contribution (`effBoosted`) to the running denominator. `5000 + 3000 = 8000`.
+15. **`CSS: _scheduleNodeExpiry(42, T0+30d, 1000)`** — queue the boost drop. In 30 days, 1000 must come *off* the denominator. Inserts `T0+30d` into the sorted array and sets `nodeExpiryDrop[42][T0+30d] = 1000`.
+16. **`CSS ⇢ SV10: PositionCreated`** — event emission (consumed by off-chain indexers).
+17. **Sharding/ask recalc** — if this stake pushed NodeAlpha across the `minimumStake` threshold, insert into the sharding table and recompute the ask. Usually no-op here.
+18. **`SV10 ⇢ NFT: Staked(...)`** → **`NFT ⇢ Alice`** — events bubble up to the wrapper and the user.
+
 **Invariants after this block:**
 
-- `positions[1].expiryTimestamp == T_expiry`
+- `positions[1].expiryTimestamp == T0 + 30 days`
 - `runningNodeEffectiveStake[42] == 5000 + 3000 == 8000`
 - `nodeLastSettledAt[42] == T0`
-- `nodeExpiryTimes[42] == [T_expiry]`, `nodeExpiryDrop[42][T_expiry] == 1000`
+- `nodeExpiryTimes[42] == [T0+30d]`, `nodeExpiryDrop[42][T0+30d] == 1000`
 
-### 5.2 submitProof — a node proof lands at `T = T0 + 3 days` (mid-epoch 100)
+---
+
+### 5.2 `submitProof` — a node proof lands at `T0 + 3 days` (mid-epoch 100)
 
 NodeAlpha produces a valid proof. `score18 = 840e18` (arbitrary, illustrative).
 
 ```mermaid
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 15, 'actorMargin': 70 } } }%%
 sequenceDiagram
     autonumber
-    participant NodeAlpha as NodeAlpha (operator EOA, identityId=42)
+    participant NodeAlpha as NodeAlpha
     participant RS as RandomSampling
     participant RSS as RandomSamplingStorage
     participant CSS as ConvictionStakingStorage
 
     NodeAlpha->>RS: submitProof(chunk, merkleProof)
-    RS->>RS: verify challenge + merkle root ✓
+    RS->>RS: verify challenge + merkle root
     RS->>RSS: incrementEpochNodeValidProofsCount(100, 42)
     RS->>RS: score18 = calculateNodeScore(42) = 840e18
-    RS->>RSS: addToNodeEpochProofPeriodScore(100, ppStartBlock, 42, 840e18)
+    RS->>RSS: addToNodeEpochProofPeriodScore(100, _, 42, 840e18)
     RS->>RSS: addToNodeEpochScore(100, 42, 840e18)
     RS->>RSS: addToAllNodesEpochScore(100, 840e18)
 
-    rect rgb(235, 245, 255)
-    Note over RS,CSS: D26 — timestamp-accurate denominator
+    Note over RS,CSS: --- D26 timestamp-accurate denominator block ---
+
     RS->>CSS: settleNodeTo(42, tsNow = T0+3d)
-    activate CSS
-    Note over CSS: T0+3d < T_expiry → no drain fires.<br/>nodeLastSettledAt[42] := T0+3d.<br/>runningNodeEffectiveStake[42] unchanged = 8000.
-    CSS-->>RS: (ok)
-    deactivate CSS
+    Note over CSS: Queue head ts = T0+30d, which is > T0+3d, so nothing is drained. nodeLastSettledAt advances to T0+3d; running stake stays 8000.
 
     RS->>CSS: getNodeRunningEffectiveStake(42) → 8000
-    RS->>RSS: getEpochLastScorePerStake(42, 100) → 0 (first proof of epoch)
-    Note over RS: deltaScorePerStake36 = 840e18 * 1e18 / 8000<br/>                      = 105e33
+    RS->>RSS: getEpochLastScorePerStake(42, 100) → 0
+    Note over RS: First proof of the epoch: prior score-per-stake is 0. delta = 840e18 * 1e18 / 8000 = 105e33.
+
     RS->>RSS: appendCheckpoint(42, 100, T0+3d, 105e33)
-    activate RSS
-    Note over RSS: firstScorePerStake36 stays 0 (epoch-local baseline).<br/>firstInitialized := true.<br/>lastScorePerStake36 := 105e33.<br/>mid.push({ ts: T0+3d, val: 105e33 }).
-    deactivate RSS
-    end
+    Note over RSS: lastScorePerStake36 := 105e33; mid.push({ts:T0+3d, val:105e33}); firstInitialized := true.
 ```
+
+**Line-by-line walk-through** (numbers match the `autonumber` arrows in the diagram; `autonumber` only indexes arrows, not notes):
+
+1. **`NodeAlpha → RS: submitProof(chunk, merkleProof)`** — the node operator (an EOA) submits a sampled chunk plus a merkle proof.
+2. **`RS: verify challenge + merkle root`** — RandomSampling verifies the chunk matches the expected challenge and the merkle root. Reverts if not.
+3. **`RS → RSS: incrementEpochNodeValidProofsCount(100, 42)`** — bookkeeping: epoch 100, NodeAlpha has one more valid proof.
+4. **`RS: score18 = calculateNodeScore(42) = 840e18`** — RFC-26 score formula: `sqrt(stake/cap) · (0.002 + 0.86·P + 0.60·A·P)`, scaled 1e18.
+5. **`RS → RSS: addToNodeEpochProofPeriodScore(...)`** — per-proof-period accumulator (used for later anti-gaming checks).
+6. **`RS → RSS: addToNodeEpochScore(100, 42, 840e18)`** — node's epoch-total score bumps by `score18`. This is the **numerator** used to compute rewards later.
+7. **`RS → RSS: addToAllNodesEpochScore(100, 840e18)`** — global epoch-total (used as the denominator when dividing the epoch reward pool across nodes).
+8. **`RS → CSS: settleNodeTo(42, tsNow = T0+3d)`** — bring NodeAlpha's denominator up to current wall-clock *before* we read it. Walks the expiry queue from `nodeExpiryHead[42]` and drains every entry with `ts ≤ tsNow`. At T0+3d the earliest queued ts is T0+30d, so no entries are drained; `nodeLastSettledAt[42]` advances to T0+3d and the running stake stays 8000.
+9. **`RS → CSS: getNodeRunningEffectiveStake(42) → 8000`** — read the denominator *after* settle.
+10. **`RS → RSS: getEpochLastScorePerStake(42, 100) → 0`** — the cumulative score-per-stake at the last write in epoch 100. Zero because this is the first proof of the epoch.
+11. **`RS → RSS: appendCheckpoint(42, 100, T0+3d, 105e33)`** — compute `delta = score18 · 1e18 / eff = 840e18 · 1e18 / 8000 = 105e33` (the 1e18 multiplier in the numerator keeps us at 1e36 precision). Store a new checkpoint so claim-time binary search can find the value at any mid-epoch instant. Inside RSS: `lastScorePerStake36 := 105e33`, `mid.push({T0+3d, 105e33})`, and `firstInitialized := true` (idempotency flag).
 
 **Invariants after this proof:**
 
@@ -220,19 +284,22 @@ sequenceDiagram
 - `nodeEpochIndex[42][100].mid == [{T0+3d, 105e33}]`
 - `runningNodeEffectiveStake[42] == 8000` (unchanged — no expiries fell in the interval)
 
-### 5.3 submitProof — mid-epoch 104, straddling Alice's expiry
+---
 
-By epoch 104, many proofs have landed across epochs 100-103. For epochs 100 through 103 we only keep the picture's salient reading: each epoch ends with some `lastScorePerStake36[e]`. What matters is epoch 104.
+### 5.3 `submitProof` — mid-epoch 104, straddling Alice's expiry
+
+By epoch 104, many proofs have landed across epochs 100-103. For each of those epochs we only care about its salient reading: each ends with some `lastScorePerStake36[e]`. What matters is epoch 104.
 
 Inside epoch 104 we inspect **three proofs**:
 
-- **P1**: lands at day 1 of epoch 104 (= T0 + 29d). Boost still active → denominator 8000.
-- **P2**: lands at day 3 of epoch 104 (= T0 + 31d). Alice's boost expired 1 day ago (at T_expiry = day 2 of epoch 104). The queue drain fires.
-- **P3**: lands at day 5 of epoch 104 (= T0 + 33d). Denominator = 7000 (post-drop).
+- **P1**: day 1 of epoch 104 (`T0 + 29d`). Boost still active (expires at T0+30d).
+- **P2**: day 3 of epoch 104 (`T0 + 31d`). Boost expired 1 day ago. **First proof after expiry — drains the queue.**
+- **P3**: day 5 of epoch 104 (`T0 + 33d`). Queue already drained.
 
-Assume each proof's `score18 = 560e18`. Other delegators are not affected by the drop.
+Assume each proof's `score18 = 560e18`. Other delegators are unaffected by Alice's drop.
 
 ```mermaid
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 15, 'actorMargin': 70 } } }%%
 sequenceDiagram
     autonumber
     participant NodeAlpha as NodeAlpha
@@ -240,63 +307,102 @@ sequenceDiagram
     participant RSS as RandomSamplingStorage
     participant CSS as ConvictionStakingStorage
 
-    Note over NodeAlpha,CSS: P1 — day 1 of epoch 104 (ts = T0 + 29d), before expiry
+    Note over NodeAlpha,CSS: --- P1 — day 1 of epoch 104 (T0+29d). Boost still active. ---
     NodeAlpha->>RS: submitProof(...)
     RS->>CSS: settleNodeTo(42, T0+29d)
-    Note over CSS: head cursor still points at T_expiry (= T0+30d).<br/>ts < T_expiry → no drain.<br/>runningNodeEffectiveStake[42] = 8000.
+    Note over CSS: Queue head is T0+30d, which is > T0+29d → no drain. Running stake stays 8000.
     RS->>CSS: getNodeRunningEffectiveStake(42) → 8000
-    RS->>RSS: getEpochLastScorePerStake(42, 104) → S0  (carryover sentinel from prior proof if any, else 0 at epoch start)
-    Note over RS: delta₁ = 560e18·1e18 / 8000 = 70e33
+    RS->>RSS: getEpochLastScorePerStake(42, 104) → S0
+    Note over RS: S0 = score-per-stake at end of epoch 103, carried here. delta₁ = 560e18·1e18 / 8000 = 70e33.
     RS->>RSS: appendCheckpoint(42, 104, T0+29d, S0+70e33)
 
-    Note over NodeAlpha,CSS: P2 — day 3 of epoch 104 (ts = T0 + 31d), 1 day after expiry
+    Note over NodeAlpha,CSS: --- P2 — day 3 of epoch 104 (T0+31d). Boost expired 24h ago. ---
     NodeAlpha->>RS: submitProof(...)
     RS->>CSS: settleNodeTo(42, T0+31d)
-    activate CSS
-    Note over CSS: Drain fires:<br/>nodeExpiryTimes[42][head] = T_expiry ≤ T0+31d<br/>→ runningNodeEffectiveStake[42] -= 1000 (= 7000)<br/>→ nodeExpiryHead[42]++<br/>→ nodeLastSettledAt[42] := T0+31d
-    deactivate CSS
+    Note over CSS: Queue head T0+30d is ≤ T0+31d → drain fires. Subtract nodeExpiryDrop[42][T0+30d]=1000. Running 8000→7000. head 0→1. nodeLastSettledAt := T0+31d.
     RS->>CSS: getNodeRunningEffectiveStake(42) → 7000
-    Note over RS: delta₂ = 560e18·1e18 / 7000 = 80e33
-    RS->>RSS: appendCheckpoint(42, 104, T0+31d, S0 + 70e33 + 80e33)
+    Note over RS: delta₂ = 560e18·1e18 / 7000 = 80e33. Denominator shrank, so each unit of stake earns more.
+    RS->>RSS: appendCheckpoint(42, 104, T0+31d, S0+150e33)
 
-    Note over NodeAlpha,CSS: P3 — day 5 of epoch 104 (ts = T0 + 33d)
+    Note over NodeAlpha,CSS: --- P3 — day 5 of epoch 104 (T0+33d). Queue already empty. ---
     NodeAlpha->>RS: submitProof(...)
     RS->>CSS: settleNodeTo(42, T0+33d)
-    Note over CSS: Queue head already drained.<br/>runningNodeEffectiveStake[42] = 7000.
+    Note over CSS: head past array tail → drain no-ops. Running stays 7000.
     RS->>CSS: getNodeRunningEffectiveStake(42) → 7000
-    Note over RS: delta₃ = 560e18·1e18 / 7000 = 80e33
-    RS->>RSS: appendCheckpoint(42, 104, T0+33d, S0 + 70e33 + 80e33 + 80e33)
+    Note over RS: delta₃ = 560e18·1e18 / 7000 = 80e33. Same rate as P2.
+    RS->>RSS: appendCheckpoint(42, 104, T0+33d, S0+230e33)
 ```
+
+**Line-by-line walk-through:**
+
+**P1 — pre-expiry proof:**
+
+1. **`NodeAlpha → RS: submitProof(...)`** — normal proof submission.
+2. **`RS → CSS: settleNodeTo(42, T0+29d)`** — drive the drain. The queue holds `[T0+30d]`; we're at T0+29d.
+3. **Queue head note** — drain checks `queue[head].ts ≤ 29d`. T0+30d > T0+29d. Nothing to drain.
+4. **Running stake note** — unchanged at 8000.
+5. **`RS → CSS: getNodeRunningEffectiveStake(42) → 8000`** — read the denominator.
+6. **`RS → RSS: getEpochLastScorePerStake(42, 104) → S0`** — `S0` is the cumulative carried in at epoch 104's start (the last checkpoint from epoch 103, represented as the epoch-local baseline for epoch 104).
+7. **S0 note** — establishes what `S0` means for the reader.
+8. **Delta₁ note** — `560e18 · 1e18 / 8000 = 70e33`. Each unit of effective stake just earned 70e33 units of score-per-stake-at-1e36-scale.
+9. **`RS → RSS: appendCheckpoint(42, 104, T0+29d, S0+70e33)`** — store the cumulative at this moment.
+
+**P2 — the drain fires:**
+
+10. **`NodeAlpha → RS: submitProof(...)`**.
+11. **`RS → CSS: settleNodeTo(42, T0+31d)`** — first settle *after* Alice's expiry.
+12. **Drain fires note 1** — `queue[head].ts = T0+30d`, which is ≤ T0+31d, so this entry is due.
+13. **Drain fires note 2** — we subtract `nodeExpiryDrop[42][T0+30d]` (= 1000) from the running stake.
+14. **Drain fires note 3** — running stake drops from 8000 → 7000. Alice's 1000-unit boost contribution is now gone from the denominator.
+15. **Drain fires note 4** — advance `head` (next drain won't re-visit this entry) and bump `nodeLastSettledAt` to T0+31d.
+16. **`RS → CSS: getNodeRunningEffectiveStake(42) → 7000`** — the **new** denominator.
+17. **Delta₂ note 1** — `560e18 · 1e18 / 7000 = 80e33`. Different from P1 because the denominator shrank.
+18. **Delta₂ note 2** — the *other* delegators' per-unit earnings just went up: they still contribute 5000, but the total denominator dropped. Correct — Alice's boost no longer dilutes them.
+19. **`RS → RSS: appendCheckpoint(42, 104, T0+31d, S0+150e33)`** — cumulative = `S0 + 70e33 + 80e33`.
+
+**P3 — post-drain proof:**
+
+20. **`NodeAlpha → RS: submitProof(...)`**.
+21. **`RS → CSS: settleNodeTo(42, T0+33d)`**.
+22. **Queue empty note 1** — `head` (now 1) is past the end of the array (length 1). Nothing to drain.
+23. **Queue empty note 2** — running stake stays 7000. Settled cursor advances.
+24. **`RS → CSS: getNodeRunningEffectiveStake(42) → 7000`**.
+25. **Delta₃ note** — `560e18 · 1e18 / 7000 = 80e33`. Same rate as P2.
+26. **`RS → RSS: appendCheckpoint(42, 104, T0+33d, S0+230e33)`** — cumulative = `S0 + 70e33 + 80e33 + 80e33`.
 
 **Invariants after P3:**
 
 - `nodeEpochIndex[42][104].mid == [{T0+29d, S0+70e33}, {T0+31d, S0+150e33}, {T0+33d, S0+230e33}]`
 - `nodeEpochIndex[42][104].lastScorePerStake36 == S0 + 230e33`
 - `runningNodeEffectiveStake[42] == 7000`
-- `nodeExpiryHead[42] == 1` (T_expiry consumed)
+- `nodeExpiryHead[42] == 1` (T0+30d consumed)
 
 > **Why this matters for Alice.** P1 credited Alice's boost correctly (she *was* boosted). P2 and P3 correctly divide by the smaller 7000 denominator (she is no longer contributing the 1000-unit boost to the pool). Alice still earns `effBase = 2000` worth of delegator-score from P2 and P3 (see §5.4), but she no longer inflates the denominator she divides against. Other delegators' rewards are not diluted.
 
-### 5.4 _claim — Alice claims through epoch 104 (or withdraws)
+---
 
-When Alice (or a withdraw call) triggers `_claim`, the walker looks at each unclaimed epoch `e ∈ [claimFrom, currentEpoch-1]` and computes `delegatorScore18[e]` using the appropriate branch:
+### 5.4 `_claim` — Alice claims through epoch 104
+
+When Alice (or a withdraw call) triggers `_claim`, the walker visits each unclaimed epoch `e ∈ [claimFrom, currentEpoch-1]` and computes `delegatorScore18[e]` using the appropriate branch:
 
 ```
 for each epoch e:
-    first = nodeEpochIndex[42][e].firstScorePerStake36    // 0 under D26
-    last  = nodeEpochIndex[42][e].lastScorePerStake36
-    if first == last: continue                            // dead epoch
-    if pos.expiryTimestamp == 0 || e < expiryEpoch:       // boost fully active
-        delegatorScore18 += effBoosted · (last - first) / 1e18
-    else if e > expiryEpoch:                              // boost fully dropped
-        delegatorScore18 += effBase · (last - first) / 1e18
-    else:                                                  // e == expiryEpoch
-        atExpiry = RSS.findScorePerStakeAt(42, e, expiryTs)   // BINARY SEARCH
-        delegatorScore18 += effBoosted · (atExpiry - first) / 1e18
-                          +  effBase    · (last - atExpiry) / 1e18
+    last         = nodeEpochIndex[42][e].lastScorePerStake36
+    lastSettled  = delegatorLastSettledNodeEpochScorePerStake[e, 42, key]
+    if last <= lastSettled: continue                            // dead epoch, nothing earned
+
+    if pos.expiryTimestamp == 0 || e < expiryEpoch:            // boost fully active all epoch
+        delegatorScore18 += effBoosted · (last - lastSettled) / 1e18
+    else if e > expiryEpoch:                                   // boost fully dropped all epoch
+        delegatorScore18 += effBase · (last - lastSettled) / 1e18
+    else:                                                       // e == expiryEpoch — SPLIT
+        atExpiry = RSS.findScorePerStakeAt(42, e, expiryTs)    // BINARY SEARCH in mid[]
+        delegatorScore18 += effBoosted · (atExpiry - lastSettled) / 1e18
+                          + effBase    · (last     - atExpiry)    / 1e18
 ```
 
 ```mermaid
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 15, 'actorMargin': 70 } } }%%
 sequenceDiagram
     autonumber
     actor Alice
@@ -308,42 +414,88 @@ sequenceDiagram
 
     Alice->>NFT: claim(tokenId=1)
     NFT->>SV10: claim(Alice, 1)
-    SV10->>CSS: getPosition(1) → { raw: 2000, mult18: 1.5e18, expiryTs: T0+30d, lastClaimed: 99, ... }
+    SV10->>CSS: getPosition(1)
+    Note over SV10: pos = { raw:2000, mult18:1.5e18, expiryTs:T0+30d, lastClaimed:99 }
 
-    SV10->>SV10: _prepareForStakeChangeV10(currentEpoch=105, 1, 42)<br/>(settles up to start of epoch 105)
+    SV10->>SV10: _prepareForStakeChangeV10(105, 1, 42)
+    Note over SV10: Settles the delegator's score cursor up to the start of the current epoch.
 
-    Note over SV10: expiryEpoch = epochAtTimestamp(T0+30d) = 104
-    Note over SV10: effBoosted = 3000, effBase = 2000
+    Note over SV10: expiryEpoch = epochAtTimestamp(T0+30d) = 104.
+    Note over SV10: effBoosted = 3000, effBase = 2000.
 
     loop e in [100, 101, 102, 103, 104]
       SV10->>RSS: getEpochLastScorePerStake(42, e) → last[e]
       SV10->>RSS: getDelegatorLastSettledNodeEpochScorePerStake(e, 42, key) → lastSettled[e]
-      alt e < 104 (fully-boosted)
-        Note over SV10: delegator18[e] += 3000 · (last[e] - lastSettled[e]) / 1e18
-      else e == 104 (binary search)
+
+      alt e < 104 — fully boosted
+        Note over SV10: delegator18[e] += 3000 · (last[e] − lastSettled[e]) / 1e18
+      else e == 104 — expiry split
         SV10->>RSS: findScorePerStakeAt(42, 104, T0+30d)
-        RSS-->>SV10: atExpiry  (somewhere between S0 and S0+70e33, depending on proof order)
-        Note over SV10: delegator18[104] += 3000 · (atExpiry   - lastSettled[104]) / 1e18<br/>                        + 2000 · (last[104]  - atExpiry)         / 1e18
+        RSS-->>SV10: atExpiry (somewhere between S0 and S0+70e33)
+        Note over SV10: Boosted slice: 3000 · (atExpiry − lastSettled[104]) / 1e18
+        Note over SV10: Base slice:    2000 · (last[104] − atExpiry)       / 1e18
       end
+
       SV10->>RSS: getNodeEpochScore(e, 42) → nodeScore[e]
       SV10->>ES: getEpochPool(1, e) → pool[e]
-      Note over SV10: epochReward[e] = delegator18[e] · netNodeRewards[e] / nodeScore18[e]<br/>                (netNodeRewards = pool·nodeScore/allNodes − operatorFee)
+      Note over SV10: grossNodeRewards = pool · nodeScore / allNodesScore
+      Note over SV10: netNodeRewards = gross − operatorFee
+      Note over SV10: epochReward[e] = delegator18[e] · netNodeRewards / nodeScore[e]
     end
 
     SV10->>CSS: increaseRaw(1, rewardTotal)
-    Note over CSS: rewardTotal is compounded INTO pos.raw.<br/>Also re-indexes runningNodeEffectiveStake[42] and the expiry queue<br/>(see increaseRaw flow in §5.5) — a no-op delta when the position<br/>is already post-expiry.
+    Note over CSS: rewardTotal compounds INTO pos.raw.
+    Note over CSS: Re-indexes runningNodeEffectiveStake and the expiry queue.
+    Note over CSS: (no-op delta here because the position is post-expiry — 1x)
     SV10->>CSS: addCumulativeRewardsClaimed(1, rewardTotal)
     SV10->>CSS: setLastClaimedEpoch(1, 104)
     SV10-->>NFT: ClaimV10 emitted
 ```
 
-> **Binary-search frequency.** In this entire life cycle Alice's claim invokes `findScorePerStakeAt` **exactly once** — in epoch 104. Epochs 100-103 and 105+ take O(1) sentinel reads. The `mid[]` array grows with proof frequency (≈ one entry per 30 minutes), so `O(log n)` per binary search ≈ 9 SLOADs for a 7-day epoch with 30-minute proofs (≈336 proofs → log₂336 ≈ 8.4).
+**Line-by-line walk-through:**
+
+1. **`Alice → NFT: claim(1)`** — the NFT wrapper entry point. `1` is Alice's tokenId.
+2. **`NFT → SV10: claim(Alice, 1)`**.
+3. **`SV10 → CSS: getPosition(1)`** — read Alice's position struct.
+4. **Position note** — fields needed for the claim: raw stake, multiplier, expiry timestamp, last claimed epoch (99 means "everything through epoch 99 is already claimed").
+5. **`_prepareForStakeChangeV10(105, 1, 42)`** — settles the *current* epoch (105) cursor first. Guarantees the subsequent loop reads a clean baseline for the current epoch (not strictly needed for past epochs but required if the claim is interleaved with a stake mutation).
+6. **Prepare note** — informational.
+7. **`expiryEpoch = 104`** — derived from `chronos.epochAtTimestamp(T0+30d)`.
+8. **effBoosted / effBase note** — `3000` and `2000` respectively (from the scenario).
+9. **`loop e in [100, 101, 102, 103, 104]`** — walks epoch 100 through `currentEpoch − 1 = 104`.
+10. **`getEpochLastScorePerStake(42, e) → last[e]`** — the cumulative score-per-stake at the end of epoch `e` on this node.
+11. **`getDelegatorLastSettledNodeEpochScorePerStake(e, 42, key) → lastSettled[e]`** — the cursor value: the cumulative score at which we *stopped* paying Alice last time for this (epoch, node). Zero for epochs she's never touched.
+12. **`alt e < 104 — fully boosted`** — for epochs 100-103, Alice was boosted the entire epoch.
+13. **Fully-boosted note** — use `effBoosted = 3000` for the full `last[e] − lastSettled[e]` interval.
+14. **`else e == 104 — expiry split`**.
+15. **`SV10 → RSS: findScorePerStakeAt(42, 104, T0+30d)`** — binary search on `mid[] = [{T0+29d, S0+70e33}, {T0+31d, S0+150e33}, {T0+33d, S0+230e33}]`. Finds the *at-or-before* entry for ts=T0+30d → `{T0+29d, S0+70e33}`. Returns `S0+70e33`.
+16. **`RSS ⇢ SV10: atExpiry`** — the cumulative score-per-stake at the instant the boost dropped.
+17. **Boosted slice note** — earnings between `lastSettled[104]` and `atExpiry` happened while Alice's boost was still live → multiply by 3000.
+18. **Base slice note** — earnings between `atExpiry` and `last[104]` happened after the drop → multiply by 2000.
+19. **`getNodeEpochScore(e, 42) → nodeScore[e]`** — total score NodeAlpha accumulated in epoch `e` (numerator from §5.2/5.3).
+20. **`getEpochPool(1, e) → pool[e]`** — epoch `e`'s total reward pool (TRAC). The `1` is the reward-kind index (production knowledge rewards).
+21. **Gross note** — node's share of the global pool: `pool · nodeScore / allNodesScore`.
+22. **Net note** — subtract the operator fee (configurable percent) to get the delegator-splittable amount.
+23. **Epoch reward note** — Alice's share: `(her delegator score) / (node's total score) · net`. Dimensionally the two score values cancel in the ratio.
+24. **End loop**.
+25. **`SV10 → CSS: increaseRaw(1, rewardTotal)`** — auto-compound: rewards become new principal on the same position.
+26. **IncreaseRaw note 1** — `pos.raw` goes up by `rewardTotal`.
+27. **IncreaseRaw note 2** — also updates the running denominator (plus the expiry queue if the boost were still active).
+28. **IncreaseRaw note 3** — in this scenario Alice is post-expiry, so `effBoosted == effBase == new raw`, denominator bumps by the reward delta at 1x. Queue unchanged.
+29. **`addCumulativeRewardsClaimed(1, rewardTotal)`** — life-time reward counter on the position (for analytics; not for math).
+30. **`setLastClaimedEpoch(1, 104)`** — advance the cursor so future claims start at 105.
+31. **`ClaimV10` event** — off-chain consumers.
+
+> **Binary-search frequency.** In this entire lifecycle Alice's claim invokes `findScorePerStakeAt` **exactly once** — in epoch 104. Epochs 100-103 and 105+ take O(1) sentinel reads. The `mid[]` array grows with proof frequency (≈ one entry per 30 minutes), so `O(log n)` per binary search ≈ 9 SLOADs for a 7-day epoch with 30-minute proofs (≈336 proofs → log₂336 ≈ 8.4).
+
+---
 
 ### 5.5 Full lifecycle — Alice's stake → withdraw cycle
 
-This diagram threads every touchpoint of Alice's 30-day journey into one picture. Time flows top-to-bottom; labels on the right show wall-clock reality and ledger state.
+This diagram threads every touchpoint of Alice's 30-day journey into one picture. Time flows top-to-bottom; each shaded band is a different *phase* of her lifecycle.
 
 ```mermaid
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 20, 'actorMargin': 70 } } }%%
 sequenceDiagram
     autonumber
     actor Alice
@@ -355,57 +507,55 @@ sequenceDiagram
     participant SS as StakingStorage
     participant NodeOps as NodeAlpha ops
 
-    %% ─────────────────────── T0 — CREATE ───────────────────────
     rect rgb(235, 245, 255)
-    Note over Alice,NodeOps: T = T0 (2026-05-01). Alice stakes 2000 TRAC, tier 1 (30d, 1.5x).
+    Note over Alice,NodeOps: --- PHASE 1 — T=T0. Alice stakes 2000 TRAC at tier 1 (30d, 1.5x). ---
     Alice->>TOKEN: approve(StakingV10, 2000)
     Alice->>NFT: createConviction(42, 2000, 1)
-    NFT->>SV10: stake(Alice, tokenId=1, 42, 2000, 1)
+    NFT->>SV10: stake(Alice, 1, 42, 2000, 1)
     SV10->>TOKEN: transferFrom(Alice, StakingStorage, 2000)
     SV10->>CSS: createPosition(1, 42, 2000, 1, 1.5e18, 0)
-    Note right of CSS: positions[1].expiryTimestamp = T0 + 30d<br/>runningNodeEffectiveStake[42]: 5000 → 8000<br/>nodeExpiryTimes[42] = [T0+30d]<br/>nodeExpiryDrop[42][T0+30d] = 1000
+    Note over CSS: positions[1].expiryTimestamp = T0+30d. Running stake 5000→8000. Queue gets (T0+30d, drop=1000).
     end
 
-    %% ─────────────────── T ∈ [T0, T0+30d) — EARN ───────────────────
     rect rgb(230, 250, 230)
-    Note over NodeOps,RSS: Proofs land every ~30 min.<br/>Alice is boosted; denominator = 8000 for each proof.
-    loop proofs in epochs 100-103 (boost fully active)
-        NodeOps->>SV10: (submitProof via RandomSampling, shown in §5.2)
+    Note over NodeOps,RSS: --- PHASE 2 — T ∈ [T0, T0+30d). Alice is boosted. ---
+    loop proofs in epochs 100-103
+        NodeOps->>SV10: submitProof (detail in §5.2)
         SV10->>CSS: settleNodeTo(42, ts)
-        Note right of CSS: head cursor stays at T0+30d; no drain.
+        Note over CSS: ts < T0+30d → no drain. Running stake stays 8000.
         CSS-->>SV10: running = 8000
         SV10->>RSS: appendCheckpoint(42, e, ts, +Δ)
+        Note over RSS: Δ computed against denominator 8000.
     end
     end
 
-    %% ───────────────── T = T0 + 30d — BOOST EXPIRES ─────────────────
     rect rgb(255, 245, 225)
-    Note over NodeOps,CSS: T = T0 + 30d (day 2 of epoch 104). Alice's lock expires.<br/>Nothing happens on-chain yet — the drop is lazy.
+    Note over NodeOps,CSS: --- PHASE 3 — T = T0+30d. Lock expires. Nothing happens on-chain; drop is LAZY. Next proof (or any CSS mutator) will drain it. ---
     end
 
-    %% ─────────────── T ∈ (T0+30d, T0+35d) — DRAINED ────────────────
     rect rgb(230, 250, 230)
-    Note over NodeOps,RSS: Next proof after expiry triggers the drain.
+    Note over NodeOps,RSS: --- PHASE 4 — first proof after expiry triggers the drain. ---
     NodeOps->>SV10: submitProof(...)
     SV10->>CSS: settleNodeTo(42, ts ≥ T0+30d)
-    Note right of CSS: runningNodeEffectiveStake[42]: 8000 → 7000<br/>nodeExpiryHead[42]: 0 → 1
-    SV10->>RSS: appendCheckpoint(42, 104, ts, +Δ)   (Δ uses 7000)
-    Note over Alice,RSS: For the rest of epoch 104 and all of epoch 105,<br/>every proof divides score18 by 7000, not 8000.
+    Note over CSS: Queue head T0+30d ≤ ts → drain fires. Running 8000→7000. head 0→1.
+    SV10->>RSS: appendCheckpoint(42, 104, ts, +Δ)
+    Note over RSS: Δ now computed against denominator 7000. All subsequent proofs in epochs 104-105 also divide by 7000.
     end
 
-    %% ─────────────── T = T0 + 35d — WITHDRAW ───────────────
     rect rgb(255, 230, 230)
-    Note over Alice,SS: T = T0 + 35d. Alice calls withdraw — lock has been over for 5 days.
+    Note over Alice,SS: --- PHASE 5 — T = T0+35d. Alice withdraws. ---
     Alice->>NFT: withdraw(tokenId=1)
     NFT->>SV10: withdraw(Alice, 1)
-    SV10->>CSS: getPosition(1) → expiryTimestamp = T0+30d, block.timestamp ≥ expiry ✓
+    SV10->>CSS: getPosition(1)
+    Note over SV10: now ≥ expiryTimestamp → unlocked, withdraw permitted.
 
-    SV10->>SV10: _claim(1)   (auto-claim, see §5.4)
-    Note right of SV10: Single binary search into epoch 104's mid[].<br/>Every other epoch takes 2 SLOADs.
+    SV10->>SV10: _claim(1)
+    Note over SV10: Auto-claim first (see §5.4). Epoch 104 does ONE binary search; others are O(1).
 
-    SV10->>CSS: getPosition(1)  (re-read: raw may have grown via compound)
+    SV10->>CSS: getPosition(1)
+    Note over SV10: Re-read: raw may have grown via auto-compound.
     SV10->>CSS: deletePosition(1)
-    Note right of CSS: _settleNodeTo(42, now)<br/>runningNodeEffectiveStake[42]: 7000 → 5000 (−effBase=2000; boost was already dropped)<br/>Position is removed; token is burned by NFT after the return.
+    Note over CSS: _settleNodeTo no-ops (queue empty). Running stake 7000→5000 (subtracts effBase=raw). No expiry cancel needed (already drained). positions[1] cleared.
     SV10->>SS: transferStake(Alice, amount)
     SV10-->>NFT: Withdrawn(1, Alice, amount)
     NFT->>NFT: _burn(1)
@@ -413,11 +563,65 @@ sequenceDiagram
     end
 ```
 
+**Line-by-line walk-through (by phase):**
+
+**Phase 1 — stake creation:**
+
+1. **`Alice → TOKEN: approve(StakingV10, 2000)`** — ERC-20 approval so `StakingV10.stake` can pull Alice's TRAC.
+2. **`Alice → NFT: createConviction(42, 2000, 1)`** — open a tier-1 position on NodeAlpha with 2000 TRAC.
+3. **`NFT → SV10: stake(...)`** — wrapper forwards to the business layer.
+4. **`SV10 → TOKEN: transferFrom(Alice, StakingStorage, 2000)`** — TRAC moves into the vault.
+5. **`SV10 → CSS: createPosition(1, 42, 2000, 1, 1.5e18, 0)`** — CSS writes the authoritative record.
+6-9. **CSS state notes** — expiry timestamp set, running stake jumps to 8000, queue gets the 1000 drop scheduled at T0+30d.
+
+**Phase 2 — boosted earning:**
+
+10. **Loop: proofs across epochs 100-103** — abstraction over many proofs.
+11. **`NodeOps → SV10: submitProof`** — shorthand for §5.2's flow.
+12. **`SV10 → CSS: settleNodeTo(42, ts)`** — every proof settles first.
+13. **Queue-head note** — while `ts < T0+30d`, no entries are due → running stays 8000.
+14. **`CSS ⇢ SV10: running = 8000`** — denominator reads.
+15. **`SV10 → RSS: appendCheckpoint(...)`** — checkpoint with Δ computed at denominator 8000.
+16. **Δ note** — "computed against denominator 8000" is the key: Alice is being credited with her full boost.
+
+**Phase 3 — silent expiry:**
+
+17-19. **Phase 3 notes** — at T0+30d the lock conceptually expires. No transaction fires. The drop is **lazy**: it's recorded in the queue but not applied until the next `settleNodeTo` call. Deliberate — no actor pays gas to "poke" the expiry.
+
+**Phase 4 — first post-expiry proof drains:**
+
+20. **`NodeOps → SV10: submitProof(...)`** — next proof lands at some ts ≥ T0+30d.
+21. **`SV10 → CSS: settleNodeTo(42, ts)`**.
+22. **Drain note 1** — `queue[head].ts = T0+30d ≤ ts` → due.
+23. **Drain note 2** — running stake drops from 8000 to 7000.
+24. **Drain note 3** — head advances.
+25. **`SV10 → RSS: appendCheckpoint(...)`** — with Δ computed at denominator **7000**.
+26. **Post-drain note** — informational. For all subsequent proofs until someone else's boost expires, the denominator stays 7000.
+
+**Phase 5 — atomic withdraw:**
+
+27. **`Alice → NFT: withdraw(1)`**.
+28. **`NFT → SV10: withdraw(Alice, 1)`**.
+29. **`SV10 → CSS: getPosition(1)`** — re-read to check lock status.
+30. **Unlocked note** — `block.timestamp ≥ expiryTimestamp` ⇒ lock has elapsed, withdraw is permitted.
+31. **`SV10 → SV10: _claim(1)`** — auto-claim before draining the position. User gets rewards + principal in one tx.
+32-34. **Claim-cost notes** — epoch 104 is the only binary search; the rest is pure SLOAD math.
+35. **`SV10 → CSS: getPosition(1)`** — re-read after `_claim` because auto-compound may have grown `pos.raw`.
+36. **`SV10 → CSS: deletePosition(1)`** — remove Alice's contribution from every accumulator.
+37. **DeletePosition note 1** — `settleNodeTo` first (queue already drained, harmless).
+38. **DeletePosition note 2** — subtract `effBase = raw` from running stake (no boost to remove, since it was already dropped). 7000 → 5000.
+39. **DeletePosition note 3** — no expiry cancellation: the queue entry was already consumed in phase 4.
+40. **DeletePosition note 4** — `positions[1]` is wiped clean.
+41. **`SV10 → SS: transferStake(Alice, amount)`** — TRAC leaves the vault back to Alice. `amount = raw (with any compounded rewards)`.
+42. **`Withdrawn` event**.
+43. **`NFT: _burn(1)`** — the ERC-721 token is destroyed.
+44. **`NFT ⇢ Alice`** — transaction returns; Alice has her tokens.
+
 **What changed vs. pre-D26:**
 
-- In the red "WITHDRAW" block, `_claim` does **one** binary search (for epoch 104), not N iterations over proofs.
-- In the yellow "BOOST EXPIRES" block, there is **no on-chain side effect** at T = T0 + 30d. Pre-D26 needed either (a) a poke at the epoch boundary to finalize effective-stake diffs or (b) risked a "dormancy bomb" where a long idle interval required a linear walk to catch up.
-- In the green "EARN" block after expiry, the proof denominator is **7000** (post-boost), not 8000. Other delegators on NodeAlpha now see a correctly tighter denominator — Alice isn't double-dipping by inflating the pool divisor with phantom boost.
+- In PHASE 5, `_claim` does **one** binary search (for epoch 104), not N iterations over proofs.
+- In PHASE 3, there is **no on-chain side effect** at T = T0 + 30d. Pre-D26 needed either (a) a poke at the epoch boundary to finalize effective-stake diffs or (b) risked a "dormancy bomb" where a long idle interval required a linear walk to catch up.
+- In PHASE 4, the proof denominator is **7000** (post-boost), not 8000. Other delegators on NodeAlpha now see a correctly tighter denominator — Alice isn't double-dipping by inflating the pool divisor with phantom boost.
 
 ---
 

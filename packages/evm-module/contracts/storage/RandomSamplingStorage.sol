@@ -20,7 +20,20 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     //         Legacy `getNodeEpochScorePerStake` / `addToNodeEpochScorePerStake`
     //         / `setNodeEpochScorePerStake` preserved as adapters over the
     //         new structure. Scalar mapping removed.
-    string private constant _VERSION = "2.0.0";
+    // 3.0.0 — D26 code-review follow-ups (M6/M7/L6):
+    //         * `EpochIndex.firstScorePerStake36` removed. Under D26
+    //           `scorePerStake36` is epoch-local (accumulates from 0 per
+    //           epoch), so the sentinel was always 0 — one SSTORE slot
+    //           reclaimed per epoch first-write.
+    //         * `EpochIndex.firstInitialized` removed. It was set on first
+    //           write and never read for correctness; `isEpochFirstInitialized`
+    //           view is retired.
+    //         * `setLastScorePerStake` removed — test-only path that
+    //           could desynchronize `mid[tail]` from `lastScorePerStake36`
+    //           and silently corrupt claim math. Tests now drive state
+    //           through `appendCheckpoint`.
+    //         * `getEpochFirstScorePerStake` retired (always 0 under D26).
+    string private constant _VERSION = "3.0.0";
     uint8 public constant CHUNK_BYTE_SIZE = 32;
     Chronos public chronos;
 
@@ -47,19 +60,23 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     //     D26 — C.2 per-(identityId, epoch) score-per-stake index
     // ============================================================
     //
-    // `firstScorePerStake36` is seeded on the first write of an epoch from
-    // the PRIOR epoch's `lastScorePerStake36` (or 0 if prior was empty);
-    // `lastScorePerStake36` is kept strictly monotonic across the epoch.
-    // `mid` is appended once per proof (timestamped) so claim can binary-
-    // search for the scorePerStake at an arbitrary `ts` in the epoch
-    // (used when a delegator's boost expires mid-epoch).
+    // `lastScorePerStake36` is the epoch-end cumulative score-per-stake
+    // (strictly monotonic across the epoch). `mid` is appended once per
+    // proof (timestamped) so claim can binary-search for the scorePerStake
+    // at an arbitrary `ts` in the epoch (used when a delegator's boost
+    // expires mid-epoch).
+    //
+    // M6/M7 — the pre-3.0.0 layout carried a `firstScorePerStake36` +
+    // `firstInitialized` pair. Under D26, scorePerStake36 is epoch-local
+    // (accumulates from 0), so the "first" sentinel was always 0 and the
+    // "initialized" flag was set but never consulted. Both fields are
+    // removed; `findScorePerStakeAt` now returns 0 for timestamps before
+    // the first checkpoint (the natural default).
     struct Checkpoint {
         uint40 timestamp;
         uint216 scorePerStake36;
     }
     struct EpochIndex {
-        uint248 firstScorePerStake36; // packed w/ firstInitialized below
-        bool firstInitialized;
         uint256 lastScorePerStake36;
         Checkpoint[] mid;
     }
@@ -110,7 +127,6 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
         uint40 timestamp,
         uint256 scorePerStake36
     );
-    event EpochLastScorePerStakeSet(uint72 indexed identityId, uint256 indexed epoch, uint256 lastScorePerStake36);
     event EpochNodeDelegatorScoreAdded(
         uint256 indexed epoch,
         uint72 indexed identityId,
@@ -583,10 +599,9 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
      * @dev Legacy adapter retained for test harnesses (and any V8 emergency
      *      path) that used to write the per-epoch score-per-stake scalar
      *      directly. Routes through the new EpochIndex: bumps
-     *      `lastScorePerStake36` by `scorePerStakeToAdd`, seeds
-     *      `firstScorePerStake36` to 0 on first write, and appends / updates
-     *      a `Checkpoint` at `block.timestamp` so claim-time binary search
-     *      sees the new value.
+     *      `lastScorePerStake36` by `scorePerStakeToAdd`, and appends /
+     *      updates a `Checkpoint` at `block.timestamp` so claim-time
+     *      binary search sees the new value.
      */
     function addToNodeEpochScorePerStake(
         uint256 epoch,
@@ -594,9 +609,6 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
         uint256 scorePerStakeToAdd
     ) external onlyContracts {
         EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
-        if (!ei.firstInitialized) {
-            ei.firstInitialized = true;
-        }
         uint256 newLast = ei.lastScorePerStake36 + scorePerStakeToAdd;
         ei.lastScorePerStake36 = newLast;
         _upsertCheckpoint(ei, uint40(block.timestamp), newLast);
@@ -609,9 +621,6 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
      */
     function setNodeEpochScorePerStake(uint256 epoch, uint72 identityId, uint256 scorePerStake) external onlyContracts {
         EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
-        if (!ei.firstInitialized) {
-            ei.firstInitialized = true;
-        }
         ei.lastScorePerStake36 = scorePerStake;
         _upsertCheckpoint(ei, uint40(block.timestamp), scorePerStake);
         emit NodeEpochScorePerStakeSet(epoch, identityId, scorePerStake);
@@ -622,12 +631,11 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     // ============================================================
 
     /// @notice Append a timestamped checkpoint (or overwrite the last one if
-    ///         its timestamp equals `ts`) and set `lastScorePerStake36 = scorePerStake36`.
+    ///         its timestamp equals `ts`) and set
+    ///         `lastScorePerStake36 = scorePerStake36`.
     ///
     ///         `scorePerStake36` is **epoch-local** (accumulates from 0 per
-    ///         epoch), so `firstScorePerStake36` is always 0 — this helper
-    ///         auto-initializes the `firstInitialized` flag on first call so
-    ///         callers (submitProof) don't need a separate seeding step.
+    ///         epoch).
     function appendCheckpoint(
         uint72 identityId,
         uint256 epoch,
@@ -635,27 +643,18 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
         uint256 scorePerStake36
     ) external onlyContracts {
         EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
-        if (!ei.firstInitialized) {
-            ei.firstInitialized = true;
-            // `firstScorePerStake36` stays at its default 0.
-        }
         require(scorePerStake36 <= type(uint216).max, "Checkpoint overflow");
         ei.lastScorePerStake36 = scorePerStake36;
         _upsertCheckpoint(ei, ts, scorePerStake36);
         emit EpochCheckpointAppended(identityId, epoch, ts, scorePerStake36);
     }
 
-    /// @notice Overwrite `lastScorePerStake36` without touching `mid[]`.
-    ///         Normal submitProof path goes through `appendCheckpoint`; this
-    ///         helper exists for targeted writes (tests, corrections).
-    function setLastScorePerStake(uint72 identityId, uint256 epoch, uint256 value) external onlyContracts {
-        EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
-        if (!ei.firstInitialized) {
-            ei.firstInitialized = true;
-        }
-        ei.lastScorePerStake36 = value;
-        emit EpochLastScorePerStakeSet(identityId, epoch, value);
-    }
+    // L6 — `setLastScorePerStake` removed. It could desynchronize the
+    //      `mid[tail]` checkpoint from the `lastScorePerStake36` scalar
+    //      (breaking the `findScorePerStakeAt` monotonicity contract).
+    //      Tests that need to set state must go through `appendCheckpoint`
+    //      or `addToNodeEpochScorePerStake`, which keep both sides
+    //      consistent.
 
     function _upsertCheckpoint(EpochIndex storage ei, uint40 ts, uint256 value) internal {
         require(value <= type(uint216).max, "Checkpoint overflow");
@@ -675,16 +674,8 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     //          D26 — EpochIndex views (claim-time)
     // ============================================================
 
-    function getEpochFirstScorePerStake(uint72 identityId, uint256 epoch) external view returns (uint256) {
-        return nodeEpochIndex[identityId][epoch].firstScorePerStake36;
-    }
-
     function getEpochLastScorePerStake(uint72 identityId, uint256 epoch) external view returns (uint256) {
         return nodeEpochIndex[identityId][epoch].lastScorePerStake36;
-    }
-
-    function isEpochFirstInitialized(uint72 identityId, uint256 epoch) external view returns (bool) {
-        return nodeEpochIndex[identityId][epoch].firstInitialized;
     }
 
     function getEpochCheckpointCount(uint72 identityId, uint256 epoch) external view returns (uint256) {
@@ -709,8 +700,10 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     function findScorePerStakeAt(uint72 identityId, uint256 epoch, uint40 ts) external view returns (uint256) {
         EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
         uint256 n = ei.mid.length;
+        // M6 — no first-sentinel anymore; absent checkpoint → 0 (natural
+        //      pre-any-proof default under D26's epoch-local accumulator).
         if (n == 0) {
-            return ei.firstScorePerStake36;
+            return 0;
         }
         // Largest i with mid[i].timestamp <= ts via binary search.
         uint256 lo = 0;
@@ -724,7 +717,7 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
             }
         }
         if (lo == 0) {
-            return ei.firstScorePerStake36;
+            return 0;
         }
         return ei.mid[lo - 1].scorePerStake36;
     }

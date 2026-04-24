@@ -80,7 +80,18 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           `redelegate` goes through `updateOnRedelegate` (tokenId +
     //           expiryEpoch preserved), `withdraw` is a single-tx exit
     //           with auto-claim.
-    string private constant _VERSION = "2.2.0";
+    //   2.3.0 — D26 code-review follow-ups:
+    //           * H1 — `_claim` dormancy bomb fixed: rewardless epochs
+    //             early-continue (no fee-flag SSTORE, no per-epoch SLOAD
+    //             storm).
+    //           * H2 — expiry-split reward math extracted into a shared
+    //             `_delegatorIncrementForEpoch` helper; `_claim` and
+    //             `_prepareForStakeChangeV10` share one code path.
+    //           * L3 — `lockTier` widened from `uint8` to `uint40` across
+    //             the public surface so admins can add tier ids above 255.
+    //           * L11 — `createPosition` no longer takes `multiplier18`;
+    //             CSS reads it from the tier table.
+    string private constant _VERSION = "2.3.0";
 
     // ========================================================================
     // Constants
@@ -117,9 +128,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address indexed staker,
         uint72 indexed identityId,
         uint96 amount,
-        uint8 lockTier
+        uint40 lockTier
     );
-    event Relocked(uint256 indexed tokenId, uint8 newLockTier, uint64 newExpiryTimestamp);
+    event Relocked(uint256 indexed tokenId, uint40 newLockTier, uint64 newExpiryTimestamp);
     event Redelegated(uint256 indexed tokenId, uint72 indexed oldIdentityId, uint72 indexed newIdentityId);
     /// @notice Authoritative atomic-withdraw event. `amount` is the total
     ///         TRAC paid out to `staker` (post-auto-claim `raw`). The NFT
@@ -137,7 +148,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 indexed identityId,
         uint96 stakeBaseAbsorbed,
         uint96 pendingAbsorbed,
-        uint8 lockTier,
+        uint40 lockTier,
         bool isAdmin
     );
 
@@ -248,17 +259,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 tokenId,
         uint72 identityId,
         uint96 amount,
-        uint8 lockTier
+        uint40 lockTier
     ) external onlyConvictionNFT {
         if (amount == 0) revert ZeroAmount();
         if (!profileStorage.profileExists(identityId)) revert ProfileDoesNotExist();
 
-        // Tier 0 (rest state, 1x multiplier, no lock) is a first-class valid
-        // mint target — every V10 staking position is an NFT, including
-        // no-lock liquid stake. Off-ladder tiers (2, 4, 7, 13, ...) are
-        // rejected by CSS's `expectedMultiplier18` below ("Invalid lock"),
-        // and also fail-fast at the NFT wrapper layer via `_convictionMultiplier`.
-        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockTier));
+        // Tier-existence / activeness is checked by CSS.createPosition.
 
         uint256 maxStake = uint256(parametersStorage.maximumStake());
         uint256 totalNodeStakeAfter = convictionStorage.getNodeStakeV10(identityId) + uint256(amount);
@@ -271,12 +277,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // The NFT wrapper never holds funds.
         token.transferFrom(staker, address(stakingStorage), amount);
 
+        // L11 — multiplier18 is no longer passed in; CSS reads it from the
+        //       tier table (single source of truth).
         convictionStorage.createPosition(
             tokenId,
             identityId,
             amount,
-            uint40(lockTier),
-            multiplier18,
+            lockTier,
             0 // fresh V10 stake: no migrationEpoch
         );
 
@@ -314,7 +321,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address staker,
         uint256 oldTokenId,
         uint256 newTokenId,
-        uint8 newLockTier
+        uint40 newLockTier
     ) external onlyConvictionNFT {
         staker; // unused — see file-header rationale.
 
@@ -322,24 +329,19 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (pos.identityId == 0) revert PositionNotFound();
         _requireFullyClaimed(pos);
 
-        uint256 currentEpoch = chronos.getCurrentEpoch();
         // D26 — timestamp-accurate lock gate. Tier-0 (expiryTimestamp == 0)
         // is already in rest state; any non-zero expiry must have elapsed.
         if (pos.expiryTimestamp != 0 && block.timestamp < uint256(pos.expiryTimestamp)) revert LockStillActive();
 
-        _prepareForStakeChangeV10(currentEpoch, oldTokenId, pos.identityId);
+        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), oldTokenId, pos.identityId);
 
-        uint64 newMultiplier18 = convictionStorage.expectedMultiplier18(uint40(newLockTier));
-
-        // D23 — atomic replace. Same identity, new tier/multiplier/expiry.
-        // CSS preserves `cumulativeRewardsClaimed`, `lastClaimedEpoch`,
-        // `migrationEpoch` from `oldTokenId` into `newTokenId`.
+        // M1 + L11 — same-identity relock. CSS reads the multiplier from the
+        //            tier table; no need to pass it in.
         convictionStorage.createNewPositionFromExisting(
             oldTokenId,
             newTokenId,
             pos.identityId,
-            uint40(newLockTier),
-            newMultiplier18
+            newLockTier
         );
 
         ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(newTokenId);
@@ -558,12 +560,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         uint256 rewardTotal = 0;
         for (uint256 e = claimFromEpoch; e <= claimToEpoch; e++) {
-            // D26 — score-per-stake via EpochIndex sentinels. For past
-            // epochs, `lastScorePerStake36[e]` is the definitive epoch-end
-            // value. `lastDelegatorSettled[e]` is the scorePerStake cursor
-            // at the last _prepareForStakeChangeV10 call during epoch e
-            // (zero if never).
+            // H1 — fast path for rewardless epochs. `getEpochLastScorePerStake`
+            // is 0 iff no proof was ever submitted on this node in epoch `e`.
+            // When that is the case: no node score, no delegator score, no
+            // operator-fee math, nothing to settle. Skipping here collapses a
+            // dormant-epoch iteration from ~25k gas (4 SLOADs + 1 SSTORE for
+            // the fee flag) to ~2k gas (single SLOAD + continue). This is
+            // what keeps long-dormant tier-0 positions claimable; see the
+            // dormancy-bomb finding in CODE_REVIEW_V10_D26.md §H1.
             uint256 scorePerStake36 = randomSamplingStorage.getEpochLastScorePerStake(identityId, e);
+            if (scorePerStake36 == 0) continue;
+
             uint256 settledDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
                 e,
                 identityId,
@@ -572,42 +579,27 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             uint256 lastSettledIndex36 = randomSamplingStorage
                 .getDelegatorLastSettledNodeEpochScorePerStake(e, identityId, delegatorKey);
 
-            uint256 unsettledDelegatorScore18 = 0;
-            if (scorePerStake36 > lastSettledIndex36) {
-                if (expiryTs == 0 || e < expiryEpoch) {
-                    // Boost fully active in this epoch (or no lock: tier-0).
-                    uint256 eff = (expiryTs == 0) ? effBase : effBoosted;
-                    unsettledDelegatorScore18 = (eff * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
-                } else if (e > expiryEpoch) {
-                    // Boost already dropped for the whole epoch.
-                    unsettledDelegatorScore18 = (effBase * (scorePerStake36 - lastSettledIndex36)) / SCALE18;
-                } else {
-                    // e == expiryEpoch. One binary search into the epoch's
-                    // checkpoint array gives scorePerStake at expiryTs. If
-                    // the delegator's last settle happened BEFORE expiry,
-                    // split the earning interval at expiryTs.
-                    uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
-                        identityId,
-                        e,
-                        uint40(expiryTs)
-                    );
-                    if (scoreAtExpiry > lastSettledIndex36) {
-                        unsettledDelegatorScore18 =
-                            (effBoosted * (scoreAtExpiry - lastSettledIndex36)) /
-                            SCALE18 +
-                            (effBase * (scorePerStake36 - scoreAtExpiry)) /
-                            SCALE18;
-                    } else {
-                        unsettledDelegatorScore18 =
-                            (effBase * (scorePerStake36 - lastSettledIndex36)) /
-                            SCALE18;
-                    }
-                }
-            }
+            // H2 — expiry-split reward integration shared with
+            //      `_prepareForStakeChangeV10`.
+            uint256 unsettledDelegatorScore18 = _delegatorIncrementForEpoch(
+                e,
+                identityId,
+                scorePerStake36,
+                lastSettledIndex36,
+                effBoosted,
+                effBase,
+                expiryTs,
+                expiryEpoch
+            );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
             uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
 
+            // H1 — on epochs with `scorePerStake36 > 0 && nodeScore18 == 0` we
+            // still fall through here. That combination is essentially
+            // impossible in production (score-per-stake can only be advanced
+            // by submitProof, which also adds to node score), but defensive:
+            // there is no fee to collect and no reward, so epochReward stays 0.
             uint256 epochReward = 0;
             if (nodeScore18 > 0) {
                 uint256 netNodeRewards;
@@ -633,12 +625,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 if (delegatorScore18 > 0) {
                     epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
                 }
-            }
-
-            // Unconditional fee-flag write for rewardless epochs so
-            // Profile.updateOperatorFee is never blocked on stale state.
-            if (!convictionStorage.isOperatorFeeClaimedForEpoch(identityId, e)) {
-                convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
             }
 
             rewardTotal += epochReward;
@@ -695,7 +681,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address staker,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) external onlyConvictionNFT {
         _convertToNFT(staker, tokenId, identityId, lockTier, false);
     }
@@ -715,7 +701,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address delegator,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) external onlyConvictionNFT {
         _convertToNFT(delegator, tokenId, identityId, lockTier, true);
     }
@@ -772,7 +758,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address delegator,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockTier,
+        uint40 lockTier,
         bool isAdmin
     ) internal {
         uint256 currentEpoch = chronos.getCurrentEpoch();
@@ -809,13 +795,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             if (v10NodeAfter > maxStake) revert MaxStakeExceeded();
         }
 
-        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockTier));
+        // L11 — multiplier18 is no longer passed; CSS reads it from the tier table.
         convictionStorage.createPosition(
             tokenId,
             identityId,
             total,
-            uint40(lockTier),
-            multiplier18,
+            lockTier,
             uint32(currentEpoch) // D6 — retroactive claim boundary
         );
 
@@ -887,29 +872,16 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             uint256 effBoosted = (rawU * mult18) / SCALE18;
             uint256 effBase = rawU;
 
-            if (expiryTs == 0 || epoch < expiryEpoch) {
-                uint256 eff = (expiryTs == 0) ? effBase : effBoosted;
-                scoreEarned18 = (eff * (nodeScorePerStake36 - lastSettled)) / SCALE18;
-            } else if (epoch > expiryEpoch) {
-                scoreEarned18 = (effBase * (nodeScorePerStake36 - lastSettled)) / SCALE18;
-            } else {
-                // epoch == expiryEpoch: split at expiryTs using the
-                // checkpoint array on RSS.
-                uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
-                    identityId,
-                    epoch,
-                    uint40(expiryTs)
-                );
-                if (scoreAtExpiry > lastSettled) {
-                    scoreEarned18 =
-                        (effBoosted * (scoreAtExpiry - lastSettled)) /
-                        SCALE18 +
-                        (effBase * (nodeScorePerStake36 - scoreAtExpiry)) /
-                        SCALE18;
-                } else {
-                    scoreEarned18 = (effBase * (nodeScorePerStake36 - lastSettled)) / SCALE18;
-                }
-            }
+            scoreEarned18 = _delegatorIncrementForEpoch(
+                epoch,
+                identityId,
+                nodeScorePerStake36,
+                lastSettled,
+                effBoosted,
+                effBase,
+                expiryTs,
+                expiryEpoch
+            );
         }
 
         if (scoreEarned18 > 0) {
@@ -923,5 +895,74 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         );
 
         return currentDelegatorScore18 + scoreEarned18;
+    }
+
+    /**
+     * @dev H2 — shared D26 expiry-split reward integration. Returns the
+     *      delegator's earned score increment (18-decimals) across the
+     *      settlement window `(lastSettled, current]` in epoch `epoch`,
+     *      honoring the position's boost transition at `expiryTs`.
+     *
+     * Cases, in order:
+     *   * `current <= lastSettled`       → nothing to integrate.
+     *   * `expiryTs == 0`                → tier-0 rest state; no boost
+     *                                      transition ever. Use `effBase`.
+     *   * `epoch < expiryEpoch`          → boost fully active in epoch.
+     *                                      Use `effBoosted`.
+     *   * `epoch > expiryEpoch`          → boost already dropped for the
+     *                                      whole epoch. Use `effBase`.
+     *   * `epoch == expiryEpoch` with
+     *     `effBoosted == effBase`        → M4: boost delta is zero (1x
+     *                                      "locked" tier). Skip the
+     *                                      binary search, integrate with
+     *                                      `effBase`.
+     *   * `epoch == expiryEpoch` with
+     *     `effBoosted > effBase`         → one binary search into the
+     *                                      epoch's checkpoint array gives
+     *                                      scorePerStake at the exact
+     *                                      expiry second; integrate the
+     *                                      left half at boosted rate and
+     *                                      the right half at base rate.
+     *                                      `scoreAtExpiry` below the
+     *                                      delegator cursor collapses
+     *                                      back to the base-rate path.
+     */
+    function _delegatorIncrementForEpoch(
+        uint256 epoch,
+        uint72 identityId,
+        uint256 current,
+        uint256 lastSettled,
+        uint256 effBoosted,
+        uint256 effBase,
+        uint256 expiryTs,
+        uint256 expiryEpoch
+    ) internal view returns (uint256) {
+        if (current <= lastSettled) return 0;
+
+        if (expiryTs == 0 || epoch < expiryEpoch) {
+            uint256 eff = expiryTs == 0 ? effBase : effBoosted;
+            return (eff * (current - lastSettled)) / SCALE18;
+        }
+        if (epoch > expiryEpoch) {
+            return (effBase * (current - lastSettled)) / SCALE18;
+        }
+        // epoch == expiryEpoch.
+        if (effBoosted == effBase) {
+            // M4 — degenerate tier (duration>0, mult==1x). No boost delta at
+            //      expiry, so no split is needed and we skip the binary
+            //      search.
+            return (effBase * (current - lastSettled)) / SCALE18;
+        }
+        uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
+            identityId,
+            epoch,
+            uint40(expiryTs)
+        );
+        if (scoreAtExpiry > lastSettled) {
+            return
+                (effBoosted * (scoreAtExpiry - lastSettled)) / SCALE18 +
+                (effBase * (current - scoreAtExpiry)) / SCALE18;
+        }
+        return (effBase * (current - lastSettled)) / SCALE18;
     }
 }

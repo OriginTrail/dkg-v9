@@ -121,9 +121,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       },
       {
         "indexed": false,
@@ -171,9 +171,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "newLockTier",
-        "type": "uint8"
+        "type": "uint40"
       },
       {
         "indexed": false,
@@ -233,9 +233,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "Staked",
@@ -297,9 +297,9 @@
         "type": "uint72"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "adminConvertToNFT",
@@ -490,9 +490,9 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "newLockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "relock",
@@ -518,9 +518,9 @@
         "type": "uint72"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "selfConvertToNFT",
@@ -603,9 +603,9 @@
         "type": "uint96"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "stake",

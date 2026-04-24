@@ -226,12 +226,12 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       NFT.connect(accounts[0]).createConviction(identityId, amount, 12),
     )
       .to.emit(NFT, 'PositionCreated')
-      .withArgs(accounts[0].address, 0n, identityId, amount, 12)
+      .withArgs(accounts[0].address, 1n, identityId, amount, 12)
       .and.to.emit(StakingV10Contract, 'Staked')
-      .withArgs(0n, accounts[0].address, identityId, amount, 12);
+      .withArgs(1n, accounts[0].address, identityId, amount, 12);
 
     // NFT minted (tokenId 0).
-    expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
     expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
     // TRAC moved in one hop: staker → StakingStorage (shared vault). NFT
@@ -256,7 +256,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     );
 
     // ConvictionStakingStorage position carries the 6x tier.
-    const pos = await ConvictionStakingStorageContract.getPosition(0);
+    const pos = await ConvictionStakingStorageContract.getPosition(1);
     expect(pos.identityId).to.equal(identityId);
     expect(pos.raw).to.equal(amount);
     expect(pos.lockTier).to.equal(12);
@@ -324,15 +324,15 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       expectedReward,
     );
 
-    await expect(NFT.connect(accounts[0]).claim(0))
+    await expect(NFT.connect(accounts[0]).claim(1))
       .to.emit(StakingV10Contract, 'RewardsClaimed')
-      .withArgs(0n, expectedReward);
+      .withArgs(1n, expectedReward);
 
     // D19 — rewards compound directly into `raw`; no separate `rewards`
     // bucket exists anymore. `cumulativeRewardsClaimed` is the running
     // total of every reward ever banked into this position (stat only,
     // not used in any settlement math).
-    const pos = await ConvictionStakingStorageContract.getPosition(0);
+    const pos = await ConvictionStakingStorageContract.getPosition(1);
     expect(pos.raw).to.equal(amount + expectedReward);
     expect(pos.cumulativeRewardsClaimed).to.equal(expectedReward);
   });
@@ -374,7 +374,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     // post-claim value. Rather than trying to predict it here, read it
     // back via the token-balance delta and the CSS state.
     const stakerBalBefore = await Token.balanceOf(accounts[0].address);
-    await NFT.connect(accounts[0]).withdraw(0);
+    await NFT.connect(accounts[0]).withdraw(1);
     const stakerBalAfter = await Token.balanceOf(accounts[0].address);
 
     // TRAC refund is at least the original principal (rewards compound
@@ -386,10 +386,10 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
     ).to.equal(0n);
     // CSS position deleted.
-    const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+    const posAfter = await ConvictionStakingStorageContract.getPosition(1);
     expect(posAfter.identityId).to.equal(0n);
     // NFT burned → ownerOf reverts.
-    await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+    await expect(NFT.ownerOf(1)).to.be.revertedWithCustomError(
       NFT,
       'ERC721NonexistentToken',
     );
@@ -464,9 +464,9 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     // staker-initiated self-migration via the NFT wrapper.
     await expect(NFT.connect(accounts[0]).selfMigrateV8(identityId, 12))
       .to.emit(NFT, 'ConvertedFromV8')
-      .withArgs(accounts[0].address, 0n, identityId, 12, false)
+      .withArgs(accounts[0].address, 1n, identityId, 12, false)
       .and.to.emit(StakingV10Contract, 'ConvertedFromV8')
-      .withArgs(accounts[0].address, 0n, identityId, amount, 0n, 12, false);
+      .withArgs(accounts[0].address, 1n, identityId, amount, 0n, 12, false);
 
     // V8 bucket drained.
     expect(
@@ -476,7 +476,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     // D15 — V10 position lives in ConvictionStakingStorage. V10 does not
     // write a mirror row into StakingStorage under the tokenId key; V10
     // aggregates live on CSS.
-    const pos = await ConvictionStakingStorageContract.getPosition(0);
+    const pos = await ConvictionStakingStorageContract.getPosition(1);
     expect(pos.raw).to.equal(amount);
     expect(pos.lockTier).to.equal(12);
     expect(pos.multiplier18).to.equal(SIX_X);
@@ -490,6 +490,6 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     ).to.equal(nodeStakeV10Before + amount);
 
     // NFT owned by migrator.
-    expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
   });
 });

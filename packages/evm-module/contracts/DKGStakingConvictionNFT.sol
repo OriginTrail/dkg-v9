@@ -2,7 +2,6 @@
 
 pragma solidity ^0.8.20;
 
-import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
@@ -66,13 +65,31 @@ import {HubLib} from "./libraries/HubLib.sol";
  *          accounting stays intact across the burn-mint.
  *        - `redelegate` (D25): tokenId is STABLE — no mint, no burn,
  *          only `pos.identityId` mutates on CSS via `updateOnRedelegate`.
- *          `expiryEpoch` is preserved: the lock clock keeps ticking.
+ *          `expiryTimestamp` is preserved: the lock clock keeps ticking.
  *        - `withdraw` (D14): atomic. Burns `tokenId` after CSS deletes
  *          the position and TRAC is released to the owner.
  */
-contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
-    string private constant _NAME = "DKGStakingConvictionNFT";
-    string private constant _VERSION = "1.1.0";
+/// @dev M5 — this contract does NOT implement `INamed`. ERC-721's `name()`
+///      already occupies that function selector with a different contract —
+///      the collection display name returned to wallets — so an `INamed`
+///      implementation would collide. Use `contractName()` below for the
+///      dev-facing contract id (matches other V10 contracts' INamed value).
+contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
+    string private constant _CONTRACT_NAME = "DKGStakingConvictionNFT";
+    // 1.1.0 — initial V10 NFT wrapper.
+    // 1.2.0 — D26 code-review follow-ups:
+    //         * M5 — `name()` now returns the ERC-721 collection name
+    //           (`"DKG Staker Conviction"`) as ERC-721 consumers expect;
+    //           the dev-facing contract id is exposed via `contractName()`.
+    //           `INamed` inheritance removed to avoid the selector collision.
+    //         * L1 — stale `expiryEpoch` references scrubbed from NatSpec.
+    //         * L2 — `nextTokenId` starts at 1 so `tokenId == 0` is a
+    //           guaranteed sentinel ("no position").
+    //         * L3 — `lockTier` widened to `uint40` across all entry
+    //           points and events.
+    //         * L8 — `identityId != 0` guard added on mint paths so
+    //           ambiguous "zero-node" mints fail fast at the wrapper.
+    string private constant _VERSION = "1.2.0";
 
     // ========================================================================
     // Constants
@@ -102,10 +119,11 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // Storage
     // ========================================================================
 
-    /// @notice Monotonic token id counter. First mint is tokenId 0 (no
-    ///         sentinel reservation — `ownerOf(0)` reverts before mint, and
-    ///         every consumer keys on `positions[tokenId].raw > 0` as the
-    ///         liveness check).
+    /// @notice Monotonic token id counter. The first mint produces tokenId 1
+    ///         (L2 — tokenId 0 is reserved as a sentinel so `ownerOf(0)` is
+    ///         always "unambiguously nothing"). `++nextTokenId` bumps the
+    ///         counter before use, so `nextTokenId == N` means "N positions
+    ///         have been minted (ever)".
     uint256 public nextTokenId;
 
     // ========================================================================
@@ -114,7 +132,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
 
     /// @notice Emitted by `createConviction` and `convertToNFT` after the
     ///         NFT is minted. The authoritative position-created event (with
-    ///         raw / expiryEpoch / multiplier18) is emitted by
+    ///         raw / expiryTimestamp / multiplier18) is emitted by
     ///         `ConvictionStakingStorage.createPosition` via `StakingV10.stake`;
     ///         this wrapper-layer event is kept so off-chain indexers that
     ///         watch the NFT contract alone still see the mint.
@@ -123,7 +141,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint256 indexed tokenId,
         uint72 indexed identityId,
         uint96 amount,
-        uint8 lockTier
+        uint40 lockTier
     );
 
     /// @notice Emitted by `relock` after the old NFT is burned and a fresh
@@ -134,11 +152,11 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     event PositionRelocked(
         uint256 indexed oldTokenId,
         uint256 indexed newTokenId,
-        uint8 newLockTier
+        uint40 newLockTier
     );
 
     /// @notice Emitted by `redelegate` after the position's identity is
-    ///         mutated in place. D25 — tokenId, `expiryEpoch`, lock tier,
+    ///         mutated in place. D25 — tokenId, `expiryTimestamp`, lock tier,
     ///         multiplier, and reward cursor are all preserved; only the
     ///         node assignment changes. Global totals are invariant; only
     ///         per-node effective stake moves. Authoritative event (same
@@ -172,7 +190,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         address indexed delegator,
         uint256 indexed tokenId,
         uint72 indexed identityId,
-        uint8 lockTier,
+        uint40 lockTier,
         bool isAdmin
     );
 
@@ -197,6 +215,11 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     error ZeroAmount();
     /// @notice Thrown by `adminMigrateV8Batch` when the input array is empty.
     error EmptyBatch();
+    /// @notice L8 — rejected at the wrapper layer when a mint-path or
+    ///         redelegate call would otherwise forward a zero identity to
+    ///         StakingV10 (which uses `identityId == 0` internally as the
+    ///         "no position" sentinel).
+    error InvalidIdentityId();
 
     // ========================================================================
     // Constructor + initialize
@@ -221,8 +244,12 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         tokenContract = IERC20(hub.getContractAddress("Token"));
     }
 
-    function name() public pure virtual override(INamed, ERC721) returns (string memory) {
-        return _NAME;
+    // M5 — `name()` (ERC-721) is deliberately NOT overridden; it returns the
+    //      constructor-supplied collection name ("DKG Staker Conviction")
+    //      that wallets display. The dev-facing contract id lives on
+    //      `contractName()`.
+    function contractName() external pure returns (string memory) {
+        return _CONTRACT_NAME;
     }
 
     function version() external pure virtual returns (string memory) {
@@ -277,7 +304,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     //     - _convertToNFT(_, _, 0)   : V8 migrants landing at rest state.
     //     - any caller reading a live position's current tier after its
     //       lock has expired back to the rest state.
-    //   Semantics: 1.0x multiplier, `expiryEpoch == 0` (permanent, no
+    //   Semantics: 1.0x multiplier, `expiryTimestamp == 0` (permanent, no
     //   boost decay ever fires), TRAC withdrawable at any time via the
     //   atomic `withdraw` path (D14 — no delay, the lock IS the delay
     //   and tier 0 has no lock).
@@ -335,8 +362,9 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function createConviction(
         uint72 identityId,
         uint96 amount,
-        uint8 lockTier
+        uint40 lockTier
     ) external returns (uint256 tokenId) {
+        if (identityId == 0) revert InvalidIdentityId();
         if (amount == 0) revert ZeroAmount();
         // Fail-fast on tiers that don't exist in `CSS._tiers` (e.g. 2, 4,
         // 7, 13): `_convictionMultiplier` reverts `InvalidLockTier()` when
@@ -347,7 +375,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         // `_requireActiveTier` (fresh stakes only — migrationEpoch == 0).
         _convictionMultiplier(lockTier);
 
-        tokenId = nextTokenId++;
+        tokenId = ++nextTokenId;
         _mint(msg.sender, tokenId);
         stakingV10.stake(msg.sender, tokenId, identityId, amount, lockTier);
 
@@ -358,7 +386,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///         tier. Raw stake unchanged; multiplier + expiry shift.
     ///
     /// @dev D21 — NFTs are ephemeral. Relock burns the old NFT and mints a
-    ///      fresh one at `newTokenId = nextTokenId++`. `StakingV10.relock`
+    ///      fresh one at `newTokenId = ++nextTokenId`. `StakingV10.relock`
     ///      drives the D23 `createNewPositionFromExisting` primitive on CSS,
     ///      which preserves `cumulativeRewardsClaimed`, `lastClaimedEpoch`,
     ///      and `migrationEpoch` on the new tokenId; indexers that need to
@@ -375,7 +403,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///      Burn-after-forward: we burn `oldTokenId` AFTER CSS has moved
     ///      the position across, so a mid-call revert leaves BOTH NFT and
     ///      position state intact at the old tokenId.
-    function relock(uint256 oldTokenId, uint8 newLockTier) external returns (uint256 newTokenId) {
+    function relock(uint256 oldTokenId, uint40 newLockTier) external returns (uint256 newTokenId) {
         if (ownerOf(oldTokenId) != msg.sender) revert NotPositionOwner();
         // Fail-fast on unregistered tiers (e.g. 2, 4, 7). Tier 0 is valid:
         // relock to the rest state is a legitimate post-expiry opt-out to
@@ -385,7 +413,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         // since been retired.
         _convictionMultiplier(newLockTier);
 
-        newTokenId = nextTokenId++;
+        newTokenId = ++nextTokenId;
         _mint(msg.sender, newTokenId);
         stakingV10.relock(msg.sender, oldTokenId, newTokenId, newLockTier);
         _burn(oldTokenId);
@@ -402,7 +430,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     /// @dev D25 — in-place node swap. Unlike `relock` (which burns and
     ///      mints because tier / multiplier / expiry all change), a
     ///      redelegation is a routing decision: the lock clock keeps
-    ///      ticking on the same `expiryEpoch`, the reward cursor
+    ///      ticking on the same `expiryTimestamp`, the reward cursor
     ///      (`lastClaimedEpoch`, `cumulativeRewardsClaimed`,
     ///      `migrationEpoch`) carries through unchanged, and the tokenId
     ///      itself persists so wallets and marketplaces see a stable
@@ -411,6 +439,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///      and pending expiry deltas across at `currentEpoch`.
     function redelegate(uint256 tokenId, uint72 newIdentityId) external {
         if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        if (newIdentityId == 0) revert InvalidIdentityId();
         // Capture the pre-call `identityId` so the wrapper-layer event can
         // surface both endpoints.
         uint72 oldIdentityId = convictionStakingStorage.getPosition(tokenId).identityId;
@@ -474,8 +503,9 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///         and drains their V8 address-keyed delegation on `identityId`.
     function selfMigrateV8(
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) external returns (uint256 tokenId) {
+        if (identityId == 0) revert InvalidIdentityId();
         // Fail-fast on unregistered tiers. Tier 0 is valid for V8→V10
         // migration: migrants land at the rest-state tier (1x, no lock)
         // when they want their full balance liquid post-migration.
@@ -484,7 +514,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         // tier they originally committed to.
         _convictionMultiplier(lockTier);
 
-        tokenId = nextTokenId++;
+        tokenId = ++nextTokenId;
         _mint(msg.sender, tokenId);
         stakingV10.selfConvertToNFT(msg.sender, tokenId, identityId, lockTier);
 
@@ -497,8 +527,9 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function adminMigrateV8(
         address delegator,
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) external onlyOwnerOrMultiSigOwner returns (uint256 tokenId) {
+        if (identityId == 0) revert InvalidIdentityId();
         tokenId = _adminMigrateV8Single(delegator, identityId, lockTier);
     }
 
@@ -516,8 +547,9 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function adminMigrateV8Batch(
         address[] calldata delegators,
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) external onlyOwnerOrMultiSigOwner returns (uint256[] memory tokenIds) {
+        if (identityId == 0) revert InvalidIdentityId();
         uint256 n = delegators.length;
         if (n == 0) revert EmptyBatch();
         // Fail-fast on invalid tier BEFORE the loop so we don't half-mint.
@@ -545,10 +577,10 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function _adminMigrateV8Single(
         address delegator,
         uint72 identityId,
-        uint8 lockTier
+        uint40 lockTier
     ) internal returns (uint256 tokenId) {
         _convictionMultiplier(lockTier);
-        tokenId = nextTokenId++;
+        tokenId = ++nextTokenId;
         _mint(delegator, tokenId);
         stakingV10.adminConvertToNFT(delegator, tokenId, identityId, lockTier);
         emit ConvertedFromV8(delegator, tokenId, identityId, lockTier, true);

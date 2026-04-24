@@ -141,6 +141,11 @@
   },
   {
     "inputs": [],
+    "name": "InvalidIdentityId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidLockTier",
     "type": "error"
   },
@@ -243,9 +248,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       },
       {
         "indexed": false,
@@ -299,9 +304,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "PositionCreated",
@@ -349,9 +354,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "newLockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "PositionRelocked",
@@ -427,9 +432,9 @@
         "type": "uint72"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "adminMigrateV8",
@@ -456,9 +461,9 @@
         "type": "uint72"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "adminMigrateV8Batch",
@@ -550,6 +555,19 @@
   },
   {
     "inputs": [],
+    "name": "contractName",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "convictionStakingStorage",
     "outputs": [
       {
@@ -574,9 +592,9 @@
         "type": "uint96"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "createConviction",
@@ -676,7 +694,7 @@
         "type": "string"
       }
     ],
-    "stateMutability": "pure",
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -776,9 +794,9 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "newLockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "relock",
@@ -851,9 +869,9 @@
         "type": "uint72"
       },
       {
-        "internalType": "uint8",
+        "internalType": "uint40",
         "name": "lockTier",
-        "type": "uint8"
+        "type": "uint40"
       }
     ],
     "name": "selfMigrateV8",

@@ -198,14 +198,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Wrapper event mirrors the mint.
       await expect(tx)
         .to.emit(NFT, 'PositionCreated')
-        .withArgs(accounts[0].address, 0n, identityId, amount, 0);
+        .withArgs(accounts[0].address, 1n, identityId, amount, 0);
 
       // ERC721 ownership — tier-0 stakers get an NFT like anyone else.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
       // Position semantics: 1x multiplier, permanent (expiryTimestamp == 0).
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(0);
@@ -277,13 +277,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Wrapper-layer event mirrors the mint; authoritative event from StakingV10.
       await expect(tx)
         .to.emit(NFT, 'PositionCreated')
-        .withArgs(accounts[0].address, 0n, identityId, amount, 12);
+        .withArgs(accounts[0].address, 1n, identityId, amount, 12);
       await expect(tx)
         .to.emit(StakingV10Contract, 'Staked')
-        .withArgs(0n, accounts[0].address, identityId, amount, 12);
+        .withArgs(1n, accounts[0].address, identityId, amount, 12);
 
       // ERC721 ownership.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
       // Token flow: staker → StakingStorage, nothing in NFT wrapper or StakingV10.
@@ -294,13 +294,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // StakingStorage delegator/node/total bookkeeping.
       expect(
-        await (await ConvictionStakingStorageContract.getPosition(0)).raw,
+        await (await ConvictionStakingStorageContract.getPosition(1)).raw,
       ).to.equal(amount);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(amount);
       expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(totalStakeBefore + amount);
 
       // ConvictionStakingStorage position.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(12);
@@ -326,7 +326,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
         await NFT.connect(accounts[0]).createConviction(identityId, amount, lockTier);
 
-        const pos = await ConvictionStakingStorageContract.getPosition(0);
+        const pos = await ConvictionStakingStorageContract.getPosition(1);
         expect(pos.multiplier18).to.equal(expectedMult);
         expect(pos.lockTier).to.equal(lockTier);
         expect(pos.raw).to.equal(amount);
@@ -349,14 +349,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 6);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
       expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(await NFT.ownerOf(2)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(3)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(3n);
 
       // Per-tokenId StakingStorage state is independent — each tokenId has
       // its own bytes32(tokenId) delegator key.
-      for (let t = 0n; t < 3n; t++) {
+      for (let t = 1n; t <= 3n; t++) {
         expect(
           await (await ConvictionStakingStorageContract.getPosition(t)).raw,
         ).to.equal(amount);
@@ -366,11 +366,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // ConvictionStakingStorage positions are independent and carry the
       // per-mint tier.
-      expect((await ConvictionStakingStorageContract.getPosition(0)).multiplier18).to.equal(SIX_X);
-      expect((await ConvictionStakingStorageContract.getPosition(1)).multiplier18).to.equal(
+      expect((await ConvictionStakingStorageContract.getPosition(1)).multiplier18).to.equal(SIX_X);
+      expect((await ConvictionStakingStorageContract.getPosition(2)).multiplier18).to.equal(
         THREE_AND_HALF_X,
       );
-      expect((await ConvictionStakingStorageContract.getPosition(2)).multiplier18).to.equal(
+      expect((await ConvictionStakingStorageContract.getPosition(3)).multiplier18).to.equal(
         ONE_AND_HALF_X,
       );
     });
@@ -384,17 +384,17 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
       await NFT.connect(accounts[4]).createConviction(identityId, amount, 12);
 
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
-      expect(await NFT.ownerOf(1)).to.equal(accounts[4].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(2)).to.equal(accounts[4].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
       expect(await NFT.balanceOf(accounts[4].address)).to.equal(1n);
 
       // Both NFTs live on the same node but under disjoint delegator keys.
       expect(
-        await (await ConvictionStakingStorageContract.getPosition(0)).raw,
+        await (await ConvictionStakingStorageContract.getPosition(1)).raw,
       ).to.equal(amount);
       expect(
-        await (await ConvictionStakingStorageContract.getPosition(1)).raw,
+        await (await ConvictionStakingStorageContract.getPosition(2)).raw,
       ).to.equal(amount);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(amount * 2n);
     });
@@ -475,7 +475,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // `accounts[4]` is not the owner of tokenId 0.
       await expect(
-        NFT.connect(accounts[4]).relock(0, 6),
+        NFT.connect(accounts[4]).relock(1, 6),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
@@ -488,7 +488,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Tier 2 was the old 1.5x tier; Phase 5 dropped it. Wrapper rejects
       // via `_convictionMultiplier` before forwarding to StakingV10.
       await expect(
-        NFT.connect(accounts[0]).relock(0, 2),
+        NFT.connect(accounts[0]).relock(1, 2),
       ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
@@ -499,7 +499,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
       await expect(
-        NFT.connect(accounts[0]).relock(0, 13),
+        NFT.connect(accounts[0]).relock(1, 13),
       ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
@@ -510,7 +510,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
       // No time advance — the 12-epoch lock is still active.
       await expect(
-        NFT.connect(accounts[0]).relock(0, 6),
+        NFT.connect(accounts[0]).relock(1, 6),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'LockStillActive');
     });
 
@@ -522,7 +522,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // every tokenId that passed the NFT owner check is guaranteed to have
       // a matching position (positions are created atomically with the
       // mint).
-      await expect(NFT.connect(accounts[0]).relock(42, 6)).to.be.reverted;
+      await expect(NFT.connect(accounts[0]).relock(43, 6)).to.be.reverted;
     });
 
     // -----------------------------------------------------------------
@@ -537,12 +537,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // Advance past the 1-epoch lock.
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+      await NFT.connect(accounts[0]).claim(1); // satisfy UnclaimedEpochs guard
 
       // D21: `relock` is a burn+mint. The old NFT (`tokenId 0`) is burned
       // and a fresh token is minted. Return value is the new tokenId.
-      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 12);
-      const tx = await NFT.connect(accounts[0]).relock(0, 12);
+      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(1, 12);
+      const tx = await NFT.connect(accounts[0]).relock(1, 12);
       // Capture the block timestamp to compute the D26 expected expiry.
       const txReceipt = await tx.wait();
       const txBlock = await hre.ethers.provider.getBlock(txReceipt!.blockHash);
@@ -551,13 +551,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const DAY = 24n * 60n * 60n;
       const expectedExpiryTs = relockTs + 366n * DAY;
 
-      await expect(tx).to.emit(NFT, 'PositionRelocked').withArgs(0n, newTokenId, 12);
+      await expect(tx).to.emit(NFT, 'PositionRelocked').withArgs(1n, newTokenId, 12);
       await expect(tx)
         .to.emit(StakingV10Contract, 'Relocked')
         .withArgs(newTokenId, 12, expectedExpiryTs);
 
       // Old token is burned; new token carries the relocked position state.
-      await expect(NFT.ownerOf(0)).to.be.reverted;
+      await expect(NFT.ownerOf(1)).to.be.reverted;
       expect(await NFT.ownerOf(newTokenId)).to.equal(accounts[0].address);
 
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
@@ -575,7 +575,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+      await NFT.connect(accounts[0]).claim(1); // satisfy UnclaimedEpochs guard
 
       // Tier 0 is the permanent rest state: a legitimate post-expiry relock
       // target per the roadmap ("no lockup / 1 / 3 / 6 / 12 months"). The
@@ -584,8 +584,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
       //
       // D21: relock is a burn+mint — fetch the new tokenId from the return
       //      value before reading the migrated position state.
-      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 0);
-      await NFT.connect(accounts[0]).relock(0, 0);
+      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(1, 0);
+      await NFT.connect(accounts[0]).relock(1, 0);
 
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.raw).to.equal(amount);
@@ -601,11 +601,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+      await NFT.connect(accounts[0]).claim(1); // satisfy UnclaimedEpochs guard
 
       // D21: relock burns + remints; read state from the new tokenId.
-      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 6);
-      const tx = await NFT.connect(accounts[0]).relock(0, 6);
+      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(1, 6);
+      const tx = await NFT.connect(accounts[0]).relock(1, 6);
       const receipt = await tx.wait();
       const txBlock = await hre.ethers.provider.getBlock(receipt!.blockHash);
       const relockTs = BigInt(txBlock!.timestamp);
@@ -640,10 +640,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // exactly 1 epoch so currentEpoch == expiryTimestamp — under the old
       // `<=` check this would still revert as LockStillActive.
       await advanceEpochs(1);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+      await NFT.connect(accounts[0]).claim(1); // satisfy UnclaimedEpochs guard
 
-      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 6);
-      await NFT.connect(accounts[0]).relock(0, 6);
+      const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(1, 6);
+      await NFT.connect(accounts[0]).relock(1, 6);
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.lockTier).to.equal(6);
       expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
@@ -658,7 +658,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // is stuck at creationEpoch - 1 while currentEpoch has moved forward.
       await advanceEpochs(3);
       await expect(
-        NFT.connect(accounts[0]).relock(0, 6),
+        NFT.connect(accounts[0]).relock(1, 6),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
     });
   });
@@ -688,7 +688,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // `accounts[4]` is not the owner of tokenId 0 — wrapper-layer guard.
       await expect(
-        NFT.connect(accounts[4]).redelegate(0, toId),
+        NFT.connect(accounts[4]).redelegate(1, toId),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
@@ -701,7 +701,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Redelegating to the current node — StakingV10 rejects with
       // `SameIdentity` before any storage mutation or settle call.
       await expect(
-        NFT.connect(accounts[0]).redelegate(0, identityId),
+        NFT.connect(accounts[0]).redelegate(1, identityId),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'SameIdentity');
     });
 
@@ -716,7 +716,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // insert at the bottom of the flow would happily register a ghost
       // node at `sha256("")`.
       await expect(
-        NFT.connect(accounts[0]).redelegate(0, 9999),
+        NFT.connect(accounts[0]).redelegate(1, 9999),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'ProfileDoesNotExist');
     });
 
@@ -735,14 +735,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await ParametersStorage.connect(accounts[0]).setMaximumStake(amount - 1n);
 
       await expect(
-        NFT.connect(accounts[0]).redelegate(0, toId),
+        NFT.connect(accounts[0]).redelegate(1, toId),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'MaxStakeExceeded');
 
       // No state leak past the revert: source node still holds the raw,
       // destination is still empty, position still points at the source.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(amount);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(toId)).to.equal(0n);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(fromId);
     });
 
@@ -778,23 +778,23 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(toId)).to.equal(0n);
 
       // Capture the pre-call expiryTimestamp so we can verify preservation.
-      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+      const posBefore = await ConvictionStakingStorageContract.getPosition(1);
       const expiryBefore = posBefore.expiryTimestamp;
 
       // Still mid-lock — the 12-tier lock is nowhere near done.
-      const tx = await NFT.connect(accounts[0]).redelegate(0, toId);
+      const tx = await NFT.connect(accounts[0]).redelegate(1, toId);
 
       // Wrapper-layer event (`(tokenId, oldIdentityId, newIdentityId)`)
       // mirrors the authoritative events from StakingV10 and CSS.
       await expect(tx)
         .to.emit(NFT, 'PositionRedelegated')
-        .withArgs(0n, fromId, toId);
+        .withArgs(1n, fromId, toId);
       await expect(tx)
         .to.emit(StakingV10Contract, 'Redelegated')
-        .withArgs(0n, fromId, toId);
+        .withArgs(1n, fromId, toId);
       await expect(tx)
         .to.emit(ConvictionStakingStorageContract, 'PositionRedelegated')
-        .withArgs(0n, fromId, toId);
+        .withArgs(1n, fromId, toId);
 
       // Per-node stake moved.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(0n);
@@ -805,12 +805,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // D25: tokenId 0 is STABLE — still owned by the original staker,
       // no mint, no burn.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
 
       // ConvictionStakingStorage position now points at the new node.
       // Raw, lockTier, multiplier18, expiryTimestamp all preserved — the
       // lock clock did NOT reset.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(toId);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(12);
@@ -829,15 +829,15 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // rest state on the source node. Redelegate should still work — the
       // raw principal follows the position to the new node unchanged.
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
+      await NFT.connect(accounts[0]).claim(1); // satisfy UnclaimedEpochs guard
 
-      await NFT.connect(accounts[0]).redelegate(0, toId);
+      await NFT.connect(accounts[0]).redelegate(1, toId);
 
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(fromId)).to.equal(0n);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(toId)).to.equal(amount);
       // tokenId STABLE — no mint, no burn.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(toId);
       expect(pos.raw).to.equal(amount);
       // Raw lock state on the position stays as it was pre-redelegate
@@ -861,13 +861,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const totalBefore = await ConvictionStakingStorageContract.totalStakeV10();
 
       // Redelegate ONLY NFT 0 from nodeA → nodeB. D25 in-place: tokenId stable.
-      await NFT.connect(accounts[0]).redelegate(0, nodeB);
+      await NFT.connect(accounts[0]).redelegate(1, nodeB);
 
       // NFT 0 moved correctly: tokenId preserved, position updated.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(nodeA)).to.equal(0n);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(nodeB)).to.equal(amount);
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
-      const movedPos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
+      const movedPos = await ConvictionStakingStorageContract.getPosition(1);
       expect(movedPos.raw).to.equal(amount);
       expect(movedPos.identityId).to.equal(nodeB);
 
@@ -875,9 +875,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // node, different delegator key.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(nodeC)).to.equal(amount);
       expect(
-        (await ConvictionStakingStorageContract.getPosition(1)).raw,
+        (await ConvictionStakingStorageContract.getPosition(2)).raw,
       ).to.equal(amount);
-      expect((await ConvictionStakingStorageContract.getPosition(1)).identityId).to.equal(nodeC);
+      expect((await ConvictionStakingStorageContract.getPosition(2)).identityId).to.equal(nodeC);
 
       // Global totalStake invariant across the entire sequence (two mints,
       // one redelegate).
@@ -893,7 +893,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Advance 3 epochs without claiming.
       await advanceEpochs(3);
       await expect(
-        NFT.connect(accounts[0]).redelegate(0, toId),
+        NFT.connect(accounts[0]).redelegate(1, toId),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
     });
   });
@@ -944,7 +944,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2); // post-expiry so the position is unlocked
       // accounts[4] does not own tokenId 0 — wrapper-layer guard.
       await expect(
-        NFT.connect(accounts[4]).withdraw(0),
+        NFT.connect(accounts[4]).withdraw(1),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
@@ -957,7 +957,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // lock-gated at StakingV10 — no partial or rewards-only drain is
       // available during the lock window.
       await expect(
-        NFT.connect(accounts[0]).withdraw(0),
+        NFT.connect(accounts[0]).withdraw(1),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'LockStillActive');
     });
 
@@ -970,16 +970,16 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
 
       const balBefore = await Token.balanceOf(accounts[0].address);
-      await NFT.connect(accounts[0]).withdraw(0);
+      await NFT.connect(accounts[0]).withdraw(1);
 
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
         balBefore + amount,
       );
       // CSS position deleted, NFT burned.
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+        (await ConvictionStakingStorageContract.getPosition(1)).identityId,
       ).to.equal(0n);
-      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+      await expect(NFT.ownerOf(1)).to.be.revertedWithCustomError(
         NFT,
         'ERC721NonexistentToken',
       );
@@ -996,10 +996,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(1);
 
       // `withdraw` auto-claims internally — no separate claim() required.
-      await NFT.connect(accounts[0]).withdraw(0);
+      await NFT.connect(accounts[0]).withdraw(1);
 
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+        (await ConvictionStakingStorageContract.getPosition(1)).identityId,
       ).to.equal(0n);
     });
 
@@ -1015,7 +1015,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const nodeStakeBefore = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
 
-      const tx = await NFT.connect(accounts[0]).withdraw(0);
+      const tx = await NFT.connect(accounts[0]).withdraw(1);
 
       // Authoritative StakingV10 event; amount ≥ original principal
       // because auto-claim may have compounded rewards into raw. On a
@@ -1023,10 +1023,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // emitted amount is the original principal.
       await expect(tx)
         .to.emit(StakingV10Contract, 'Withdrawn')
-        .withArgs(0n, accounts[0].address, amount);
+        .withArgs(1n, accounts[0].address, amount);
       await expect(tx)
         .to.emit(NFT, 'PositionWithdrawn')
-        .withArgs(0n, amount);
+        .withArgs(1n, amount);
 
       // TRAC refunded to staker.
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
@@ -1042,12 +1042,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
 
       // CSS position deleted — identityId reset to 0 is the sentinel.
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfter.identityId).to.equal(0n);
       expect(posAfter.raw).to.equal(0n);
 
       // NFT burned.
-      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+      await expect(NFT.ownerOf(1)).to.be.revertedWithCustomError(
         NFT,
         'ERC721NonexistentToken',
       );
@@ -1068,7 +1068,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
 
       await advanceEpochs(2); // post-expiry
-      await NFT.connect(accounts[0]).withdraw(0);
+      await NFT.connect(accounts[0]).withdraw(1);
 
       // Sharding-table removal happens atomically inside withdraw.
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
@@ -1077,9 +1077,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.equal(0n);
       // CSS position + NFT gone.
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+        (await ConvictionStakingStorageContract.getPosition(1)).identityId,
       ).to.equal(0);
-      await expect(NFT.ownerOf(0)).to.be.revertedWithCustomError(
+      await expect(NFT.ownerOf(1)).to.be.revertedWithCustomError(
         NFT,
         'ERC721NonexistentToken',
       );
@@ -1272,7 +1272,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
       // `accounts[4]` does not own tokenId 0 — wrapper-layer guard.
-      await expect(NFT.connect(accounts[4]).claim(0)).to.be.revertedWithCustomError(
+      await expect(NFT.connect(accounts[4]).claim(1)).to.be.revertedWithCustomError(
         NFT,
         'NotPositionOwner',
       );
@@ -1301,20 +1301,20 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // `lastClaimedEpoch = currentEpoch - 1` at createPosition, so the
       // claim window `[last+1 .. current-1]` is empty. Claim must return
       // without emitting or mutating state.
-      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+      const posBefore = await ConvictionStakingStorageContract.getPosition(1);
       const nodeStakeBefore = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
       const totalStakeBefore = await ConvictionStakingStorageContract.totalStakeV10();
-      const baseBefore = await (await ConvictionStakingStorageContract.getPosition(0)).raw;
+      const baseBefore = await (await ConvictionStakingStorageContract.getPosition(1)).raw;
 
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx).to.not.emit(StakingV10Contract, 'RewardsClaimed');
 
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfter.raw).to.equal(posBefore.raw);
       expect(posAfter.lastClaimedEpoch).to.equal(posBefore.lastClaimedEpoch);
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(nodeStakeBefore);
       expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(totalStakeBefore);
-      expect(await (await ConvictionStakingStorageContract.getPosition(0)).raw).to.equal(
+      expect(await (await ConvictionStakingStorageContract.getPosition(1)).raw).to.equal(
         baseBefore,
       );
     });
@@ -1331,10 +1331,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // No score injection → scorePerStake = 0 for the walked epoch → reward = 0.
       // Claim still advances lastClaimedEpoch but emits no RewardsClaimed.
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx).to.not.emit(StakingV10Contract, 'RewardsClaimed');
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       // lastClaimedEpoch was advanced to currentEpoch - 1 so re-claim is a no-op.
       const currentEpoch = await ChronosContract.getCurrentEpoch();
       expect(pos.lastClaimedEpoch).to.equal(currentEpoch - 1n);
@@ -1391,12 +1391,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const nodeStakeBefore = await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
       const totalStakeBefore = await ConvictionStakingStorageContract.totalStakeV10();
 
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx)
         .to.emit(StakingV10Contract, 'RewardsClaimed')
-        .withArgs(0n, expectedReward);
+        .withArgs(1n, expectedReward);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       // D19: claim compounds the reward directly into `pos.raw`
       //      (rewards bucket was collapsed into raw).
       expect(pos.raw).to.equal(amount + expectedReward);
@@ -1460,12 +1460,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
         computeReward(effStake, s2, epochPool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx)
         .to.emit(StakingV10Contract, 'RewardsClaimed')
-        .withArgs(0n, expectedReward);
+        .withArgs(1n, expectedReward);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Vault balance invariant.
       await assertVaultInvariant();
@@ -1515,8 +1515,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
       expect(expectedReward).to.equal(baselineReward * 6n);
 
-      await NFT.connect(accounts[0]).claim(0);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[0]).claim(1);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Vault balance invariant.
       await assertVaultInvariant();
@@ -1560,8 +1560,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
       await fundVault(expectedReward);
 
-      await NFT.connect(accounts[0]).claim(0);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[0]).claim(1);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Vault balance invariant.
       await assertVaultInvariant();
@@ -1602,12 +1602,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
         computeReward(effStakePost, scorePost, epochPool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx)
         .to.emit(StakingV10Contract, 'RewardsClaimed')
-        .withArgs(0n, expectedReward);
+        .withArgs(1n, expectedReward);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Vault balance invariant.
       await assertVaultInvariant();
@@ -1649,14 +1649,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await fundVault(expectedReward);
 
       // First claim — pays out expected reward.
-      await NFT.connect(accounts[0]).claim(0);
-      const posAfterFirst = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[0]).claim(1);
+      const posAfterFirst = await ConvictionStakingStorageContract.getPosition(1);
 
       // Second claim — no-op (same epoch, lastClaimedEpoch already caught up).
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx).to.not.emit(StakingV10Contract, 'RewardsClaimed');
 
-      const posAfterSecond = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfterSecond = await ConvictionStakingStorageContract.getPosition(1);
     });
 
     // -----------------------------------------------------------------
@@ -1707,7 +1707,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
 
       await expect(
-        NFT.connect(accounts[0]).claim(0),
+        NFT.connect(accounts[0]).claim(1),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'RewardOverflow');
     });
 
@@ -1750,8 +1750,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await fundVault(expectedReward);
 
       // 1. Claim — D19 compounds the reward directly into pos.raw.
-      await NFT.connect(accounts[0]).claim(0);
-      const posAfterClaim = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[0]).claim(1);
+      const posAfterClaim = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfterClaim.raw).to.equal(amount + expectedReward);
 
       // 2. Advance one more epoch → now post-expiry. `withdraw` is the
@@ -1761,7 +1761,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(1);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
-      const tx = await NFT.connect(accounts[0]).withdraw(0);
+      const tx = await NFT.connect(accounts[0]).withdraw(1);
 
       // The emitted amount is authoritative: it includes everything that
       // auto-claim rolled into raw before the transfer.
@@ -1786,7 +1786,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // Position + NFT gone.
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).identityId,
+        (await ConvictionStakingStorageContract.getPosition(1)).identityId,
       ).to.equal(0n);
     });
 
@@ -1880,12 +1880,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await fundVault(aliceExpected + bobExpected);
 
       // Alice claims first (tokenId 0).
-      await NFT.connect(accounts[0]).claim(0);
-      const alicePos = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[0]).claim(1);
+      const alicePos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Bob claims second (tokenId 1).
-      await NFT.connect(accounts[2]).claim(1);
-      const bobPos = await ConvictionStakingStorageContract.getPosition(1);
+      await NFT.connect(accounts[2]).claim(2);
+      const bobPos = await ConvictionStakingStorageContract.getPosition(2);
 
       // Proportionality: Alice gets 6/7, Bob gets 1/7 of netNodeRewards.
       const netNodeRewards = epochPool; // single node, no op fee
@@ -1962,12 +1962,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const expectedTotal = rewardPre + rewardPost;
       await fundVault(expectedTotal);
 
-      const tx = await NFT.connect(accounts[0]).claim(0);
+      const tx = await NFT.connect(accounts[0]).claim(1);
       await expect(tx)
         .to.emit(StakingV10Contract, 'RewardsClaimed')
-        .withArgs(0n, expectedTotal);
+        .withArgs(1n, expectedTotal);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
 
       // Vault balance invariant.
       await assertVaultInvariant();
@@ -2098,7 +2098,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(
         await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
       ).to.equal(0n);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.raw).to.equal(amount);
     });
 
@@ -2119,7 +2119,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(
         await StakingStorage.getDelegatorStakeBase(identityId, v8Key(accounts[0].address)),
       ).to.equal(0n);
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.raw).to.equal(amount);
     });
 
@@ -2212,12 +2212,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // D7: isAdmin=false for the user-driven path.
       await expect(tx)
         .to.emit(NFT, 'ConvertedFromV8')
-        .withArgs(accounts[0].address, 0n, identityId, 12, false);
+        .withArgs(accounts[0].address, 1n, identityId, 12, false);
       // D8: stakeBaseAbsorbed=amount, pendingAbsorbed=0 (no pending in this
       //     fixture), lockTier=12, isAdmin=false.
       await expect(tx)
         .to.emit(StakingV10Contract, 'ConvertedFromV8')
-        .withArgs(accounts[0].address, 0n, identityId, amount, 0n, 12, false);
+        .withArgs(accounts[0].address, 1n, identityId, amount, 0n, 12, false);
 
       // V8 bucket drained. D3: the V10 path intentionally does not touch
       // DelegatorsInfo (dropped from the hub), so no isNodeDelegator
@@ -2228,18 +2228,18 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // V10 position created under tokenId=0.
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).raw,
+        (await ConvictionStakingStorageContract.getPosition(1)).raw,
       ).to.equal(amount);
 
       // ConvictionStakingStorage position.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
 
       // NFT ownership.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
       // D15: V10 has its own aggregates. `totalStakeV10` grows by `amount`
@@ -2265,7 +2265,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // V10 position at rest tier: multiplier 1x, expiryTimestamp == 0 per
       // ConvictionStakingStorage.createPosition at :153-154.
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.raw).to.equal(amount);
       expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
@@ -2312,9 +2312,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
       //      under V10. The V10 node total is just Alice's migrated amount.
       expect(await ConvictionStakingStorageContract.getNodeStakeV10(identityId)).to.equal(amount);
       // Alice's V10 NFT.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(
-        (await ConvictionStakingStorageContract.getPosition(0)).raw,
+        (await ConvictionStakingStorageContract.getPosition(1)).raw,
       ).to.equal(amount);
     });
   });
@@ -2456,25 +2456,25 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // Capture every Position field before the transfer. `_update` is a
       // pure pass-through — every field must survive a transfer byte-identical.
-      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+      const posBefore = await ConvictionStakingStorageContract.getPosition(1);
 
       const tx = await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
       // ERC-721 Transfer event fires (inherited from base ERC721).
       await expect(tx)
         .to.emit(NFT, 'Transfer')
-        .withArgs(accounts[0].address, accounts[4].address, 0n);
+        .withArgs(accounts[0].address, accounts[4].address, 1n);
 
       // New owner.
-      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[4].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
       expect(await NFT.balanceOf(accounts[4].address)).to.equal(1n);
 
       // Position state byte-identical — not a single field touched.
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfter.raw).to.equal(posBefore.raw);
       expect(posAfter.lockTier).to.equal(posBefore.lockTier);
       expect(posAfter.expiryTimestamp).to.equal(posBefore.expiryTimestamp);
@@ -2528,20 +2528,20 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
-      const rawBefore = (await ConvictionStakingStorageContract.getPosition(0)).raw;
+      const rawBefore = (await ConvictionStakingStorageContract.getPosition(1)).raw;
       expect(rawBefore).to.equal(amount); // nothing compounded yet
 
       // Bob claims — receives the full 3-epoch reward Alice never collected.
       // D19: the reward is compounded directly into `pos.raw`.
-      const tx = await NFT.connect(accounts[4]).claim(0);
+      const tx = await NFT.connect(accounts[4]).claim(1);
       await expect(tx)
         .to.emit(StakingV10Contract, 'RewardsClaimed')
-        .withArgs(0n, expectedReward);
+        .withArgs(1n, expectedReward);
 
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfter.raw).to.equal(rawBefore + expectedReward);
       expect(posAfter.cumulativeRewardsClaimed).to.equal(expectedReward);
     });
@@ -2571,11 +2571,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // Alice no longer owns the NFT — wrapper-layer ownership gate fires.
-      await expect(NFT.connect(accounts[0]).claim(0)).to.be.revertedWithCustomError(
+      await expect(NFT.connect(accounts[0]).claim(1)).to.be.revertedWithCustomError(
         NFT,
         'NotPositionOwner',
       );
@@ -2592,21 +2592,21 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // Every owner-gated entry point rejects Alice post-transfer. Any gate
       // that forgot the `ownerOf` guard would leak ownership authority
       // back to the pre-transfer holder.
-      await expect(NFT.connect(accounts[0]).relock(0, 6)).to.be.revertedWithCustomError(
+      await expect(NFT.connect(accounts[0]).relock(1, 6)).to.be.revertedWithCustomError(
         NFT,
         'NotPositionOwner',
       );
       await expect(
-        NFT.connect(accounts[0]).redelegate(0, toId),
+        NFT.connect(accounts[0]).redelegate(1, toId),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
       await expect(
-        NFT.connect(accounts[0]).withdraw(0),
+        NFT.connect(accounts[0]).withdraw(1),
       ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
     });
 
@@ -2643,22 +2643,22 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // First claim drains the window. D19: reward compounds into raw.
-      await NFT.connect(accounts[4]).claim(0);
-      const posAfterFirst = await ConvictionStakingStorageContract.getPosition(0);
+      await NFT.connect(accounts[4]).claim(1);
+      const posAfterFirst = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfterFirst.raw).to.equal(amount + expectedReward);
       expect(posAfterFirst.cumulativeRewardsClaimed).to.equal(expectedReward);
 
       // Second claim in the same epoch — lastClaimedEpoch is already
       // caught up to currentEpoch - 1, so the claim window is empty and
       // StakingV10.claim short-circuits without emitting RewardsClaimed.
-      const tx = await NFT.connect(accounts[4]).claim(0);
+      const tx = await NFT.connect(accounts[4]).claim(1);
       await expect(tx).to.not.emit(StakingV10Contract, 'RewardsClaimed');
 
-      const posAfterSecond = await ConvictionStakingStorageContract.getPosition(0);
+      const posAfterSecond = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfterSecond.raw).to.equal(posAfterFirst.raw); // raw unchanged
       expect(posAfterSecond.cumulativeRewardsClaimed).to.equal(expectedReward);
     });
@@ -2682,7 +2682,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const tx = await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
       const receipt = await tx.wait();
       expect(receipt!.gasUsed).to.be.lt(100_000n);
@@ -2698,14 +2698,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // Bob — the new owner — calls redelegate. Redelegate is in-place
       // now (D25): the tokenId is preserved, only `identityId` flips.
-      await NFT.connect(accounts[4]).redelegate(0, toId);
+      await NFT.connect(accounts[4]).redelegate(1, toId);
 
-      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      const pos = await ConvictionStakingStorageContract.getPosition(1);
       expect(pos.identityId).to.equal(toId);
       // Raw, lockTier, multiplier18, expiryTimestamp all preserved on the
       // same tokenId.
@@ -2714,7 +2714,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(pos.multiplier18).to.equal(SIX_X);
 
       // NFT ownership unchanged (same tokenId, still owned by Bob).
-      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[4].address);
     });
 
     it('safeTransferFrom to an EOA preserves accrued-interest semantics', async () => {
@@ -2731,18 +2731,18 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
 
-      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+      const posBefore = await ConvictionStakingStorageContract.getPosition(1);
 
       // OZ v5 ERC-721 has two safeTransferFrom overloads: (from, to, tokenId)
       // and (from, to, tokenId, data). Exercise the 3-arg form.
       await NFT.connect(accounts[0])['safeTransferFrom(address,address,uint256)'](
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
-      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
-      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      expect(await NFT.ownerOf(1)).to.equal(accounts[4].address);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(1);
       expect(posAfter.raw).to.equal(posBefore.raw);
       expect(posAfter.lastClaimedEpoch).to.equal(posBefore.lastClaimedEpoch);
     });
@@ -2760,7 +2760,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // Transfer must not touch the TRAC ledger in any way. The wrapper
@@ -2781,7 +2781,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
         accounts[4].address,
-        0,
+        1,
       );
 
       // `nextTokenId` is a monotonic counter — it does NOT reuse the tokenId
@@ -2789,16 +2789,60 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // mint gets tokenId=1.
       await NFT.connect(accounts[0]).createConviction(identityId, second, 6);
 
-      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address); // Bob still holds #0
-      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address); // Alice now holds #1
+      expect(await NFT.ownerOf(1)).to.equal(accounts[4].address); // Bob still holds #0
+      expect(await NFT.ownerOf(2)).to.equal(accounts[0].address); // Alice now holds #1
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
       expect(await NFT.balanceOf(accounts[4].address)).to.equal(1n);
 
-      // Positions are independent — tier 12 on #0, tier 6 on #1.
-      expect((await ConvictionStakingStorageContract.getPosition(0)).multiplier18).to.equal(SIX_X);
-      expect((await ConvictionStakingStorageContract.getPosition(1)).multiplier18).to.equal(
+      // Positions are independent — tier 12 on #1, tier 6 on #2 (L2 — IDs
+      // start at 1 so `tokenId == 0` is always a sentinel).
+      expect((await ConvictionStakingStorageContract.getPosition(1)).multiplier18).to.equal(SIX_X);
+      expect((await ConvictionStakingStorageContract.getPosition(2)).multiplier18).to.equal(
         THREE_AND_HALF_X,
       );
+    });
+  });
+
+  // ------------------------------------------------------------
+  // CCO-8 — Code-review follow-ups (L1 / L2 / L8 / M5).
+  // ------------------------------------------------------------
+
+  describe('CCO-8 — code-review follow-up regressions', () => {
+    it('L2 — first mint ever yields tokenId = 1; `ownerOf(0)` is permanently a sentinel', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+
+      // Fresh deployment: no tokens minted yet.
+      expect(await NFT.nextTokenId()).to.equal(0n);
+      await expect(NFT.ownerOf(0)).to.be.reverted; // sentinel tokenId is never owned.
+
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // First mint is tokenId=1; nextTokenId counter sits at 1.
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
+      expect(await NFT.nextTokenId()).to.equal(1n);
+      // tokenId 0 remains permanently unowned.
+      await expect(NFT.ownerOf(0)).to.be.reverted;
+    });
+
+    it('L8 — `createConviction(identityId=0)` reverts with InvalidIdentityId', async () => {
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await expect(
+        NFT.connect(accounts[0]).createConviction(0, amount, 12),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidIdentityId');
+    });
+
+    it('M5 — `name()` returns ERC-721 collection name; `contractName()` returns dev-facing id', async () => {
+      // `DKGStakingConvictionNFT` used to inherit INamed and override `name()`
+      // to return the dev-facing contract id. That collided with
+      // ERC721.name() (which clients treat as the human-readable collection
+      // name). Post-M5 we split the surfaces:
+      //   - name()          — ERC-721 collection metadata (user-facing)
+      //   - contractName()  — dev id, used by Hub for contract resolution
+      expect(await NFT.name()).to.equal('DKG Staker Conviction');
+      expect(await NFT.contractName()).to.equal('DKGStakingConvictionNFT');
     });
   });
 });

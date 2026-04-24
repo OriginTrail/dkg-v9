@@ -246,46 +246,47 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // Get the expected merkle root for this challenge
         bytes32 expectedMerkleRoot = knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
 
-        // Verify the submitted root matches
-        if (computedMerkleRoot == expectedMerkleRoot) {
-            // Mark as correct submission and add points to the node
-            challenge.solved = true;
-            randomSamplingStorage.setNodeChallenge(identityId, challenge);
-
-            uint256 epoch = chronos.getCurrentEpoch();
-            randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
-            uint256 score18 = calculateNodeScore(identityId);
-            randomSamplingStorage.addToNodeEpochProofPeriodScore(
-                epoch,
-                activeProofPeriodStartBlock,
-                identityId,
-                score18
-            );
-            randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
-            randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
-
-            // D4+D15+D26 — post-migration the only source of staked TRAC is
-            // the V10 conviction layer. The denominator is the V10 effective
-            // stake at *this instant*. Under D26 timestamp-accurate accounting
-            // we first settle the node forward to `block.timestamp` (draining
-            // any boost-expiry drops that fell inside the interval since the
-            // last proof) and then read the post-settle running effective
-            // stake.
-            uint40 tsNow = uint40(block.timestamp);
-            convictionStakingStorage.settleNodeTo(identityId, tsNow);
-            uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
-            if (effectiveNodeStake > 0) {
-                uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
-                uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
-                    deltaScorePerStake36;
-                // `appendCheckpoint` auto-seeds `firstScorePerStake36 = 0` on
-                // the first write of an epoch (scorePerStake is epoch-local
-                // under D26) and records the timestamped post-proof value for
-                // later claim-time binary-search splits at boost expiry.
-                randomSamplingStorage.appendCheckpoint(identityId, epoch, tsNow, newLast);
-            }
-        } else {
+        // L12 — early-revert style: bail out on mismatch first so the
+        //       happy path isn't nested inside an `if`.
+        if (computedMerkleRoot != expectedMerkleRoot) {
             revert MerkleRootMismatchError(computedMerkleRoot, expectedMerkleRoot);
+        }
+
+        // Mark as correct submission and add points to the node.
+        challenge.solved = true;
+        randomSamplingStorage.setNodeChallenge(identityId, challenge);
+
+        uint256 epoch = chronos.getCurrentEpoch();
+        randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
+        uint256 score18 = calculateNodeScore(identityId);
+        randomSamplingStorage.addToNodeEpochProofPeriodScore(
+            epoch,
+            activeProofPeriodStartBlock,
+            identityId,
+            score18
+        );
+        randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
+        randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
+
+        // D4+D15+D26 — post-migration the only source of staked TRAC is
+        // the V10 conviction layer. The denominator is the V10 effective
+        // stake at *this instant*. Under D26 timestamp-accurate accounting
+        // we first settle the node forward to `block.timestamp` (draining
+        // any boost-expiry drops that fell inside the interval since the
+        // last proof) and then read the post-settle running effective
+        // stake.
+        uint40 tsNow = uint40(block.timestamp);
+        convictionStakingStorage.settleNodeTo(identityId, tsNow);
+        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
+        if (effectiveNodeStake > 0) {
+            uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
+            uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
+                deltaScorePerStake36;
+            // `appendCheckpoint` records the timestamped post-proof value so
+            // claim-time binary-search can split at a mid-epoch boost expiry.
+            // Under D26 `scorePerStake36` is epoch-local (accumulates from 0),
+            // no first-sentinel seeding needed (M6/M7).
+            randomSamplingStorage.appendCheckpoint(identityId, epoch, tsNow, newLast);
         }
     }
 

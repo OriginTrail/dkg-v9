@@ -72,7 +72,25 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //             expiry queue. Epoch-diff accumulator, finalize helpers
     //             and their dirty cursors removed.
     //           * `BLOCK_DRIFT_BUFFER` removed (no longer meaningful).
-    string private constant _VERSION = "3.0.0";
+    //   3.1.0 — D26 code-review follow-ups:
+    //           * M1 — `updateOnRelock` removed; `createNewPositionFromExisting`
+    //             simplified to same-identity-only (cross-identity branch was
+    //             unreachable — `redelegate` goes through `updateOnRedelegate`).
+    //           * M2 — `nodeExpiryPresent` mapping added so a cancel→reschedule
+    //             at the same `ts` doesn't duplicate the queue slot.
+    //           * M3/M4 — `addTier` rejects degenerate tier configs
+    //             (tier 0 must be rest state; non-zero tier needs both a
+    //             positive duration and a >1x multiplier).
+    //           * L4 — `createPosition` guards against `currentEpoch == 0`.
+    //           * L5 — `_cancelNodeExpiry` `delete`s the slot when the
+    //             remaining drop hits zero (refunds SSTORE).
+    //           * L7 — `getNodeEffectiveStakeAtEpoch` tolerates Chronos
+    //             returning 0 for unanchored epochs.
+    //           * L9 — `setV10LaunchEpoch` is one-shot (anchor cannot be
+    //             silently rebound).
+    //           * L11 — `createPosition` no longer takes `multiplier18`;
+    //             it reads the multiplier from the tier table.
+    string private constant _VERSION = "3.1.0";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -145,12 +163,6 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint64 multiplier18,
         uint32 migrationEpoch
     );
-    event PositionRelocked(
-        uint256 indexed tokenId,
-        uint40 newLockTier,
-        uint40 newExpiryTimestamp,
-        uint64 newMultiplier18
-    );
     event PositionRedelegated(
         uint256 indexed tokenId,
         uint72 indexed oldIdentityId,
@@ -213,9 +225,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     mapping(uint72 => uint40) public nodeLastSettledAt;
 
     // Sorted-ascending queue of pending boost-expiry timestamps per node.
-    // We only append past index `nodeExpiryHead[id]`; "removed" entries
-    // remain physically present but contribute 0 because their drop has
-    // been subtracted from `nodeExpiryDrop[id][ts]`.
+    // We only append past index `nodeExpiryHead[id]`; partially-cancelled
+    // entries stay physically present at their sorted position and drain
+    // with whatever drop remains. Fully-cancelled entries (drop back to 0
+    // before drain) are kept as "zero-drop" slots so that when a fresh
+    // expiry lands at the same `ts`, `nodeExpiryPresent` prevents us from
+    // pushing a duplicate (M2).
     mapping(uint72 => uint40[]) internal nodeExpiryTimes;
     // Aggregate boost drop scheduled at exactly `ts` for `id`. Multiple
     // positions sharing an `expiryTimestamp` are coalesced here.
@@ -223,6 +238,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // Drain cursor into `nodeExpiryTimes[id]`. Entries below the head
     // are fully drained and MUST NOT be read again.
     mapping(uint72 => uint256) internal nodeExpiryHead;
+    // M2 — tracks whether `ts` has a live slot in `nodeExpiryTimes[id]`
+    //      at or past `nodeExpiryHead[id]`. Set on first schedule, cleared
+    //      when the drain cursor walks past the slot. Without this, a
+    //      cancel-to-zero followed by a fresh schedule at the same `ts`
+    //      would push a second entry (functionally harmless, but doubles
+    //      the SSTOREs and weakens the "at most one entry per `ts`"
+    //      invariant on `nodeExpiryTimes[id]`).
+    mapping(uint72 => mapping(uint40 => bool)) internal nodeExpiryPresent;
 
     // ============================================================
     //                D5 — Per-node tokenId enumeration
@@ -346,13 +369,31 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //         D20 — Tier admin (v2.1.0, Q4=B multisig gate)
     // ============================================================
 
+    /// @notice Add a new lock tier to the ladder (D20 governance).
+    /// @dev    M3/M4 — rejects degenerate configurations that would either
+    ///         brick `createPosition` (zero-duration + non-1x multiplier:
+    ///         the would-be expiry lands at `block.timestamp`, the
+    ///         `_scheduleNodeExpiry` "Expiry in past" check fires, every
+    ///         mint reverts) or create "locked-but-boost-free" positions
+    ///         that trip the `expiryEpoch` split branch in claim math for
+    ///         no economic purpose (gas noise).
+    ///
+    ///         The tier ladder is:
+    ///             * id 0 — rest state: `duration == 0`, `mult == 1e18`.
+    ///             * id N>0 — real locked tier: `duration > 0` AND
+    ///                        `mult > 1e18`.
     function addTier(
         uint40 lockTier,
         uint256 duration,
         uint64 multiplier18
     ) external onlyOwnerOrMultiSigOwner {
         require(!_tiers[lockTier].exists, "Tier exists");
-        require(multiplier18 >= uint64(SCALE18), "Multiplier < 1x");
+        if (lockTier == 0) {
+            require(duration == 0 && multiplier18 == uint64(SCALE18), "Tier 0 must be rest");
+        } else {
+            require(duration > 0, "Non-zero tier needs duration");
+            require(multiplier18 > uint64(SCALE18), "Non-zero tier needs boost");
+        }
         _addTierInternal(lockTier, duration, multiplier18);
     }
 
@@ -403,43 +444,240 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // ============================================================
     //          D26 — Running-effective-stake settlement
     // ============================================================
+    //
+    // WHAT THIS SECTION DOES
+    // ----------------------
+    // V10 tracks a node's *effective* stake (raw TRAC × active lock
+    // multiplier) as a continuous quantity that changes at exact
+    // timestamps — never at epoch boundaries. Two things make it move:
+    //
+    //   (1) Instantaneous deltas: someone stakes / unstakes / migrates /
+    //       redelegates. These are applied via `_applyNodeStakeDelta`.
+    //   (2) Time passing: a boost expires at its precise wall-clock
+    //       `expiryTimestamp`, and from that second onward the position
+    //       contributes `raw × 1x` instead of `raw × multiplier`. The
+    //       difference is called the *drop*. Drops are pre-scheduled
+    //       into a per-node sorted queue and drained by `_settleNodeTo`.
+    //
+    // `runningNodeEffectiveStake[id]` holds the node's effective stake
+    // AS OF `nodeLastSettledAt[id]` (inclusive). To compute the value
+    // "now", callers first bring the clock forward with `settleNodeTo`,
+    // which walks the expiry queue up to `now` and subtracts all the
+    // matured drops.
+    //
+    // WHO CALLS SETTLE AND WHY
+    // ------------------------
+    //   * `RandomSampling.submitProof` — before integrating score into
+    //     `scorePerStake`, so the denominator reflects the node's
+    //     effective stake at the proof's block timestamp (not at the
+    //     last mutator call).
+    //   * Every mutator in this file (createPosition, updateOnRelock,
+    //     updateOnRedelegate, createNewPositionFromExisting,
+    //     deletePosition, increaseRaw, decreaseRaw) — before touching
+    //     `runningNodeEffectiveStake[id]`, so all deltas compose against
+    //     a correctly-aged baseline.
+    //   * Views that need a fresh instantaneous snapshot
+    //     (`_simulateNodeEffectiveStakeAt` is the const-time counterpart
+    //     used by `getNodeEffectiveStakeAtEpoch`).
+    //
+    // WHY THE STATE IS SHAPED LIKE THIS
+    // ---------------------------------
+    // We need sub-epoch accuracy but cannot loop over positions on every
+    // read (thousands of delegators per popular node). The running
+    // stake + pre-scheduled drop queue reduces every CSS mutation and
+    // every proof to O(matured-drops-since-last-settle), which in
+    // steady state is near-zero (see "LOOP BOUND" on `_settleNodeTo`).
 
-    /// @notice Advances `runningNodeEffectiveStake[id]` to `ts` by draining
-    ///         every queued expiry whose timestamp is <= `ts`. Idempotent
-    ///         when `ts <= nodeLastSettledAt[id]`. Public so `RandomSampling`
-    ///         can call before integrating score.
+    /// @notice Advance `runningNodeEffectiveStake[id]` to an explicit
+    ///         target timestamp `ts`. Idempotent for past/current `ts`.
+    /// @dev Exposed so `RandomSampling.submitProof` can settle to
+    ///      `block.timestamp` before integrating `scorePerStake`. Also
+    ///      used by views that need to simulate at an arbitrary `ts`
+    ///      (though they call `_simulateNodeEffectiveStakeAt` instead,
+    ///      which does not mutate state).
+    /// @param identityId Canonical node id (matches StakingStorage).
+    /// @param ts         Target wall-clock seconds. Treated as the
+    ///                   inclusive upper bound: all expiries with
+    ///                   `expiryTimestamp <= ts` are realized.
     function settleNodeTo(uint72 identityId, uint40 ts) public onlyContracts {
         _settleNodeTo(identityId, ts);
     }
 
-    /// @notice Convenience wrapper settling to the current block timestamp.
+    /// @notice Convenience wrapper settling to `block.timestamp`. This
+    ///         is what every CSS mutator uses before applying its delta,
+    ///         because `block.timestamp` is the authoritative "now" on
+    ///         EVM chains.
     function settleNode(uint72 identityId) external onlyContracts {
         _settleNodeTo(identityId, uint40(block.timestamp));
     }
 
+    /// @dev   Drain matured expiries up to `ts` and advance the node's
+    ///        running effective stake and last-settled watermark.
+    ///
+    /// VARIABLES (in the context of the wider system):
+    ///
+    ///   `from`  — the node's previous last-settled watermark. Anything
+    ///             with `expiryTimestamp <= from` was already applied in
+    ///             a prior settle; anything > from has NOT yet been
+    ///             applied and is still sitting in the queue.
+    ///
+    ///   `head`  — drain cursor into `nodeExpiryTimes[id]`. Entries at
+    ///             indices < head are fully processed and MUST NOT be
+    ///             read again. `head` only moves forward; we never pop
+    ///             or rewrite the array, so the per-entry work is
+    ///             strictly once-in-forever.
+    ///
+    ///   `times` — pointer to the per-node sorted-ascending array of
+    ///             distinct `expiryTimestamp` values. Same-`ts` expiries
+    ///             from multiple positions are coalesced at schedule
+    ///             time (see `_scheduleNodeExpiry`) into one array slot.
+    ///
+    ///   `len`   — current array length. May grow (new expiries scheduled
+    ///             mid-tx) but entries past `len` at call start are
+    ///             irrelevant for *this* settle — they were added after
+    ///             `from` and cannot have `ts <= ts` AND be sorted ahead
+    ///             of the current head without violating the invariant.
+    ///
+    ///   `stake` — local copy of `runningNodeEffectiveStake[id]`, edited
+    ///             in a scratch variable to avoid SSTORE per iteration.
+    ///             Flushed back once at the end.
+    ///
+    ///   `t`     — the timestamp of the queue entry currently under
+    ///             consideration. The loop breaks as soon as `t > ts`
+    ///             because the array is sorted and all later entries
+    ///             are strictly greater.
+    ///
+    ///   `drop`  — aggregate boost amount scheduled to expire at `t`
+    ///             (summed across all positions sharing that `t`). The
+    ///             drop equals `raw × (multiplier18 - 1e18) / 1e18` per
+    ///             position at the moment it was scheduled, summed.
+    ///             A zero drop means the entry was fully cancelled by
+    ///             prior `_cancelNodeExpiry` calls (redelegate-away,
+    ///             withdraw, relock) and is simply skipped.
+    ///
+    /// LOOP BOUND (why this cannot explode the block gas limit)
+    /// --------------------------------------------------------
+    /// The `while` terminates as soon as `t > ts` (1) or `head == len`
+    /// (2). What could make it iterate "many" times?
+    ///
+    ///   (a) Entries are only added by `_scheduleNodeExpiry`, which is
+    ///       itself only reachable from `onlyContracts` mutators above.
+    ///       There is no external path for an attacker to spam the
+    ///       queue — fresh entries cost someone real TRAC to lock.
+    ///
+    ///   (b) Entries with the same `ts` are coalesced into ONE array
+    ///       slot (see `_scheduleNodeExpiry`: `if (existing != 0) return`).
+    ///       So the queue length is bounded by the number of *distinct*
+    ///       active expiry timestamps the node has ever been scheduled
+    ///       against — NOT by the delegator count.
+    ///
+    ///   (c) Work is strictly amortized once: each array slot is
+    ///       visited by exactly one `_settleNodeTo` call across the
+    ///       contract's lifetime (we only ever advance `head`). In the
+    ///       steady state where settle is called from every CSS mutator
+    ///       and every `submitProof` (~ every epoch), the number of
+    ///       entries matured between two consecutive settles is
+    ///       bounded by (new expiries scheduled during that window that
+    ///       also matured within it) — in practice 0 on a healthy,
+    ///       proof-active node.
+    ///
+    /// The only scenario that produces a large iteration count in one
+    /// call is long-duration node DORMANCY: the node produces no proofs
+    /// AND receives no CSS mutations while many distinct-ts expiries
+    /// mature. Concrete napkin math: on NeuroWeb (~12s blocks) a node
+    /// that accumulates ONE brand-new distinct expiry timestamp per
+    /// block for 30 days and then stops settling for 30 more days sees
+    /// ~216k matured entries on resume — at ~5k gas per iteration that
+    /// is ~1.1B gas, well above any block limit. That tail is tolerable
+    /// because:
+    ///
+    ///   * To reach it, the node has to have been completely silent
+    ///     (no proofs, no stake/unstake, no relock, no redelegate in or
+    ///     out) for longer than its longest outstanding tier duration.
+    ///     In practice `submitProof` settles on every proof, so any
+    ///     proof-producing node drains continuously.
+    ///   * Same-block same-tier stakes coalesce, so realistic distinct-
+    ///     ts counts are far below the worst case.
+    ///   * The invariant is recoverable: any single `settleNodeTo` that
+    ///     OOMs blocks only the caller's tx; the queue state is
+    ///     unchanged, so later calls can still make progress once gas
+    ///     budgets allow.
+    ///
+    /// If operational telemetry later shows real-world queues
+    /// approaching danger, the escape hatch is a bounded variant
+    /// (`settleNodeToMax(id, ts, maxEntries)`) that advances `head` by
+    /// at most `maxEntries` and lets the protocol drain a dormant queue
+    /// across several txs. Not shipped now because the "who even calls
+    /// this" analysis (a) + steady-state (c) make it dead code for any
+    /// node that ever submits a proof.
+    ///
+    /// INVARIANTS MAINTAINED ON EXIT
+    /// -----------------------------
+    ///   I1. nodeLastSettledAt[id] == ts.
+    ///   I2. For every `t` with `t <= ts`, `nodeExpiryDrop[id][t] == 0`.
+    ///   I3. runningNodeEffectiveStake[id] equals the true effective
+    ///       stake of the node at wall-clock second `ts`, assuming the
+    ///       prior entry state was consistent (recursive invariant).
     function _settleNodeTo(uint72 identityId, uint40 ts) internal {
+        // Idempotent replay: if we've already settled at or beyond `ts`,
+        // the running stake is already correct for that moment.
         uint40 from = nodeLastSettledAt[identityId];
         if (ts <= from) {
             return;
         }
+
+        // Load the drain cursor, the sorted expiry array, its length,
+        // and the running stake into locals. `times` is a storage
+        // pointer (not a copy): we index into it but never mutate it
+        // here. `stake` is a scratch local so iteration does not
+        // SSTORE; we flush once at the end.
         uint256 head = nodeExpiryHead[identityId];
         uint40[] storage times = nodeExpiryTimes[identityId];
         uint256 len = times.length;
         uint256 stake = runningNodeEffectiveStake[identityId];
+
+        // Walk every queued expiry whose timestamp is <= `ts`, in order.
+        // The queue is sorted ascending, so as soon as `times[head] > ts`
+        // we are done — nothing later can satisfy the condition.
         while (head < len) {
             uint40 t = times[head];
             if (t > ts) break;
+
+            // `drop` is the total boost (sum over all positions that
+            // were coalesced at this `t`) that MUST come off the
+            // running stake at exactly second `t`. Zero means the
+            // entry was fully cancelled (e.g. all those positions were
+            // relocked / redelegated-away / withdrawn before expiry) —
+            // harmless no-op.
             uint256 drop = nodeExpiryDrop[identityId][t];
             if (drop != 0) {
-                // A scheduling invariant ensures drops never exceed the
-                // running stake at the time they fire.
+                // Invariant (enforced at schedule time): drop values are
+                // derived from raw × (multiplier - 1) portions of real
+                // positions on this node, so their sum can never exceed
+                // the running effective stake that was installed by the
+                // same schedule call.
                 stake -= drop;
+
+                // Free the aggregate slot (gas refund + keeps state
+                // compact). We never revisit drained `t` because `head`
+                // only moves forward.
                 delete nodeExpiryDrop[identityId][t];
             }
+            // M2 — clear the "slot reserved" flag now that the head has
+            // walked past this `ts`. A fresh schedule at the same `ts`
+            // AFTER this point is impossible anyway (`_scheduleNodeExpiry`
+            // requires `ts > nodeLastSettledAt[id]`); we still clear it
+            // to claim the SSTORE refund and keep state compact.
+            delete nodeExpiryPresent[identityId][t];
+            // `head` is bounded above by `len`, both fit in uint256;
+            // incrementing cannot overflow.
             unchecked {
                 head++;
             }
         }
+
+        // Flush all three pieces of state together so the invariants
+        // above hold atomically.
         nodeExpiryHead[identityId] = head;
         runningNodeEffectiveStake[identityId] = stake;
         nodeLastSettledAt[identityId] = ts;
@@ -480,16 +718,23 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     ///      at `nodeExpiryHead[id]`. Typical call pattern appends to the
     ///      tail (new lock later than all existing); cross-tier inserts
     ///      shift the tail one slot rightward until the correct position.
+    /// @dev M2 — uses `nodeExpiryPresent[id][ts]` (not `drop != 0`) as the
+    ///      "array slot already reserved" witness. This handles the
+    ///      cancel→reschedule-at-same-ts case: after a full cancel the
+    ///      drop aggregate is zero but the array slot is still live; we
+    ///      must NOT push a duplicate.
     function _scheduleNodeExpiry(uint72 identityId, uint40 ts, uint256 drop) internal {
         require(drop != 0, "Zero drop");
         require(ts > nodeLastSettledAt[identityId], "Expiry in past");
         uint256 existing = nodeExpiryDrop[identityId][ts];
         nodeExpiryDrop[identityId][ts] = existing + drop;
         emit NodeExpiryScheduled(identityId, ts, drop, existing + drop);
-        if (existing != 0) {
-            // ts already present in the queue; no need to touch the array.
+        if (nodeExpiryPresent[identityId][ts]) {
+            // ts already has a slot in the queue; just bumped the drop.
             return;
         }
+        nodeExpiryPresent[identityId][ts] = true;
+
         // Insert `ts` into the sorted queue.
         uint40[] storage arr = nodeExpiryTimes[identityId];
         uint256 head = nodeExpiryHead[identityId];
@@ -508,9 +753,16 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     }
 
     /// @dev Cancel part (or all) of a previously scheduled boost drop. We
-    ///      keep the array entry in place and just decrement the aggregate;
-    ///      a zero-drop entry is harmlessly drained as a no-op when settle
-    ///      reaches it.
+    ///      keep the array entry in place (M2: `nodeExpiryPresent[id][ts]`
+    ///      stays `true`) so that a re-schedule at the same `ts` does not
+    ///      push a duplicate slot; the drain cursor will clean both up
+    ///      when it walks past. A zero-drop entry is harmlessly drained
+    ///      as a no-op when settle reaches it.
+    /// @dev L5 — `delete`s the aggregate slot when remaining hits zero so
+    ///      the SSTORE gets its gas refund. The `nodeExpiryPresent` flag
+    ///      is deliberately NOT cleared: M2's whole point is to remember
+    ///      "this `ts` already has an array slot" until the cursor walks
+    ///      past it.
     function _cancelNodeExpiry(uint72 identityId, uint40 ts, uint256 drop) internal {
         if (drop == 0) return;
         if (ts <= nodeLastSettledAt[identityId]) {
@@ -520,7 +772,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 existing = nodeExpiryDrop[identityId][ts];
         require(existing >= drop, "Cancel > scheduled");
         uint256 remaining = existing - drop;
-        nodeExpiryDrop[identityId][ts] = remaining;
+        if (remaining == 0) {
+            delete nodeExpiryDrop[identityId][ts];
+        } else {
+            nodeExpiryDrop[identityId][ts] = remaining;
+        }
         emit NodeExpiryCancelled(identityId, ts, drop, remaining);
     }
 
@@ -550,23 +806,29 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
      *         path (migrationEpoch = 0) and the V8→V10 migration path
      *         (migrationEpoch = migration epoch).
      */
+    /// @notice Create a new V10 position under `lockTier` on `identityId`.
+    /// @dev    L11 — `multiplier18` is no longer an argument; CSS reads it
+    ///         from the tier table (single source of truth).
+    ///         L4 — guards against pre-genesis bootstrap where
+    ///         `chronos.getCurrentEpoch()` returns 0 (the `currentEpoch - 1`
+    ///         arithmetic would otherwise panic).
     function createPosition(
         uint256 tokenId,
         uint72 identityId,
         uint96 raw,
         uint40 lockTier,
-        uint64 multiplier18,
         uint32 migrationEpoch
     ) external onlyContracts {
         require(identityId != 0, "Zero node");
         require(positions[tokenId].identityId == 0, "Position exists");
         require(raw > 0, "Zero raw");
-        require(multiplier18 == _tierMultiplier(lockTier), "Tier mismatch");
         if (migrationEpoch == 0) {
             _requireActiveTier(lockTier);
         }
+        uint64 multiplier18 = _tierMultiplier(lockTier);
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
+        require(currentEpoch >= 1, "Pre-genesis create");
         uint40 tsNow = uint40(block.timestamp);
         uint40 expiryTimestamp = _computeExpiryTimestamp(lockTier);
 
@@ -599,46 +861,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         emit PositionCreated(tokenId, identityId, raw, lockTier, expiryTimestamp, multiplier18, migrationEpoch);
     }
 
-    function updateOnRelock(
-        uint256 tokenId,
-        uint40 newLockTier,
-        uint64 newMultiplier18
-    ) external onlyContracts {
-        Position storage pos = positions[tokenId];
-        require(pos.identityId != 0, "No position");
-        require(newMultiplier18 == _tierMultiplier(newLockTier), "Tier mismatch");
-
-        uint40 tsNow = uint40(block.timestamp);
-        // Relock is a post-expiry re-commit: prior lock must be done (or never existed).
-        require(pos.expiryTimestamp == 0 || tsNow >= pos.expiryTimestamp, "Not expired");
-
-        uint96 raw = pos.raw;
-        require(raw > 0, "No raw");
-        uint72 identityId = pos.identityId;
-
-        _settleNodeTo(identityId, tsNow);
-
-        // Position is currently at raw*1 (post-expiry rest state). Lift to raw*newMultiplier18.
-        if (newMultiplier18 > SCALE18) {
-            uint256 boost = (uint256(raw) * (uint256(newMultiplier18) - SCALE18)) / SCALE18;
-            _applyNodeStakeDelta(identityId, int256(boost));
-            uint40 newExpiry = _computeExpiryTimestamp(newLockTier);
-            pos.expiryTimestamp = newExpiry;
-            pos.lockTier = newLockTier;
-            pos.multiplier18 = newMultiplier18;
-            _scheduleNodeExpiry(identityId, newExpiry, boost);
-            emit PositionRelocked(tokenId, newLockTier, newExpiry, newMultiplier18);
-        } else {
-            // Relock into a tier with no boost (1x). Stake unchanged;
-            // just update tier metadata. expiryTimestamp becomes 0
-            // (tier-0 style) since there's nothing to expire.
-            uint40 newExpiry = _computeExpiryTimestamp(newLockTier);
-            pos.expiryTimestamp = newExpiry;
-            pos.lockTier = newLockTier;
-            pos.multiplier18 = newMultiplier18;
-            emit PositionRelocked(tokenId, newLockTier, newExpiry, newMultiplier18);
-        }
-    }
+    // M1 — `updateOnRelock` was never reached from production contracts
+    //      (StakingV10.relock goes through `createNewPositionFromExisting`,
+    //      which preserves reward continuity under the D21 "NFTs are
+    //      ephemeral across tier changes" narrative). Removing eliminates
+    //      a silent dead-code path and clarifies that relock is a
+    //      burn-and-mint, not an in-place tier swap.
 
     function updateOnRedelegate(uint256 tokenId, uint72 newIdentityId) external onlyContracts {
         require(newIdentityId != 0, "Zero node");
@@ -694,60 +922,63 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
     /**
      * @notice D23 primitive — atomically replace a live position at
-     *         `oldTokenId` with a fresh one at `newTokenId`. Preserves
-     *         `cumulativeRewardsClaimed`, `lastClaimedEpoch`, and
-     *         `migrationEpoch`; the new position's lock clock starts at
-     *         `block.timestamp` under the caller-supplied tier.
+     *         `oldTokenId` with a fresh one at `newTokenId` on the SAME
+     *         node. Preserves `cumulativeRewardsClaimed`,
+     *         `lastClaimedEpoch`, and `migrationEpoch`; the new position's
+     *         lock clock starts at `block.timestamp` under the caller-
+     *         supplied tier.
      *
-     * @dev D25 — `StakingV10.redelegate` switched to the in-place
-     *      `updateOnRedelegate` primitive. This burn-and-mint helper is
-     *      retained for `StakingV10.relock` only.
+     * @dev M1 + L11 — post-review:
+     *        * Cross-identity branch removed. `StakingV10.redelegate`
+     *          goes through `updateOnRedelegate`; the only live caller
+     *          of this helper is `StakingV10.relock`, which stays on
+     *          the same node.
+     *        * `multiplier18` is no longer an argument; CSS reads it
+     *          from the tier table to avoid round-tripping data the
+     *          contract can derive on its own.
      */
     function createNewPositionFromExisting(
         uint256 oldTokenId,
         uint256 newTokenId,
-        uint72 newIdentityId,
-        uint40 newLockTier,
-        uint64 newMultiplier18
+        uint72 identityId,
+        uint40 newLockTier
     ) external onlyContracts {
-        require(newIdentityId != 0, "Zero node");
-        require(newMultiplier18 == _tierMultiplier(newLockTier), "Tier mismatch");
+        require(identityId != 0, "Zero node");
         require(positions[newTokenId].identityId == 0, "New token used");
         require(oldTokenId != newTokenId, "Same tokenId");
 
         Position memory old = positions[oldTokenId];
         require(old.identityId != 0, "No position");
+        require(old.identityId == identityId, "Identity mismatch");
         uint96 raw = old.raw;
         require(raw > 0, "Zero raw");
 
-        uint72 oldIdentityId = old.identityId;
+        uint64 newMultiplier18 = _tierMultiplier(newLockTier);
+
         uint40 oldExpiryTs = old.expiryTimestamp;
         uint64 oldMultiplier18 = old.multiplier18;
-
         uint40 tsNow = uint40(block.timestamp);
 
-        // --- Unwind old-identity contribution ---
-        _settleNodeTo(oldIdentityId, tsNow);
+        _settleNodeTo(identityId, tsNow);
+
+        // --- Unwind old contribution ---
         bool oldStillBoosted = oldExpiryTs != 0 && tsNow < oldExpiryTs;
         uint256 effectiveNowOld = oldStillBoosted
             ? (uint256(raw) * uint256(oldMultiplier18)) / SCALE18
             : uint256(raw);
-        _applyNodeStakeDelta(oldIdentityId, -int256(effectiveNowOld));
+        _applyNodeStakeDelta(identityId, -int256(effectiveNowOld));
         if (oldStillBoosted && oldMultiplier18 > SCALE18) {
             uint256 oldBoost = (uint256(raw) * (uint256(oldMultiplier18) - SCALE18)) / SCALE18;
-            _cancelNodeExpiry(oldIdentityId, oldExpiryTs, oldBoost);
+            _cancelNodeExpiry(identityId, oldExpiryTs, oldBoost);
         }
 
-        // --- Install new-identity contribution (fresh lock starts now) ---
-        if (oldIdentityId != newIdentityId) {
-            _settleNodeTo(newIdentityId, tsNow);
-        }
+        // --- Install new contribution (fresh lock starts now) ---
         uint40 newExpiryTs = _computeExpiryTimestamp(newLockTier);
         uint256 effectiveNowNew = (uint256(raw) * uint256(newMultiplier18)) / SCALE18;
-        _applyNodeStakeDelta(newIdentityId, int256(effectiveNowNew));
+        _applyNodeStakeDelta(identityId, int256(effectiveNowNew));
         if (newLockTier > 0 && newMultiplier18 > SCALE18) {
             uint256 newBoost = (uint256(raw) * (uint256(newMultiplier18) - SCALE18)) / SCALE18;
-            _scheduleNodeExpiry(newIdentityId, newExpiryTs, newBoost);
+            _scheduleNodeExpiry(identityId, newExpiryTs, newBoost);
         }
 
         // --- Write new position preserving stats; delete old ---
@@ -755,7 +986,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             raw: raw,
             lockTier: newLockTier,
             expiryTimestamp: newExpiryTs,
-            identityId: newIdentityId,
+            identityId: identityId,
             cumulativeRewardsClaimed: old.cumulativeRewardsClaimed,
             multiplier18: newMultiplier18,
             lastClaimedEpoch: old.lastClaimedEpoch,
@@ -764,22 +995,15 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         delete positions[oldTokenId];
 
         // --- Per-node enumeration ---
-        _popNodeToken(oldIdentityId, oldTokenId);
-        _pushNodeToken(newIdentityId, newTokenId);
+        _popNodeToken(identityId, oldTokenId);
+        _pushNodeToken(identityId, newTokenId);
 
-        // --- Raw aggregates (total invariant if identity changes) ---
-        if (oldIdentityId != newIdentityId) {
-            uint256 rawU = uint256(raw);
-            nodeStakeV10[oldIdentityId] -= rawU;
-            nodeStakeV10[newIdentityId] += rawU;
-            emit NodeStakeV10Decreased(oldIdentityId, rawU, nodeStakeV10[oldIdentityId], totalStakeV10);
-            emit NodeStakeV10Increased(newIdentityId, rawU, nodeStakeV10[newIdentityId], totalStakeV10);
-        }
+        // nodeStakeV10 is invariant — same identity, same raw. No emit.
 
         emit PositionReplaced(
             oldTokenId,
             newTokenId,
-            newIdentityId,
+            identityId,
             raw,
             newLockTier,
             newExpiryTs,
@@ -799,7 +1023,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         emit MigrationEpochSet(tokenId, epoch);
     }
 
+    /// @notice Set the V10 retroactive-claim anchor (D7). One-shot.
+    /// @dev    L9 — reverts if already set. Prevents an admin (or a
+    ///         compromised admin) from silently rebinding the reward-history
+    ///         boundary mid-life.
     function setV10LaunchEpoch(uint256 epoch) external onlyContracts {
+        require(v10LaunchEpoch == 0, "V10 launch already set");
         v10LaunchEpoch = epoch;
         emit V10LaunchEpochSet(epoch);
     }
@@ -969,8 +1198,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     ///         the LAST SECOND of `epoch` (computed via Chronos), or 0 if
     ///         the epoch is entirely in the pre-settled past. Consumers
     ///         should migrate to `getNodeEffectiveStakeAtTimestamp`.
+    /// @dev    L7 — tolerates Chronos returning 0 for unanchored future
+    ///         epochs (the naive `- 1` would underflow).
     function getNodeEffectiveStakeAtEpoch(uint72 identityId, uint256 epoch) external view returns (uint256) {
-        uint256 epochEnd = chronos.timestampForEpoch(epoch + 1) - 1;
+        uint256 nextAnchor = chronos.timestampForEpoch(epoch + 1);
+        uint256 epochEnd = nextAnchor == 0 ? type(uint40).max : nextAnchor - 1;
         if (epochEnd > type(uint40).max) epochEnd = type(uint40).max;
         return _simulateNodeEffectiveStakeAt(identityId, uint40(epochEnd));
     }

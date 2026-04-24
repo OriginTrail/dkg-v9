@@ -96,7 +96,7 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     it('Node effective stake transitions from boosted to raw at exact expiryTimestamp', async () => {
       // Alice opens a 30-day tier-1 position (boost 1.5x on 2000 raw).
       // Effective now: 3000. At +30d it collapses to 2000 (raw tail).
-      await CSS.createPosition(1, ALICE_ID, 2000, 1, (15n * SCALE18) / 10n, 0);
+      await CSS.createPosition(1, ALICE_ID, 2000, 1, 0);
       const created = await tsNow();
       const expiry = created + 30n * DAY;
 
@@ -119,7 +119,7 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     });
 
     it('Simulated read at arbitrary future timestamp does not mutate state', async () => {
-      await CSS.createPosition(1, ALICE_ID, 1000, 12, SIX_X, 0);
+      await CSS.createPosition(1, ALICE_ID, 1000, 12, 0);
       const created = await tsNow();
       const expiry = created + 366n * DAY;
 
@@ -166,8 +166,9 @@ describe('@integration D26 — time-accurate staking accounting', () => {
       expect(await RSS.findScorePerStakeAt(ALICE_ID, epoch, 99)).to.equal(400);
     });
 
-    it('Empty mid[] falls back to firstScorePerStake36', async () => {
-      // Epoch has no checkpoints yet. Any ts → firstScorePerStake36 (0).
+    it('Empty mid[] returns 0 (epoch-local accumulator default)', async () => {
+      // M6/M7 — the `firstScorePerStake36` sentinel was removed. Epochs with no
+      //         checkpoints naturally return 0 (the accumulator default).
       expect(await RSS.findScorePerStakeAt(ALICE_ID, 77n, 123)).to.equal(0);
     });
   });
@@ -179,9 +180,9 @@ describe('@integration D26 — time-accurate staking accounting', () => {
   describe('node dormancy resume', () => {
     it('Settling to `now` after years of dormancy drains all pending expiries in O(pending)', async () => {
       // Three positions with staggered expiries (30d / 180d / 366d).
-      await CSS.createPosition(1, ALICE_ID, 100, 1, (15n * SCALE18) / 10n, 0);
-      await CSS.createPosition(2, ALICE_ID, 100, 6, THREE_AND_HALF_X, 0);
-      await CSS.createPosition(3, ALICE_ID, 100, 12, SIX_X, 0);
+      await CSS.createPosition(1, ALICE_ID, 100, 1, 0);
+      await CSS.createPosition(2, ALICE_ID, 100, 6, 0);
+      await CSS.createPosition(3, ALICE_ID, 100, 12, 0);
 
       // Jump 5 years forward — every expiry is well in the past.
       const base = await tsNow();
@@ -200,7 +201,7 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     });
 
     it('getNodeEffectiveStakeAtEpoch still works on a dormant node (legacy adapter)', async () => {
-      await CSS.createPosition(1, ALICE_ID, 1000, 3, TWO_X, 0);
+      await CSS.createPosition(1, ALICE_ID, 1000, 3, 0);
       // Force a long time jump that crosses many Chronos epochs.
       const epochLength = await Chronos.epochLength();
       await time.increase(Number(epochLength) * 100);
@@ -218,13 +219,18 @@ describe('@integration D26 — time-accurate staking accounting', () => {
   // --------------------------------------------------------------------
 
   it('RSS.getNodeEpochScorePerStake (V8 adapter) returns lastScorePerStake36 from EpochIndex', async () => {
+    // L6 — `setLastScorePerStake` was removed as a test-only footgun (it could
+    //      desynchronize `mid[tail].scorePerStake36` from
+    //      `lastScorePerStake36`). The canonical mutator is now
+    //      `addToNodeEpochScorePerStake`, which appends a checkpoint AND bumps
+    //      `lastScorePerStake36` atomically.
     const epoch = 13n;
-    await RSS.setLastScorePerStake(ALICE_ID, epoch, 9999n);
-    // Wire unused parameter to silence linter.
     void ONE_X;
+    await RSS.addToNodeEpochScorePerStake(epoch, ALICE_ID, 9999n);
     expect(await RSS.getNodeEpochScorePerStake(epoch, ALICE_ID)).to.equal(9999n);
-    // Checkpoints coexist — adapter still returns the sentinel.
-    await RSS.appendCheckpoint(ALICE_ID, epoch, 5, 4200);
-    expect(await RSS.getNodeEpochScorePerStake(epoch, ALICE_ID)).to.equal(4200n);
+    // Appending another checkpoint bumps the sentinel further (accumulator is
+    // monotonic within an epoch).
+    await RSS.addToNodeEpochScorePerStake(epoch, ALICE_ID, 4200n);
+    expect(await RSS.getNodeEpochScorePerStake(epoch, ALICE_ID)).to.equal(9999n + 4200n);
   });
 });

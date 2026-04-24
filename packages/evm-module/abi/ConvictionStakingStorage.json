@@ -412,37 +412,6 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "newLockTier",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "newExpiryTimestamp",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "newMultiplier18",
-        "type": "uint64"
-      }
-    ],
-    "name": "PositionRelocked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
         "name": "oldTokenId",
         "type": "uint256"
       },
@@ -668,18 +637,13 @@
       },
       {
         "internalType": "uint72",
-        "name": "newIdentityId",
+        "name": "identityId",
         "type": "uint72"
       },
       {
         "internalType": "uint40",
         "name": "newLockTier",
         "type": "uint40"
-      },
-      {
-        "internalType": "uint64",
-        "name": "newMultiplier18",
-        "type": "uint64"
       }
     ],
     "name": "createNewPositionFromExisting",
@@ -708,11 +672,6 @@
         "internalType": "uint40",
         "name": "lockTier",
         "type": "uint40"
-      },
-      {
-        "internalType": "uint64",
-        "name": "multiplier18",
-        "type": "uint64"
       },
       {
         "internalType": "uint32",
@@ -1680,29 +1639,6 @@
       }
     ],
     "name": "updateOnRedelegate",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "newLockTier",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint64",
-        "name": "newMultiplier18",
-        "type": "uint64"
-      }
-    ],
-    "name": "updateOnRelock",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

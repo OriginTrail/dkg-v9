@@ -561,6 +561,29 @@ export function logManualFundingInstructions(addresses: string[], faucetUrl: str
   console.log('');
 }
 
+/**
+ * Read wallet addresses, retrying up to 5 times with a 1s delay between
+ * attempts. The daemon writes `~/.dkg/wallets.json` asynchronously after
+ * its health check passes, so the file is often missing on the first read
+ * immediately after `startDaemon` returns.
+ *
+ * Exported (internal to this package — not re-exported from `index.ts`) so
+ * the retry accounting can be unit-tested without spawning a real daemon.
+ * Defaults preserve production behavior: `sleep` for the real `setTimeout`
+ * delay, `readWallets` for the real filesystem read.
+ */
+export async function readWalletsWithRetry(
+  sleepFn: (ms: number) => Promise<void> = sleep,
+  readFn: () => string[] = readWallets,
+): Promise<string[]> {
+  let walletAddresses = readFn();
+  for (let i = 0; i < 5 && !walletAddresses.length; i++) {
+    await sleepFn(1_000);
+    walletAddresses = readFn();
+  }
+  return walletAddresses;
+}
+
 // ---------------------------------------------------------------------------
 // Step 7: Merge adapter into openclaw.json
 // ---------------------------------------------------------------------------
@@ -1472,13 +1495,13 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     if (!faucetUrl || !faucetMode) {
       log('Skipping wallet funding (no faucet configured in network config)');
     } else {
-      let walletAddresses = readWallets();
-      if (!walletAddresses.length && shouldStart) {
-        for (let i = 0; i < 5 && !walletAddresses.length; i++) {
-          await sleep(1_000);
-          walletAddresses = readWallets();
-        }
-      }
+      // Retry only makes sense if we actually started the daemon this run —
+      // with `--no-start`, the wallet file either exists already or never
+      // will. `readWalletsWithRetry` is extracted to keep the loop bound
+      // covered by unit tests (see test/setup.test.ts retry-accounting).
+      const walletAddresses = shouldStart
+        ? await readWalletsWithRetry()
+        : readWallets();
       if (walletAddresses.length > 0) {
         log('Funding wallets via testnet faucet...');
         try {

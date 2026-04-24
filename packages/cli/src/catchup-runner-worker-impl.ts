@@ -184,13 +184,20 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   diagnostics.noProtocolPeers = noProtocolPeers;
   await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
 
+  const servedByPeer =
+    dataSynced > 0 ||
+    sharedMemorySynced > 0 ||
+    diagnostics.durable.insertedMetaTriples > 0 ||
+    diagnostics.sharedMemory.insertedMetaTriples > 0 ||
+    diagnostics.durable.metaOnlyResponses > 0;
+
   return {
     connectedPeers: prepared.connectedPeers,
     syncCapablePeers,
     peersTried,
     dataSynced,
     sharedMemorySynced,
-    denied: deniedPeers > 0 && dataSynced === 0 && sharedMemorySynced === 0,
+    denied: deniedPeers > 0 && !servedByPeer,
     deniedPeers,
     diagnostics,
   };

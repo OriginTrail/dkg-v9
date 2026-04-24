@@ -7586,12 +7586,14 @@ async function handleRequest(
 
         const d = result.diagnostics?.durable;
         const s = result.diagnostics?.sharedMemory;
+        const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
         const cleanResponse =
           result.dataSynced > 0 ||
           result.sharedMemorySynced > 0 ||
           (d?.emptyResponses ?? 0) > 0 ||
           (d?.metaOnlyResponses ?? 0) > 0 ||
           (s?.emptyResponses ?? 0) > 0;
+        const successfulBackfill = cleanResponse || hasContent;
         const servedByPeer =
           result.dataSynced > 0 ||
           result.sharedMemorySynced > 0 ||
@@ -7601,24 +7603,28 @@ async function handleRequest(
         if (result.denied && !servedByPeer) {
           job.status = "denied";
           job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
+          const hasLocal = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+          if (!hasLocal) {
+            const subMap = (agent as any).subscribedContextGraphs as Map<string, unknown> | undefined;
+            subMap?.delete(paranetId);
+          }
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer(s): ${result.deniedPeers}`);
         }
 
         if (job.status === "done") {
-          if (cleanResponse) {
+          if (successfulBackfill) {
             const subMap = (agent as any).subscribedContextGraphs as
               | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
               | undefined;
+            await (agent as any).refreshMetaSyncedFlags?.([paranetId]).catch(() => undefined);
             const sub = subMap?.get(paranetId);
             if (sub) {
               sub.synced = true;
-              const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
-              if (hasContent) sub.metaSynced = true;
             }
           } else if (result.peersTried > 0) {
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
+          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0 && !hasContent) {
             job.status = "failed";
             job.error = "No sync-capable peers found for catch-up";
           }
@@ -7674,6 +7680,21 @@ async function handleRequest(
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });
+    }
+
+    if (
+      job.status === "failed" &&
+      job.error === "No sync-capable peers found for catch-up"
+    ) {
+      const hasContent = await agent.contextGraphHasLocalContent(job.paranetId).catch(() => false);
+      if (hasContent) {
+        return jsonResponse(res, 200, {
+          ...toCatchupStatusResponse(job),
+          status: "done",
+          error: undefined,
+          reconciledFromLocalContent: true,
+        });
+      }
     }
 
     return jsonResponse(res, 200, toCatchupStatusResponse(job));

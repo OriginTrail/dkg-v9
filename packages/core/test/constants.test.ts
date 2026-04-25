@@ -110,6 +110,12 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('a'.repeat(257)).valid).toBe(false);
     expect(validateContextGraphId('a'.repeat(256)).valid).toBe(true);
   });
+
+  it('rejects literal and URL-encoded traversal path segments', () => {
+    expect(validateContextGraphId('../etc/passwd').valid).toBe(false);
+    expect(validateContextGraphId('legit-cg/../../other-cg').valid).toBe(false);
+    expect(validateContextGraphId('legit-cg/%2e%2e/other-cg').valid).toBe(false);
+  });
 });
 
 describe('validateAssertionName', () => {

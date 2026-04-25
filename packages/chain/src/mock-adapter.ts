@@ -550,8 +550,12 @@ export class MockChainAdapter implements ChainAdapter {
   private contextGraphs = new Map<bigint, {
     manager: string;
     participantIdentityIds: bigint[];
+    participantAgents: string[];
     requiredSignatures: number;
     metadataBatchId: bigint;
+    publishPolicy: number;
+    publishAuthority?: string;
+    publishAuthorityAccountId: bigint;
     active: boolean;
     batches: bigint[];
   }>();
@@ -574,8 +578,12 @@ export class MockChainAdapter implements ChainAdapter {
     this.contextGraphs.set(contextGraphId, {
       manager: this.signerAddress,
       participantIdentityIds: [...params.participantIdentityIds],
+      participantAgents: [...(params.participantAgents ?? [])],
       requiredSignatures: params.requiredSignatures,
       metadataBatchId: params.metadataBatchId ?? 0n,
+      publishPolicy: params.publishPolicy ?? 1,
+      publishAuthority: params.publishAuthority,
+      publishAuthorityAccountId: params.publishAuthorityAccountId ?? 0n,
       active: true,
       batches: [],
     });
@@ -584,7 +592,9 @@ export class MockChainAdapter implements ChainAdapter {
       contextGraphId: contextGraphId.toString(),
       manager: this.signerAddress,
       participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
+      participantAgents: params.participantAgents ?? [],
       requiredSignatures: params.requiredSignatures,
+      publishPolicy: params.publishPolicy ?? 1,
     });
 
     return {

@@ -533,6 +533,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       if (msg.includes('Only the context graph creator')) {
         return jsonResponse(res, 403, { error: msg });
       }
+      if (msg.includes('Only the context graph curator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('address-scoped curator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('revealOnChain is not supported')) {
+        return jsonResponse(res, 400, { error: msg });
+      }
       return jsonResponse(res, 500, { error: msg });
     }
   }

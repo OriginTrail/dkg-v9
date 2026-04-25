@@ -770,6 +770,30 @@ cmd_start() {
       continue
     fi
 
+    # Devnet bootstrap CGs are public/open. The V10 contract uses
+    # publishPolicy 0 = curated, 1 = open; keep an on-chain smoke assertion
+    # here so product/API numeric drift is caught during local bring-up.
+    local policy_check
+    policy_check=$(node -e "
+      const { ethers } = require('ethers');
+      (async () => {
+        const fs = require('fs');
+        const d = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+        const storageAddr = d.contracts.ContextGraphStorage?.evmAddress;
+        if (!storageAddr) throw new Error('ContextGraphStorage address missing');
+        const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+        const storage = new ethers.Contract(storageAddr, ['function getPublishPolicy(uint256) view returns (uint8,address)'], provider);
+        const [policy] = await storage.getPublishPolicy(BigInt('$on_chain_id'));
+        console.log(String(policy));
+      })().catch((e) => { console.error(e.message); process.exit(1); });
+    " 2>&1 || true)
+    if [ "$policy_check" = "1" ]; then
+      log "  on-chain publishPolicy for $cg is open (1)"
+    else
+      log "  ERROR: expected open publishPolicy=1 for $cg v10Id=$on_chain_id, got '$policy_check'"
+      register_failures=$((register_failures + 1))
+    fi
+
     # The on-chain id propagates to other nodes via ONTOLOGY gossip
     # (`registerContextGraph` writes the `dkg:paranetOnChainId` triple +
     # immediately broadcasts it). Wait until every node's local view

@@ -5,7 +5,7 @@ import {
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
-  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   MemoryLayer,
   computeACKDigest,
   encodePublishRequest,
@@ -118,6 +118,11 @@ const SYNC_AUTH_MAX_AGE_MS = 90_000;
  * `<…>` tokens and end with `.`; this is a `#`-comment string).
  */
 const SYNC_ACCESS_DENIED_MARKER = '#DKG-SYNC-ACCESS-DENIED';
+
+const LOCAL_ACCESS_OPEN = 0;
+const LOCAL_ACCESS_CURATED = 1;
+const EVM_PUBLISH_CURATED = 0;
+const EVM_PUBLISH_OPEN = 1;
 
 /**
  * Thrown by `fetchSyncPages` when the remote responder returned
@@ -3252,6 +3257,13 @@ export class DKGAgent {
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
 
+    if (opts?.revealOnChain === true) {
+      throw new Error(
+        'revealOnChain is not supported by V10 ContextGraphs registration. ' +
+        'The V10 path mints a governance NFT and does not use ContextGraphNameRegistry metadata reveal.',
+      );
+    }
+
     const exists = await this.contextGraphExists(id);
     if (!exists) {
       throw new Error(`Context graph "${id}" does not exist locally. Create it first.`);
@@ -3261,19 +3273,37 @@ export class DKGAgent {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
 
-    // Only the curator/creator can register a CG on-chain.
-    // The owner DID may be peerId-based or agent-address-based, so check both.
+    // Only the address-scoped curator can register a CG on-chain.
+    // Peer IDs are transport contact handles for sync/meta refresh, not EVM
+    // authority identifiers. For legacy local CGs that only have a creator
+    // peer DID, the local creator node may lazily stamp its address curator
+    // before registering; foreign peer-only CGs must first sync a curator.
     //
     // If no owner triple exists yet (bootstrap CGs created via
     // `ensureContextGraphLocal` deliberately do not stamp ownership), the
-    // calling node lazily becomes both creator and curator here. This is
-    // the "node that explicitly registered the CG" — exactly the
-    // semantics other code paths consult `getContextGraphOwner` for, and
-    // it keeps the stamp single-writer (no race over `LIMIT 1`).
-    let owner = await this.getContextGraphOwner(id);
+    // calling node lazily becomes both creator/contact and curator here.
+    // This keeps the stamp single-writer (no race over `LIMIT 1`).
+    let owner = await this.getContextGraphCurator(id);
     if (!owner) {
-      const cgMetaGraph = paranetMetaGraphUri(id);
-      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const existingCreator = await this.getContextGraphCreator(id);
+      const selfPeerDid = `did:dkg:agent:${this.peerId}`;
+      if (existingCreator && existingCreator !== selfPeerDid) {
+        throw new Error(
+          `Context graph "${id}" has no address-scoped curator and was created by ${existingCreator}. ` +
+          'Sync curator metadata or ask the curator to register it on-chain.',
+        );
+      }
+
+      const curatorAddress = opts?.callerAgentAddress ?? this.defaultAgentAddress;
+      if (!curatorAddress || !ethers.isAddress(curatorAddress)) {
+        throw new Error(
+          `Context graph "${id}" cannot be registered on-chain without an address-scoped curator. ` +
+          'Use an authenticated agent wallet or configure a default agent address.',
+        );
+      }
+
+      const cgMetaGraph = contextGraphMetaUri(id);
+      const ontologyGraph = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
       const paranetUri = `did:dkg:context-graph:${id}`;
       const accessPolicyResult = await this.store.query(
         `SELECT ?ap WHERE {
@@ -3288,7 +3318,7 @@ export class DKGAgent {
       const isCurated = apValue === 'private';
       const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
       const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
-      const curatorDid = `did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+      const curatorDid = `did:dkg:agent:${curatorAddress}`;
       // Defensive: replace any stray creator/curator triples (e.g. from
       // a previous build that backfilled per node) so this register call
       // becomes the single source of truth.
@@ -3299,18 +3329,19 @@ export class DKGAgent {
         { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
         { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
       ]);
-      this.log.info(ctx, `Stamped local node as creator/curator for "${id}" (registration-time lazy stamp)`);
+      this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
       owner = curatorDid;
     }
-    if (!this.isCallerOrNodeOwner(owner, opts?.callerAgentAddress)) {
+    if (!this.isCallerOrNodeAddressOwner(owner, opts?.callerAgentAddress)) {
       throw new Error(
-        `Only the context graph creator can register it on-chain. ` +
-        `Creator=${owner}, caller=${`did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
+        `Only the context graph curator can register it on-chain. ` +
+        `Curator=${owner}, caller=${`did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
       );
     }
+    const ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
 
     // Check if already registered
-    const cgMetaGraph = paranetMetaGraphUri(id);
+    const cgMetaGraph = contextGraphMetaUri(id);
     const paranetUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
@@ -3322,7 +3353,7 @@ export class DKGAgent {
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE {
         { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
@@ -3332,8 +3363,11 @@ export class DKGAgent {
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 
-    let resolvedAccessPolicy = opts?.accessPolicy;
-    if (resolvedAccessPolicy === undefined) {
+    let resolvedLocalAccessPolicy = opts?.accessPolicy;
+    if (resolvedLocalAccessPolicy !== undefined && resolvedLocalAccessPolicy !== LOCAL_ACCESS_OPEN && resolvedLocalAccessPolicy !== LOCAL_ACCESS_CURATED) {
+      throw new Error('accessPolicy must be 0 (open) or 1 (private/curated)');
+    }
+    if (resolvedLocalAccessPolicy === undefined) {
       const apResult = await this.store.query(
         `SELECT ?ap WHERE {
           { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
@@ -3342,18 +3376,21 @@ export class DKGAgent {
         } LIMIT 1`,
       );
       const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
-      resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+      resolvedLocalAccessPolicy = apValue === 'private' ? LOCAL_ACCESS_CURATED : LOCAL_ACCESS_OPEN;
 
       // A CG created with allowedPeers but no explicit accessPolicy stores
       // "public" in the ontology graph. Detect the allowlist and promote to
       // private so the on-chain policy matches the curator's intent.
-      if (resolvedAccessPolicy === 0) {
+      if (resolvedLocalAccessPolicy === LOCAL_ACCESS_OPEN) {
         const peers = await this.getContextGraphAllowedPeers(id);
         if (peers !== null && peers.length > 0) {
-          resolvedAccessPolicy = 1;
+          resolvedLocalAccessPolicy = LOCAL_ACCESS_CURATED;
         }
       }
     }
+    const publishPolicy = resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED
+      ? EVM_PUBLISH_CURATED
+      : EVM_PUBLISH_OPEN;
 
     const participantsResult = await this.store.query(
       `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
@@ -3404,11 +3441,14 @@ export class DKGAgent {
     const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
       ? storedRequiredSignatures
       : 1;
+    const participantAgents = await this.getContextGraphAllowedAgentAddresses(id);
 
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,
       requiredSignatures: effectiveRequiredSignatures,
-      publishPolicy: resolvedAccessPolicy,
+      publishPolicy,
+      ...(publishPolicy === EVM_PUBLISH_CURATED ? { publishAuthority: ownerAddress } : {}),
+      participantAgents,
     });
     const onChainId = result.contextGraphId.toString();
 
@@ -5942,6 +5982,21 @@ export class DKGAgent {
   }
 
   /**
+   * Chain registration must be authorized by an EVM-address principal. A
+   * libp2p peer ID proves transport identity, not on-chain authority.
+   */
+  private isCallerOrNodeAddressOwner(ownerDid: string, callerAgentAddress?: string): boolean {
+    const ownerAddress = ownerDid.replace(/^did:dkg:agent:/, '');
+    if (!ethers.isAddress(ownerAddress)) return false;
+    if (callerAgentAddress) {
+      return ethers.isAddress(callerAgentAddress) && ownerAddress.toLowerCase() === callerAgentAddress.toLowerCase();
+    }
+    return !!this.defaultAgentAddress
+      && ethers.isAddress(this.defaultAgentAddress)
+      && ownerAddress.toLowerCase() === this.defaultAgentAddress.toLowerCase();
+  }
+
+  /**
    * Return true when `senderPeerId` is currently acting as the curator
    * of `contextGraphId`. Used as a minimal anti-spoof gate on join
    * lifecycle notifications (approve/reject) — those arrive unsigned
@@ -5974,6 +6029,14 @@ export class DKGAgent {
         const agents = await this.discovery.findAgents();
         const match = agents.find((a) => a.agentAddress?.toLowerCase() === ownerTail.toLowerCase());
         if (match && match.peerId === senderPeerId) return true;
+
+        // Join lifecycle notifications are transport messages, not
+        // on-chain authorization. If registry replication lags, accept the
+        // recorded creator/contact peer as the curator node that created and
+        // hosts the CG metadata. Chain registration still requires the
+        // address-scoped curator path above.
+        const creator = await this.getContextGraphCreator(contextGraphId);
+        if (creator === `did:dkg:agent:${senderPeerId}`) return true;
       }
     } catch {
       // Any lookup failure → err on the side of "not curator" and drop.
@@ -6000,6 +6063,59 @@ export class DKGAgent {
       if (owner) return owner;
     }
     return this.getContextGraphCreator(paranetId);
+  }
+
+  private async getContextGraphCurator(contextGraphId: string): Promise<string | null> {
+    const cgMetaGraph = contextGraphMetaUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const curatorResult = await this.store.query(`
+      SELECT ?owner WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?owner .
+        }
+      }
+      LIMIT 1
+    `);
+    if (curatorResult.type === 'bindings' && curatorResult.bindings.length > 0) {
+      const owner = (curatorResult.bindings[0] as Record<string, string>)['owner'];
+      if (owner) return owner;
+    }
+    return null;
+  }
+
+  private async getContextGraphAllowedAgentAddresses(contextGraphId: string): Promise<string[]> {
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    const add = (value: string | undefined) => {
+      if (!value) return;
+      const normalized = value.replace(/^"|"$/g, '');
+      if (!ethers.isAddress(normalized)) return;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(ethers.getAddress(normalized));
+    };
+
+    const localAgentParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents;
+    if (localAgentParticipants) {
+      for (const p of localAgentParticipants) add(p);
+    }
+
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = contextGraphMetaUri(contextGraphId);
+    const agentResult = await this.store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+        }
+      }`,
+    );
+    if (agentResult.type === 'bindings') {
+      for (const row of agentResult.bindings) {
+        add(row['agent']);
+      }
+    }
+    return merged;
   }
 
   /**

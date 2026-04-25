@@ -91,11 +91,11 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     // encrypted with.
     expect(weakKs.crypto.kdfparams.n).toBe(WEAK_N);
 
-    // Sanity: the "strong" keystore is rejected if we lie about its N
-    // (tampered kdfparams → wrong key → GCM auth failure).
+    // Sanity: the "strong" keystore is rejected if we lie about its N.
+    // The loader should fail at KDF validation before attempting GCM.
     await expect(
       decryptKeystore(withKdfParams(ks, { n: WEAK_N }), PASSPHRASE),
-    ).rejects.toThrow(/Decryption failed/);
+    ).rejects.toThrow(/KDF parameters below minimum|scrypt N too low|weak keystore/i);
 
     // PROD-BUG: the below call SHOULD throw "KDF parameters below minimum"
     // (or any rejection tied to the cost floor). Instead it returns the

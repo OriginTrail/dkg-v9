@@ -38,15 +38,45 @@ let SCRYPT_N = 2 ** 18;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const DKLEN = 32;
+const MIN_SCRYPT_N = 2 ** 15;
+const MIN_SCRYPT_R = 8;
+const MIN_SCRYPT_P = 1;
+const MIN_SALT_BYTES = 16;
 
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
 export function _setScryptN(n: number) { SCRYPT_N = n; }
 
-function deriveKey(passphrase: string, salt: Buffer): Buffer {
+function isPowerOfTwo(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && Number.isInteger(Math.log2(value));
+}
+
+function assertSafeKdfParams(kdfparams: EncryptedKeystore['crypto']['kdfparams']): void {
+  if (!isPowerOfTwo(kdfparams.n) || kdfparams.n < MIN_SCRYPT_N) {
+    throw new Error('KDF parameters below minimum: scrypt N too low');
+  }
+  if (!Number.isInteger(kdfparams.r) || kdfparams.r < MIN_SCRYPT_R) {
+    throw new Error('KDF parameters below minimum: scrypt r too low');
+  }
+  if (!Number.isInteger(kdfparams.p) || kdfparams.p < MIN_SCRYPT_P) {
+    throw new Error('KDF parameters below minimum: scrypt p too low');
+  }
+  if (kdfparams.dklen !== DKLEN) {
+    throw new Error(`Invalid dklen: dklen must be ${DKLEN}`);
+  }
+  if (!/^[0-9a-fA-F]+$/.test(kdfparams.salt) || kdfparams.salt.length % 2 !== 0 || kdfparams.salt.length < MIN_SALT_BYTES * 2) {
+    throw new Error(`KDF parameters below minimum: salt too short (minimum ${MIN_SALT_BYTES} bytes)`);
+  }
+}
+
+function deriveKey(
+  passphrase: string,
+  salt: Buffer,
+  params: Pick<EncryptedKeystore['crypto']['kdfparams'], 'n' | 'r' | 'p' | 'dklen'>,
+): Buffer {
   return scryptSync(passphrase, salt, DKLEN, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
+    N: params.n,
+    r: params.r,
+    p: params.p,
     maxmem: 256 * 1024 * 1024,
   });
 }
@@ -56,7 +86,12 @@ export async function encryptKeystore(
   passphrase: string,
 ): Promise<EncryptedKeystore> {
   const salt = randomBytes(32);
-  const key = deriveKey(passphrase, salt);
+  const key = deriveKey(passphrase, salt, {
+    n: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    dklen: DKLEN,
+  });
   const iv = randomBytes(12);
 
   const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -96,8 +131,9 @@ export async function decryptKeystore(
   }
 
   const { kdfparams } = keystore.crypto;
+  assertSafeKdfParams(kdfparams);
   const salt = Buffer.from(kdfparams.salt, 'hex');
-  const key = deriveKey(passphrase, salt);
+  const key = deriveKey(passphrase, salt, kdfparams);
 
   const iv = Buffer.from(keystore.crypto.iv, 'hex');
   const tag = Buffer.from(keystore.crypto.tag, 'hex');

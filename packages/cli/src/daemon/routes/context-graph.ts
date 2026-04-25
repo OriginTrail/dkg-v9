@@ -439,7 +439,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedAgents, allowedPeers, publishPolicy, accessPolicy, register } = parsed;
+    const { id, name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -451,6 +451,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         description,
         allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
         allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
+        participantAgents: Array.isArray(participantAgents) ? participantAgents : undefined,
         accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
         callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),

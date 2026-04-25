@@ -3108,6 +3108,24 @@ export class DKGAgent {
         });
       }
     }
+
+    // Store explicit on-chain participant agents separately from the local
+    // curated allowlist. These addresses are forwarded to
+    // ContextGraphs.createContextGraph participantAgents on registration.
+    if (opts.participantAgents && opts.participantAgents.length > 0) {
+      for (const addr of opts.participantAgents) {
+        if (!ethers.isAddress(addr)) {
+          throw new Error(`Invalid Ethereum address in participantAgents: "${addr}".`);
+        }
+        quads.push({
+          subject: paranetUri,
+          predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+          object: `"${ethers.getAddress(addr)}"`,
+          graph: cgMetaGraph,
+        });
+      }
+    }
+
     // Auto-include creator in allowlist for curated/private CGs
     if (isCurated || opts.private) {
       const creatorAddr = opts.callerAgentAddress ?? this.defaultAgentAddress;
@@ -3177,6 +3195,7 @@ export class DKGAgent {
       subscribed: !opts.private,
       synced: true,
       metaSynced: true,
+      participantAgents: opts.participantAgents?.map((addr) => ethers.getAddress(addr)),
     });
 
     // On-chain registration is intentionally NOT done here — per v10 spec
@@ -3283,17 +3302,8 @@ export class DKGAgent {
     // `ensureContextGraphLocal` deliberately do not stamp ownership), the
     // calling node lazily becomes both creator/contact and curator here.
     // This keeps the stamp single-writer (no race over `LIMIT 1`).
-    let owner = await this.getContextGraphCurator(id);
-    if (!owner) {
-      const existingCreator = await this.getContextGraphCreator(id);
-      const selfPeerDid = `did:dkg:agent:${this.peerId}`;
-      if (existingCreator && existingCreator !== selfPeerDid) {
-        throw new Error(
-          `Context graph "${id}" has no address-scoped curator and was created by ${existingCreator}. ` +
-          'Sync curator metadata or ask the curator to register it on-chain.',
-        );
-      }
-
+    const selfPeerDid = `did:dkg:agent:${this.peerId}`;
+    const stampAddressCurator = async (): Promise<string> => {
       const curatorAddress = opts?.callerAgentAddress ?? this.defaultAgentAddress;
       if (!curatorAddress || !ethers.isAddress(curatorAddress)) {
         throw new Error(
@@ -3330,7 +3340,31 @@ export class DKGAgent {
         { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
       ]);
       this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
-      owner = curatorDid;
+      return curatorDid;
+    };
+
+    let owner = await this.getContextGraphCurator(id);
+    if (!owner) {
+      const existingCreator = await this.getContextGraphCreator(id);
+      if (existingCreator && existingCreator !== selfPeerDid) {
+        throw new Error(
+          `Context graph "${id}" has no address-scoped curator and was created by ${existingCreator}. ` +
+          'Sync curator metadata or ask the curator to register it on-chain.',
+        );
+      }
+      owner = await stampAddressCurator();
+    } else {
+      const ownerTail = owner.replace(/^did:dkg:agent:/, '');
+      if (!ethers.isAddress(ownerTail)) {
+        if (owner === selfPeerDid) {
+          owner = await stampAddressCurator();
+        } else {
+          throw new Error(
+            `Context graph "${id}" has a peer-scoped curator (${owner}) and cannot be registered on-chain by this node. ` +
+            'Sync address-scoped curator metadata or ask the curator to register it on-chain.',
+          );
+        }
+      }
     }
     if (!this.isCallerOrNodeAddressOwner(owner, opts?.callerAgentAddress)) {
       throw new Error(
@@ -3441,7 +3475,7 @@ export class DKGAgent {
     const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
       ? storedRequiredSignatures
       : 1;
-    const participantAgents = await this.getContextGraphAllowedAgentAddresses(id);
+    const participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
 
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,
@@ -6029,14 +6063,6 @@ export class DKGAgent {
         const agents = await this.discovery.findAgents();
         const match = agents.find((a) => a.agentAddress?.toLowerCase() === ownerTail.toLowerCase());
         if (match && match.peerId === senderPeerId) return true;
-
-        // Join lifecycle notifications are transport messages, not
-        // on-chain authorization. If registry replication lags, accept the
-        // recorded creator/contact peer as the curator node that created and
-        // hosts the CG metadata. Chain registration still requires the
-        // address-scoped curator path above.
-        const creator = await this.getContextGraphCreator(contextGraphId);
-        if (creator === `did:dkg:agent:${senderPeerId}`) return true;
       }
     } catch {
       // Any lookup failure → err on the side of "not curator" and drop.
@@ -6083,7 +6109,7 @@ export class DKGAgent {
     return null;
   }
 
-  private async getContextGraphAllowedAgentAddresses(contextGraphId: string): Promise<string[]> {
+  private async getContextGraphParticipantAgentAddresses(contextGraphId: string): Promise<string[]> {
     const merged: string[] = [];
     const seen = new Set<string>();
     const add = (value: string | undefined) => {
@@ -6106,7 +6132,7 @@ export class DKGAgent {
     const agentResult = await this.store.query(
       `SELECT ?agent WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent
         }
       }`,
     );

@@ -15,7 +15,7 @@ import {
   parseCclPolicy,
 } from '../src/index.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { EVMChainAdapter, MockChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -1296,7 +1296,8 @@ decisions: []
     await agent.createContextGraph({
       id: 'register-curated-policy',
       name: 'Curated Policy',
-      allowedAgents: [allowedAgent],
+      accessPolicy: 1,
+      participantAgents: [allowedAgent],
       callerAgentAddress: ownerAgent,
     });
     await agent.registerContextGraph('register-curated-policy', { callerAgentAddress: ownerAgent });
@@ -1337,6 +1338,23 @@ decisions: []
     await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: siblingAddr }))
       .rejects.toThrow(/Only the context graph curator can register/);
     await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    await agent.createContextGraph({ id: 'register-legacy-peer-curator', name: 'Legacy Peer Curator' });
+    const legacyMetaGraph = contextGraphMetaUri('register-legacy-peer-curator');
+    const legacyUri = 'did:dkg:context-graph:register-legacy-peer-curator';
+    await store.deleteByPattern({
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+    });
+    await store.insert([{
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${agent.peerId}`,
+    }]);
+    await expect(agent.registerContextGraph('register-legacy-peer-curator', { callerAgentAddress: nonDefaultAddr }))
       .resolves.toMatchObject({ onChainId: expect.any(String) });
 
     await agent.createContextGraph({ id: 'register-foreign-peer-only', name: 'Foreign Peer Only' });

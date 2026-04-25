@@ -1293,15 +1293,30 @@ decisions: []
     await expect(agent.createContextGraph({
       id: 'register-zero-participant-agent',
       name: 'Zero Participant Agent',
+      accessPolicy: 1,
       participantAgents: [ethers.ZeroAddress],
       callerAgentAddress: ownerAgent,
     })).rejects.toThrow(/zero address/);
     await expect(agent.createContextGraph({
       id: 'register-duplicate-participant-agent',
       name: 'Duplicate Participant Agent',
+      accessPolicy: 1,
       participantAgents: [allowedAgent, allowedAgent.toLowerCase()],
       callerAgentAddress: ownerAgent,
     })).rejects.toThrow(/Duplicate Ethereum address/);
+    await expect(agent.createContextGraph({
+      id: 'register-open-participant-agent',
+      name: 'Open Participant Agent',
+      participantAgents: [allowedAgent],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Set accessPolicy: 1/);
+    await expect(agent.createContextGraph({
+      id: 'register-too-many-participant-agents',
+      name: 'Too Many Participant Agents',
+      accessPolicy: 1,
+      participantAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/participantAgents cannot exceed/);
 
     await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
     await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
@@ -1332,6 +1347,7 @@ decisions: []
     expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
     expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ownerAgent);
+    expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toContain(allowedAgent);
 
     await agent.stop().catch(() => {});
   });

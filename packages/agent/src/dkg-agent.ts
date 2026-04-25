@@ -123,6 +123,7 @@ const LOCAL_ACCESS_OPEN = 0;
 const LOCAL_ACCESS_CURATED = 1;
 const EVM_PUBLISH_CURATED = 0;
 const EVM_PUBLISH_OPEN = 1;
+const MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS = 256;
 
 /**
  * Thrown by `fetchSyncPages` when the remote responder returned
@@ -3025,7 +3026,18 @@ export class DKGAgent {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
 
-    const isCurated = opts.accessPolicy === 1
+    const hasLocalAccessControl = opts.accessPolicy === LOCAL_ACCESS_CURATED
+      || opts.private === true
+      || !!opts.allowedAgents?.length
+      || !!opts.allowedPeers?.length;
+    if (opts.participantAgents && opts.participantAgents.length > 0 && !hasLocalAccessControl) {
+      throw new Error(
+        'participantAgents are on-chain registration metadata for curated context graphs. ' +
+        'Set accessPolicy: 1 (or private: true) and use allowedAgents for local access control.',
+      );
+    }
+
+    const isCurated = opts.accessPolicy === LOCAL_ACCESS_CURATED
       || (opts.allowedAgents && opts.allowedAgents.length > 0)
       || (opts.allowedPeers && opts.allowedPeers.length > 0);
 
@@ -3113,6 +3125,9 @@ export class DKGAgent {
     // curated allowlist. These addresses are forwarded to
     // ContextGraphs.createContextGraph participantAgents on registration.
     if (opts.participantAgents && opts.participantAgents.length > 0) {
+      if (opts.participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
+        throw new Error(`participantAgents cannot exceed ${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses.`);
+      }
       const seenParticipantAgents = new Set<string>();
       for (const addr of opts.participantAgents) {
         if (!ethers.isAddress(addr)) {
@@ -3205,7 +3220,6 @@ export class DKGAgent {
       subscribed: !opts.private,
       synced: true,
       metaSynced: true,
-      participantAgents: opts.participantAgents?.map((addr) => ethers.getAddress(addr)),
     });
 
     // On-chain registration is intentionally NOT done here — per v10 spec
@@ -6117,17 +6131,14 @@ export class DKGAgent {
       merged.push(ethers.getAddress(normalized));
     };
 
-    const localAgentParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents;
-    if (localAgentParticipants) {
-      for (const p of localAgentParticipants) add(p);
-    }
-
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const cgMetaGraph = contextGraphMetaUri(contextGraphId);
     const agentResult = await this.store.query(
       `SELECT ?agent WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+          UNION
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
         }
       }`,
     );

@@ -574,6 +574,30 @@ export class MockChainAdapter implements ChainAdapter {
         throw new Error('Mock: participantIdentityIds must be strictly increasing (sorted, unique)');
       }
     }
+    const publishPolicy = params.publishPolicy ?? 1;
+    if (publishPolicy !== 0 && publishPolicy !== 1) {
+      throw new Error('Mock: invalid publishPolicy');
+    }
+    let publishAuthority = params.publishAuthority ?? ethers.ZeroAddress;
+    let publishAuthorityAccountId = params.publishAuthorityAccountId ?? 0n;
+    if (!ethers.isAddress(publishAuthority)) {
+      throw new Error(`Mock: invalid publishAuthority ${publishAuthority}`);
+    }
+    publishAuthority = ethers.getAddress(publishAuthority);
+    if (publishPolicy === 0) {
+      if (publishAuthority === ethers.ZeroAddress) {
+        publishAuthority = ethers.getAddress(this.signerAddress);
+      }
+    } else {
+      if (publishAuthority !== ethers.ZeroAddress) {
+        throw new Error('Mock: open policy requires zero publishAuthority');
+      }
+      if (publishAuthorityAccountId !== 0n) {
+        throw new Error('Mock: open policy requires zero publishAuthorityAccountId');
+      }
+      publishAuthority = ethers.ZeroAddress;
+      publishAuthorityAccountId = 0n;
+    }
     const participantAgents = params.participantAgents ?? [];
     if (participantAgents.length > 256) {
       throw new Error('Mock: participantAgents cap');
@@ -601,9 +625,9 @@ export class MockChainAdapter implements ChainAdapter {
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
       metadataBatchId: params.metadataBatchId ?? 0n,
-      publishPolicy: params.publishPolicy ?? 1,
-      publishAuthority: params.publishAuthority,
-      publishAuthorityAccountId: params.publishAuthorityAccountId ?? 0n,
+      publishPolicy,
+      publishAuthority,
+      publishAuthorityAccountId,
       active: true,
       batches: [],
     });
@@ -614,7 +638,7 @@ export class MockChainAdapter implements ChainAdapter {
       participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
-      publishPolicy: params.publishPolicy ?? 1,
+      publishPolicy,
     });
 
     return {

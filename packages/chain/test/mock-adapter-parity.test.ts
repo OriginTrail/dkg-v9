@@ -218,6 +218,36 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       ],
     })).rejects.toThrow(/duplicate participant agent/);
   });
+
+  it('normalizes and rejects publish-policy configs like the EVM facade', async () => {
+    const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
+    const base = {
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    };
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 2,
+    })).rejects.toThrow(/invalid publishPolicy/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 1,
+      publishAuthority: '0x2222222222222222222222222222222222222222',
+    })).rejects.toThrow(/open policy requires zero publishAuthority/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 1,
+      publishAuthorityAccountId: 1n,
+    })).rejects.toThrow(/open policy requires zero publishAuthorityAccountId/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+    })).resolves.toMatchObject({ contextGraphId: 1n });
+  });
 });
 
 describe('NoChainAdapter completeness [CH-9]', () => {

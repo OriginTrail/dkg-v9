@@ -145,6 +145,18 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     );
   });
 
+  it('refuses KDF parameters above the supported envelope before calling scrypt', async () => {
+    _setScryptN(SAFE_N);
+    const ks = await encryptKeystore(PRIVKEY, PASSPHRASE);
+
+    await expect(decryptKeystore(withKdfParams(ks, { n: 2 ** 30 }), PASSPHRASE))
+      .rejects.toThrow(/scrypt N too high|unsupported keystore/i);
+    await expect(decryptKeystore(withKdfParams(ks, { r: 64 }), PASSPHRASE))
+      .rejects.toThrow(/scrypt r too high|unsupported keystore/i);
+    await expect(decryptKeystore(withKdfParams(ks, { p: 64 }), PASSPHRASE))
+      .rejects.toThrow(/scrypt p too high|unsupported keystore/i);
+  });
+
   it('refuses to decrypt a keystore with a short salt (<16 bytes)', async () => {
     _setScryptN(SAFE_N);
     const ks = await encryptKeystore(PRIVKEY, PASSPHRASE);

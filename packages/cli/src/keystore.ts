@@ -39,8 +39,11 @@ const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const DKLEN = 32;
 const MIN_SCRYPT_N = 2 ** 15;
+const MAX_SCRYPT_N = 2 ** 18;
 const MIN_SCRYPT_R = 8;
+const MAX_SCRYPT_R = SCRYPT_R;
 const MIN_SCRYPT_P = 1;
+const MAX_SCRYPT_P = SCRYPT_P;
 const MIN_SALT_BYTES = 16;
 
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
@@ -54,11 +57,20 @@ function assertSafeKdfParams(kdfparams: EncryptedKeystore['crypto']['kdfparams']
   if (!isPowerOfTwo(kdfparams.n) || kdfparams.n < MIN_SCRYPT_N) {
     throw new Error('KDF parameters below minimum: scrypt N too low');
   }
+  if (kdfparams.n > MAX_SCRYPT_N) {
+    throw new Error('Unsupported keystore KDF parameters: scrypt N too high');
+  }
   if (!Number.isInteger(kdfparams.r) || kdfparams.r < MIN_SCRYPT_R) {
     throw new Error('KDF parameters below minimum: scrypt r too low');
   }
+  if (kdfparams.r > MAX_SCRYPT_R) {
+    throw new Error('Unsupported keystore KDF parameters: scrypt r too high');
+  }
   if (!Number.isInteger(kdfparams.p) || kdfparams.p < MIN_SCRYPT_P) {
     throw new Error('KDF parameters below minimum: scrypt p too low');
+  }
+  if (kdfparams.p > MAX_SCRYPT_P) {
+    throw new Error('Unsupported keystore KDF parameters: scrypt p too high');
   }
   if (kdfparams.dklen !== DKLEN) {
     throw new Error(`Invalid dklen: dklen must be ${DKLEN}`);

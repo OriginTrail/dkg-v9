@@ -508,11 +508,19 @@ export class DkgChannelPlugin {
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
 
-    // Start the bridge server immediately so it's ready to receive
-    // inbound messages before any session exists.
-    this.start().catch((err) => {
-      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
-    });
+    // Start the standalone bridge server only when the gateway has not taken
+    // ownership of the channel routes via api.registerHttpRoute(). When the
+    // gateway is hosting `/api/dkg-channel/inbound` and `/api/dkg-channel/health`
+    // for us, binding our own listener on `this.port` (default 9201) collides
+    // with the gateway's listener on the same port and throws EADDRINUSE on
+    // startup — see issue #272.
+    if (!this.useGatewayRoute) {
+      this.start().catch((err) => {
+        log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
+      });
+    } else {
+      log.info?.(`[dkg-channel] Gateway channel routes registered — skipping standalone bridge server (port ${this.port})`);
+    }
   }
 
   // ---------------------------------------------------------------------------

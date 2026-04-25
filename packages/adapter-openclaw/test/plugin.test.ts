@@ -1155,7 +1155,12 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('persists gatewayUrl on first registration when gateway routing is available', async () => {
+  // Issue #272: when the gateway hosts the channel routes via registerHttpRoute,
+  // the channel plugin skips the standalone bridge bind (avoiding EADDRINUSE on
+  // port 9201). The connect call upfront marks `runtime.ready: true` because
+  // the gateway already owns the live transport — there is no follow-up PUT
+  // to flip status, since status was never `connecting` in this path.
+  it('persists gatewayUrl via the connect call when gateway routes are active (no follow-up PUT)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1207,14 +1212,175 @@ describe('DkgNodePlugin', () => {
         metadata: {
           transportMode: 'gateway+bridge',
         },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      });
+      expect(readyCall).toBeUndefined();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Bridge-mode (fallback) path — older gateways or runtimes where
+  // api.registerHttpRoute is not available. The standalone bridge bind still
+  // happens, status transitions connecting → ready via the PUT update fired
+  // after channelPlugin.start() resolves.
+  it('persists gatewayUrl on first registration in bridge mode (fallback when gateway routes unavailable)', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {
+          gateway: {
+            port: 19789,
+          },
+        },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        // No registerHttpRoute — fallback to standalone bridge mode.
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      // Allow the fetch promise chain (connect → start → updateLocalAgent) to
+      // settle. The standalone bridge bind on port 0 completes within a tick;
+      // the follow-up PUT lands shortly after.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+        metadata: {
+          transportMode: 'bridge',
+        },
+        runtime: {
+          status: 'connecting',
+          ready: false,
+          lastError: null,
+        },
       });
       expect(readyCall).toBeTruthy();
       expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:19789',
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
         },
       });
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Issue #272: gateway owns the route → DkgNodePlugin must not also drive
+  // standalone bridge start. The DkgChannelPlugin-side gate is covered in
+  // dkg-channel.test.ts; this asserts the same invariant at the outer
+  // DkgNodePlugin call site (DkgNodePlugin.ts gateway-route early-return).
+  it('does not call channelPlugin.start() when gateway routes are active (F-B gate)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    })) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { gateway: { port: 19789 } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerHttpRoute: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      // After plugin.register returns, channelPlugin is instantiated and its
+      // own register() has already run (gated start skipped per F-A). Install
+      // the spy now so it intercepts only the outer DkgNodePlugin call site.
+      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
+      expect(channelPlugin).toBeTruthy();
+      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
+      // Let the async connectLocalAgentIntegration → early-return chain settle.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(startSpy).not.toHaveBeenCalled();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does call channelPlugin.start() in bridge mode (fallback when gateway routes unavailable)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    })) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { gateway: { port: 19789 } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        // No registerHttpRoute — fallback to standalone bridge mode.
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
+      expect(channelPlugin).toBeTruthy();
+      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // The outer DkgNodePlugin.ts:602 call site fires once on the async
+      // connectLocalAgentIntegration → start() chain. F-A's call inside
+      // DkgChannelPlugin.register fired BEFORE the spy was installed and is
+      // therefore not counted here — that's the correct semantic for F-B's
+      // assertion.
+      expect(startSpy).toHaveBeenCalledTimes(1);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;

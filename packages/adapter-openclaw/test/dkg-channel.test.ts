@@ -274,6 +274,61 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isUsingGatewayRoute).toBe(false);
   });
 
+  // Issue #272: when the gateway hosts the channel routes, the standalone
+  // bridge listener on port 9201 collides with the gateway's listener on the
+  // same port and throws EADDRINUSE on startup.
+  describe('issue #272 — standalone bridge skipped when gateway routes registered', () => {
+    it('does not call start() when registerHttpRoute is available (gateway-route mode)', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi({ registerHttpRoute: trackFn() });
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(true);
+      expect(startSpy).not.toHaveBeenCalled();
+      expect((plugin as any).server).toBeNull();
+    });
+
+    it('does call start() when registerHttpRoute is unavailable (fallback bridge mode)', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi(); // no registerHttpRoute
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(false);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not call start() even when registerChannel and registerHttpRoute are both available', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const registerChannel = trackFn();
+      const registerHttpRoute = trackFn();
+      const api = makeApi({ registerChannel, registerHttpRoute });
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(true);
+      expect(registerChannel.calls).toHaveLength(1);
+      expect(registerHttpRoute.calls).toHaveLength(2);
+      expect(startSpy).not.toHaveBeenCalled();
+    });
+
+    // Locks the diagnostic log line operators grep for during port-conflict
+    // troubleshooting (DkgChannelPlugin.ts skip-path). A refactor that drops
+    // the log silently regresses observability — this test fails loudly.
+    it('logs the skip reason when gateway routes are registered', () => {
+      vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi({ registerHttpRoute: trackFn() });
+
+      plugin.register(api);
+
+      const infoCalls = (api.logger.info as TrackingFn).calls;
+      expect(
+        infoCalls.some((call) => String(call[0]).includes('skipping standalone bridge server')),
+      ).toBe(true);
+    });
+  });
+
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {
     let dispatched: any;
     const { runtime, recordInboundSession } = makeMockRuntime({

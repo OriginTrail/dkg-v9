@@ -562,6 +562,14 @@ export class DkgNodePlugin {
       transportMode: this.channelPlugin?.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
     const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
+    // When the gateway owns the channel routes (set by api.registerHttpRoute
+    // success in DkgChannelPlugin.register), the gateway is the live transport
+    // — our standalone bridge port is intentionally not bound (issue #272).
+    // Treat that as "ready at registration time" so we don't kick off a
+    // redundant channelPlugin.start() that would collide with the gateway's
+    // own listener on port 9201.
+    const gatewayOwnsRoute = this.channelPlugin?.isUsingGatewayRoute === true;
+    const readyAtRegistration = bridgeAlreadyReady || gatewayOwnsRoute;
     const basePayload = {
       id: 'openclaw',
       enabled: true,
@@ -577,8 +585,8 @@ export class DkgNodePlugin {
       await this.client.connectLocalAgentIntegration({
         ...basePayload,
         runtime: {
-          status: bridgeAlreadyReady ? 'ready' : 'connecting',
-          ready: bridgeAlreadyReady,
+          status: readyAtRegistration ? 'ready' : 'connecting',
+          ready: readyAtRegistration,
           lastError: null,
         },
       });
@@ -587,7 +595,7 @@ export class DkgNodePlugin {
       return;
     }
 
-    if (bridgeAlreadyReady || !this.channelPlugin) {
+    if (readyAtRegistration || !this.channelPlugin) {
       return;
     }
 

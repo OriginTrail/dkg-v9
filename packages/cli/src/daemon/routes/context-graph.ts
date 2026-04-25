@@ -502,18 +502,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { id, revealOnChain, accessPolicy } = parsed;
+    const { id, accessPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
     if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    }
     if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
     try {
-      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy, callerAgentAddress: requestAgentAddress });
+      const result = await agent.registerContextGraph(id, { accessPolicy, callerAgentAddress: requestAgentAddress });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -539,9 +536,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       if (msg.includes('address-scoped curator')) {
         return jsonResponse(res, 403, { error: msg });
-      }
-      if (msg.includes('revealOnChain is not supported')) {
-        return jsonResponse(res, 400, { error: msg });
       }
       return jsonResponse(res, 500, { error: msg });
     }

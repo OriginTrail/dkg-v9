@@ -473,8 +473,6 @@ export class ApiClient {
   }
 
   async registerContextGraph(id: string, opts?: {
-    /** @deprecated V10 ContextGraphs registration does not reveal cleartext metadata on-chain. */
-    revealOnChain?: boolean;
     accessPolicy?: number;
   }): Promise<{
     registered: string;

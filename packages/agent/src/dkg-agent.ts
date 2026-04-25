@@ -3113,14 +3113,24 @@ export class DKGAgent {
     // curated allowlist. These addresses are forwarded to
     // ContextGraphs.createContextGraph participantAgents on registration.
     if (opts.participantAgents && opts.participantAgents.length > 0) {
+      const seenParticipantAgents = new Set<string>();
       for (const addr of opts.participantAgents) {
         if (!ethers.isAddress(addr)) {
           throw new Error(`Invalid Ethereum address in participantAgents: "${addr}".`);
         }
+        const checksumAddress = ethers.getAddress(addr);
+        if (checksumAddress === ethers.ZeroAddress) {
+          throw new Error('Invalid Ethereum address in participantAgents: zero address is not allowed.');
+        }
+        const key = checksumAddress.toLowerCase();
+        if (seenParticipantAgents.has(key)) {
+          throw new Error(`Duplicate Ethereum address in participantAgents: "${checksumAddress}".`);
+        }
+        seenParticipantAgents.add(key);
         quads.push({
           subject: paranetUri,
           predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-          object: `"${ethers.getAddress(addr)}"`,
+          object: `"${checksumAddress}"`,
           graph: cgMetaGraph,
         });
       }
@@ -3270,6 +3280,7 @@ export class DKGAgent {
    * participation. Requires a funded wallet with TRAC.
    */
   async registerContextGraph(id: string, opts?: {
+    /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
     revealOnChain?: boolean;
     accessPolicy?: number;
     callerAgentAddress?: string;
@@ -3277,9 +3288,9 @@ export class DKGAgent {
     const ctx = createOperationContext('system');
 
     if (opts?.revealOnChain === true) {
-      throw new Error(
-        'revealOnChain is not supported by V10 ContextGraphs registration. ' +
-        'The V10 path mints a governance NFT and does not use ContextGraphNameRegistry metadata reveal.',
+      this.log.warn(
+        ctx,
+        'revealOnChain is deprecated and ignored by V10 ContextGraphs registration; metadata reveal uses the legacy name registry path.',
       );
     }
 

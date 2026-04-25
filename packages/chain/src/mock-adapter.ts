@@ -24,6 +24,7 @@ import type {
   V10PublishDirectParams,
   V10UpdateKCParams,
 } from './chain-adapter.js';
+import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
@@ -573,12 +574,31 @@ export class MockChainAdapter implements ChainAdapter {
         throw new Error('Mock: participantIdentityIds must be strictly increasing (sorted, unique)');
       }
     }
+    const participantAgents = params.participantAgents ?? [];
+    if (participantAgents.length > 256) {
+      throw new Error('Mock: participantAgents cap');
+    }
+    const seenParticipantAgents = new Set<string>();
+    for (const agent of participantAgents) {
+      if (!ethers.isAddress(agent)) {
+        throw new Error(`Mock: invalid participant agent ${agent}`);
+      }
+      const normalized = ethers.getAddress(agent);
+      if (normalized === ethers.ZeroAddress) {
+        throw new Error('Mock: zero participant agent');
+      }
+      const key = normalized.toLowerCase();
+      if (seenParticipantAgents.has(key)) {
+        throw new Error(`Mock: duplicate participant agent ${normalized}`);
+      }
+      seenParticipantAgents.add(key);
+    }
 
     const contextGraphId = this.nextContextGraphId++;
     this.contextGraphs.set(contextGraphId, {
       manager: this.signerAddress,
       participantIdentityIds: [...params.participantIdentityIds],
-      participantAgents: [...(params.participantAgents ?? [])],
+      participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
       metadataBatchId: params.metadataBatchId ?? 0n,
       publishPolicy: params.publishPolicy ?? 1,
@@ -592,7 +612,7 @@ export class MockChainAdapter implements ChainAdapter {
       contextGraphId: contextGraphId.toString(),
       manager: this.signerAddress,
       participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
-      participantAgents: params.participantAgents ?? [],
+      participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
       publishPolicy: params.publishPolicy ?? 1,
     });

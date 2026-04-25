@@ -123,8 +123,7 @@ describe('DkgNodePlugin', () => {
     expect(publishProps.sub_graph_name.type).toBe('string');
     expect(publishProps).toHaveProperty('register_if_needed');
     expect(publishProps.register_if_needed.type).toBe('boolean');
-    expect(publishProps).toHaveProperty('reveal_on_chain');
-    expect(publishProps.reveal_on_chain.type).toBe('boolean');
+    expect(publishProps).not.toHaveProperty('reveal_on_chain');
     expect(publishProps).toHaveProperty('access_policy');
     expect(publishProps.access_policy.type).toBe('number');
 
@@ -609,7 +608,6 @@ describe('DkgNodePlugin', () => {
       const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
         context_graph_id: 'ctx',
         register_if_needed: true,
-        reveal_on_chain: true,
         access_policy: 1,
       });
 
@@ -617,7 +615,6 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:9200/api/context-graph/register');
       expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
         id: 'ctx',
-        revealOnChain: true,
         accessPolicy: 1,
       });
       expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:9200/api/shared-memory/publish');
@@ -667,7 +664,6 @@ describe('DkgNodePlugin', () => {
       const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
         context_graph_id: 'ctx',
         register_if_needed: 'yes',
-        reveal_on_chain: 'true',
         access_policy: 3,
       });
       expect(fetchMock).not.toHaveBeenCalled();

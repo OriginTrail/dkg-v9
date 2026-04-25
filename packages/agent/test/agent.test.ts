@@ -1290,6 +1290,19 @@ decisions: []
     const ownerAgent = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
     const allowedAgent = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
 
+    await expect(agent.createContextGraph({
+      id: 'register-zero-participant-agent',
+      name: 'Zero Participant Agent',
+      participantAgents: [ethers.ZeroAddress],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/zero address/);
+    await expect(agent.createContextGraph({
+      id: 'register-duplicate-participant-agent',
+      name: 'Duplicate Participant Agent',
+      participantAgents: [allowedAgent, allowedAgent.toLowerCase()],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Duplicate Ethereum address/);
+
     await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
     await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
 

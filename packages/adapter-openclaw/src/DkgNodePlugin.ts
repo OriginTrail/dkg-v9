@@ -1528,10 +1528,6 @@ export class DkgNodePlugin {
               type: 'boolean',
               description: 'When true, explicitly register the context graph on-chain before publishing if needed. This may spend gas/TRAC; it is opt-in and not the default.',
             },
-            reveal_on_chain: {
-              type: 'boolean',
-              description: 'Optional registration flag used only when `register_if_needed` is true. Controls whether CG metadata is revealed on-chain.',
-            },
             access_policy: {
               type: 'number',
               description: 'Optional registration access policy used only when `register_if_needed` is true: `0` for open, `1` for private.',
@@ -2129,9 +2125,6 @@ export class DkgNodePlugin {
       if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
         return this.error('"register_if_needed" must be a boolean.');
       }
-      if (args.reveal_on_chain !== undefined && typeof args.reveal_on_chain !== 'boolean') {
-        return this.error('"reveal_on_chain" must be a boolean.');
-      }
       if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
         return this.error('"access_policy" must be 0 (open) or 1 (private).');
       }
@@ -2139,7 +2132,6 @@ export class DkgNodePlugin {
       if (registerIfNeeded) {
         try {
           registration = await this.client.registerContextGraph(contextGraphId, {
-            revealOnChain: args.reveal_on_chain as boolean | undefined,
             accessPolicy: args.access_policy as number | undefined,
           });
         } catch (err: any) {

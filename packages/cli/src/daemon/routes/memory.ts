@@ -569,6 +569,11 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (sessionUri !== undefined) {
+      if (typeof sessionUri !== 'string' || !isSafeIri(sessionUri)) {
+        return jsonResponse(res, 400, { error: 'Invalid "sessionUri": must be a safe IRI' });
+      }
+    }
 
     const targetLayer = layer === 'wm' ? 'wm' : 'swm';
     const agentDid = `did:dkg:agent:${agent.peerId}`;

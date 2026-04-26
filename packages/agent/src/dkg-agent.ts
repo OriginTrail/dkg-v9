@@ -3485,12 +3485,27 @@ export class DKGAgent {
       ? storedRequiredSignatures
       : 1;
     const participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
+    if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
+      throw new Error(
+        `Context graph "${id}" cannot be registered on-chain: participantAgents cannot exceed ` +
+        `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after merging local allowedAgents.`,
+      );
+    }
+    const publishAuthority = publishPolicy === EVM_PUBLISH_CURATED
+      ? this.getChainPublishAuthorityAddress()
+      : undefined;
+    if (publishPolicy === EVM_PUBLISH_CURATED && !publishAuthority) {
+      throw new Error(
+        `Context graph "${id}" cannot be registered as curated without a chain signer address. ` +
+        `Local curator=${ownerAddress}.`,
+      );
+    }
 
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,
       requiredSignatures: effectiveRequiredSignatures,
       publishPolicy,
-      ...(publishPolicy === EVM_PUBLISH_CURATED ? { publishAuthority: ownerAddress } : {}),
+      ...(publishAuthority ? { publishAuthority } : {}),
       participantAgents,
     });
     const onChainId = result.contextGraphId.toString();
@@ -6037,6 +6052,21 @@ export class DKGAgent {
     return !!this.defaultAgentAddress
       && ethers.isAddress(this.defaultAgentAddress)
       && ownerAddress.toLowerCase() === this.defaultAgentAddress.toLowerCase();
+  }
+
+  private getChainPublishAuthorityAddress(): string | undefined {
+    const chainWithSigner = this.chain as unknown as {
+      getSignerAddress?: () => string;
+      signerAddress?: string;
+    };
+    const rawAddress = chainWithSigner.getSignerAddress?.() ?? chainWithSigner.signerAddress;
+    if (rawAddress && ethers.isAddress(rawAddress)) {
+      return ethers.getAddress(rawAddress);
+    }
+    if (this.defaultAgentAddress && ethers.isAddress(this.defaultAgentAddress)) {
+      return ethers.getAddress(this.defaultAgentAddress);
+    }
+    return undefined;
   }
 
   /**

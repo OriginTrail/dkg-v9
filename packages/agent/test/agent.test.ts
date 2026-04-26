@@ -1317,6 +1317,15 @@ decisions: []
       participantAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
       callerAgentAddress: ownerAgent,
     })).rejects.toThrow(/participantAgents cannot exceed/);
+    await agent.createContextGraph({
+      id: 'register-too-many-merged-participant-agents',
+      name: 'Too Many Merged Participant Agents',
+      accessPolicy: 1,
+      allowedAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
+      callerAgentAddress: ownerAgent,
+    });
+    await expect(agent.registerContextGraph('register-too-many-merged-participant-agents', { callerAgentAddress: ownerAgent }))
+      .rejects.toThrow(/participantAgents cannot exceed/);
 
     await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
     await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
@@ -1343,10 +1352,10 @@ decisions: []
       participantAgents: [],
     });
     expect(chain.createOnChainContextGraphCalls[1]?.publishPolicy).toBe(0);
-    expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ownerAgent);
+    expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
     expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
     expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
-    expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ownerAgent);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
     expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toContain(allowedAgent);
 
     await agent.stop().catch(() => {});

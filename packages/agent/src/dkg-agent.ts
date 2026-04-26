@@ -3397,8 +3397,6 @@ export class DKGAgent {
         `Curator=${owner}, caller=${`did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
       );
     }
-    const ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
-
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
     const paranetUri = `did:dkg:context-graph:${id}`;
@@ -3494,12 +3492,6 @@ export class DKGAgent {
     const publishAuthority = publishPolicy === EVM_PUBLISH_CURATED
       ? this.getChainPublishAuthorityAddress()
       : undefined;
-    if (publishPolicy === EVM_PUBLISH_CURATED && !publishAuthority) {
-      throw new Error(
-        `Context graph "${id}" cannot be registered as curated without a chain signer address. ` +
-        `Local curator=${ownerAddress}.`,
-      );
-    }
 
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,
@@ -6062,9 +6054,6 @@ export class DKGAgent {
     const rawAddress = chainWithSigner.getSignerAddress?.() ?? chainWithSigner.signerAddress;
     if (rawAddress && ethers.isAddress(rawAddress)) {
       return ethers.getAddress(rawAddress);
-    }
-    if (this.defaultAgentAddress && ethers.isAddress(this.defaultAgentAddress)) {
-      return ethers.getAddress(this.defaultAgentAddress);
     }
     return undefined;
   }

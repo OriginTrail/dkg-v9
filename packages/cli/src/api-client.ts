@@ -473,13 +473,18 @@ export class ApiClient {
   }
 
   async registerContextGraph(id: string, opts?: {
+    /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
+    revealOnChain?: boolean;
     accessPolicy?: number;
   }): Promise<{
     registered: string;
     onChainId: string;
     hint?: string;
   }> {
-    return this.post('/api/context-graph/register', { id, ...opts });
+    return this.post('/api/context-graph/register', {
+      id,
+      ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
+    });
   }
 
   /** @deprecated Use addAgent instead. */

@@ -585,6 +585,9 @@ export class MockChainAdapter implements ChainAdapter {
     }
     publishAuthority = ethers.getAddress(publishAuthority);
     if (publishPolicy === 0) {
+      if (publishAuthorityAccountId !== 0n) {
+        throw new Error('Mock: PCA publishAuthorityAccountId is not supported');
+      }
       if (publishAuthority === ethers.ZeroAddress) {
         publishAuthority = ethers.getAddress(this.signerAddress);
       }

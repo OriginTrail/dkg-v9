@@ -246,6 +246,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     await expect(mock.createOnChainContextGraph({
       ...base,
       publishPolicy: 0,
+      publishAuthorityAccountId: 1n,
+    })).rejects.toThrow(/PCA publishAuthorityAccountId is not supported/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
     })).resolves.toMatchObject({ contextGraphId: 1n });
   });
 });

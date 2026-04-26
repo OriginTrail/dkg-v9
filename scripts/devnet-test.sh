@@ -1377,7 +1377,7 @@ except Exception:
   elif [[ "$PQ_FINAL_ST" == "__ERR__" || "$PQ_FINAL_ST" == "__MISSING__" ]]; then
     fail "Publisher job status unparseable or missing status field (got=$PQ_FINAL_ST)"
   elif [[ "$PQ_FINAL_ST" == "accepted" ]]; then
-    warn "Publisher job remained accepted; queue worker may be disabled in this devnet profile"
+    fail "Publisher job remained accepted; queue worker did not drain the job"
   else
     fail "Publisher job did not reach included/finalized (got=$PQ_FINAL_ST) — publisher queue e2e broken"
   fi

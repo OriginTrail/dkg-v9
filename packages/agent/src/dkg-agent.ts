@@ -6167,10 +6167,14 @@ export class DKGAgent {
       if (!value) return;
       const normalized = value.replace(/^"|"$/g, '');
       if (!ethers.isAddress(normalized)) return;
+      const checksumAddress = ethers.getAddress(normalized);
+      if (checksumAddress === ethers.ZeroAddress) {
+        throw new Error('Invalid Ethereum address in participantAgents: zero address is not allowed.');
+      }
       const key = normalized.toLowerCase();
       if (seen.has(key)) return;
       seen.add(key);
-      merged.push(ethers.getAddress(normalized));
+      merged.push(checksumAddress);
     };
 
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
@@ -6178,9 +6182,7 @@ export class DKGAgent {
     const agentResult = await this.store.query(
       `SELECT ?agent WHERE {
         GRAPH <${cgMetaGraph}> {
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
-          UNION
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent
         }
       }`,
     );

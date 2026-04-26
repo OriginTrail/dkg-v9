@@ -1287,8 +1287,9 @@ decisions: []
     });
     await agent.start();
 
-    const ownerAgent = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+    const ownerAgent = ethers.getAddress(chain.signerAddress);
     const allowedAgent = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const nonDefaultOwnerAgent = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
 
     await expect(agent.createContextGraph({
       id: 'register-zero-participant-agent',
@@ -1326,6 +1327,14 @@ decisions: []
     });
     await expect(agent.registerContextGraph('register-too-many-merged-participant-agents', { callerAgentAddress: ownerAgent }))
       .rejects.toThrow(/participantAgents cannot exceed/);
+    await agent.createContextGraph({
+      id: 'register-non-default-curated-policy',
+      name: 'Non-default Curated Policy',
+      accessPolicy: 1,
+      callerAgentAddress: nonDefaultOwnerAgent,
+    });
+    await expect(agent.registerContextGraph('register-non-default-curated-policy', { callerAgentAddress: nonDefaultOwnerAgent }))
+      .rejects.toThrow(/Per-agent chain signers are not supported/);
 
     await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
     await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });

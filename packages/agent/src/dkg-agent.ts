@@ -3371,7 +3371,7 @@ export class DKGAgent {
     let owner = await this.getContextGraphCurator(id);
     if (!owner) {
       const existingCreator = await this.getContextGraphCreator(id);
-      if (existingCreator && existingCreator !== selfPeerDid) {
+      if (existingCreator && !this.isCallerOrNodeOwner(existingCreator, opts?.callerAgentAddress)) {
         throw new Error(
           `Context graph "${id}" has no address-scoped curator and was created by ${existingCreator}. ` +
           'Sync curator metadata or ask the curator to register it on-chain.',
@@ -3397,6 +3397,7 @@ export class DKGAgent {
         `Curator=${owner}, caller=${`did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
       );
     }
+    const ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
     const paranetUri = `did:dkg:context-graph:${id}`;
@@ -3492,6 +3493,28 @@ export class DKGAgent {
     const publishAuthority = publishPolicy === EVM_PUBLISH_CURATED
       ? this.getChainPublishAuthorityAddress()
       : undefined;
+    if (
+      publishPolicy === EVM_PUBLISH_CURATED
+      && publishAuthority
+      && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()
+    ) {
+      throw new Error(
+        `Context graph "${id}" cannot be registered as curated by local curator ${ownerAddress} ` +
+        `because the configured chain signer is ${publishAuthority}. Per-agent chain signers are not supported yet.`,
+      );
+    }
+    if (
+      publishPolicy === EVM_PUBLISH_CURATED
+      && !publishAuthority
+      && opts?.callerAgentAddress
+      && this.defaultAgentAddress
+      && opts.callerAgentAddress.toLowerCase() !== this.defaultAgentAddress.toLowerCase()
+    ) {
+      throw new Error(
+        `Context graph "${id}" cannot be registered as curated by non-default local curator ` +
+        `${opts.callerAgentAddress} without chain signer introspection. Per-agent chain signers are not supported yet.`,
+      );
+    }
 
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,

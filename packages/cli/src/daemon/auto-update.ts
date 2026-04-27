@@ -592,15 +592,38 @@ export async function checkForNewCommitWithStatus(
       gitEnv,
     );
     if (!latestCommit) {
+      await recordCheck({ ref, status: 'error' });
       return { status: "error" };
     }
-    if (latestCommit === currentCommit) return { status: "up-to-date" };
+    if (latestCommit === currentCommit) {
+      await recordCheck({ ref, status: 'up-to-date', remoteCommit: latestCommit });
+      return { status: "up-to-date" };
+    }
+    await recordCheck({ ref, status: 'available', remoteCommit: latestCommit });
     return { status: "available", commit: latestCommit };
   } catch (err: any) {
     log(
       `Auto-update: failed to check for new commit (${err?.message ?? String(err)})`,
     );
+    await recordCheck({ ref, status: 'error' });
     return { status: "error" };
+  }
+}
+
+async function recordCheck(args: { ref: string; status: 'available' | 'up-to-date' | 'error'; remoteCommit?: string }): Promise<void> {
+  try {
+    const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
+    await writeAutoUpdateStatus({
+      ...prev,
+      lastCheck: {
+        at: new Date().toISOString(),
+        ref: args.ref,
+        status: args.status,
+        ...(args.remoteCommit ? { remoteCommit: args.remoteCommit } : {}),
+      },
+    });
+  } catch {
+    /* observability-only */
   }
 }
 
@@ -677,19 +700,272 @@ export async function releaseUpdateLock(): Promise<void> {
   _lockToken = null;
 }
 
+// ─── Build-step helpers ────────────────────────────────────────────────
+
+/** Default per-step build timeouts (milliseconds). Override via config. */
+export const DEFAULT_BUILD_TIMEOUTS = {
+  install: 180_000,
+  build: 180_000,
+  contracts: 300_000,
+  markitdown: 900_000,
+} as const;
+
+export function resolveBuildTimeouts(
+  au: Pick<ResolvedAutoUpdateConfig, 'buildTimeoutMs'>,
+): { install: number; build: number; contracts: number; markitdown: number } {
+  const t = au.buildTimeoutMs ?? {};
+  return {
+    install: positiveOr(t.install, DEFAULT_BUILD_TIMEOUTS.install),
+    build: positiveOr(t.build, DEFAULT_BUILD_TIMEOUTS.build),
+    contracts: positiveOr(t.contracts, DEFAULT_BUILD_TIMEOUTS.contracts),
+    markitdown: positiveOr(t.markitdown, DEFAULT_BUILD_TIMEOUTS.markitdown),
+  };
+}
+
+function positiveOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+/**
+ * Run a build command with a timeout, then best-effort sweep orphan build
+ * subprocesses on failure. Node's `exec` SIGTERMs the direct child on timeout
+ * but pnpm's grandchildren (notably `solcjs-runner`) survive and pin a CPU,
+ * which has caused subsequent update attempts on the same host to time out
+ * even faster ("doom loop" observed on dkg-v9-relay-02/04). The sweep targets
+ * narrow process-name patterns so we never kill unrelated workloads.
+ */
+export async function runBuildStep(
+  execAsync: (cmd: string, opts: any) => Promise<any>,
+  cmd: string,
+  opts: { cwd: string; timeoutMs: number; label: string; log: (m: string) => void; env?: NodeJS.ProcessEnv },
+): Promise<{ stdout: string; stderr: string }> {
+  const startedAt = Date.now();
+  try {
+    const result = await execAsync(cmd, {
+      cwd: opts.cwd,
+      encoding: 'utf-8',
+      timeout: opts.timeoutMs,
+      ...(opts.env ? { env: opts.env } : {}),
+    });
+    return { stdout: String(result?.stdout ?? ''), stderr: String(result?.stderr ?? '') };
+  } catch (err: any) {
+    const elapsedMs = Date.now() - startedAt;
+    const timedOut =
+      err?.killed === true ||
+      err?.signal === 'SIGTERM' ||
+      (typeof err?.message === 'string' && /timed? ?out/i.test(err.message));
+    opts.log(
+      `Auto-update: build step "${opts.label}" failed after ${elapsedMs}ms` +
+        `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${err?.message ?? String(err)}`,
+    );
+    if (timedOut) {
+      sweepOrphanBuildProcesses(opts.log);
+    }
+    throw err;
+  }
+}
+
+const ORPHAN_BUILD_PROCESS_PATTERN =
+  // Narrow patterns: solcjs runner, hardhat compile, and pnpm filtered builds
+  // we explicitly spawn. We do NOT include bare `pnpm` to avoid killing
+  // unrelated workloads on the host.
+  'solcjs-runner|hardhat compile|pnpm install --frozen-lockfile|pnpm --filter .* build';
+
+function sweepOrphanBuildProcesses(log: (m: string) => void): void {
+  const { execSync } = _autoUpdateIo;
+  try {
+    execSync(
+      `pkill -KILL -f ${JSON.stringify(ORPHAN_BUILD_PROCESS_PATTERN)} 2>/dev/null || true`,
+      { stdio: 'ignore', timeout: 5_000 },
+    );
+    log('Auto-update: swept orphan build subprocesses (best-effort).');
+  } catch {
+    /* best effort, never throw */
+  }
+}
+
+/**
+ * Decide whether to rebuild Solidity contracts. Default-true on diff failure:
+ * the cost of an unnecessary contract build (~5 minutes on slow hardware) is
+ * far cheaper than shipping a slot with stale ABIs, which previously caused
+ * silent breakage (we'd flip to a slot whose JS code references contract
+ * methods that don't match the deployed bytecode).
+ *
+ * If the parent commit isn't reachable in the slot (shallow clone, force-push
+ * rebase upstream), try a `git fetch` for the missing SHA before giving up.
+ */
+async function shouldRebuildContracts(args: {
+  currentCommit: string;
+  checkedOutCommit: string;
+  targetDir: string;
+  execFileAsync: (file: string, args: string[], opts: any) => Promise<any>;
+  log: (m: string) => void;
+}): Promise<boolean> {
+  const { currentCommit, checkedOutCommit, targetDir, execFileAsync, log } = args;
+  if (
+    !/^[0-9a-f]{6,40}$/i.test(currentCommit) ||
+    !/^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
+  ) {
+    log('Auto-update: contract-change check skipped (commit SHAs invalid); building contracts to be safe.');
+    return true;
+  }
+  const tryDiff = async (): Promise<{ ok: boolean; stdout?: string; err?: any }> => {
+    try {
+      const result = await execFileAsync(
+        'git',
+        ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`],
+        { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+      );
+      return { ok: true, stdout: String(result?.stdout ?? '') };
+    } catch (err: any) {
+      return { ok: false, err };
+    }
+  };
+  let diff = await tryDiff();
+  if (!diff.ok) {
+    // Most common cause: the parent commit isn't in the slot's pack files.
+    // Fetch it explicitly (depth=1 on the SHA), then retry once.
+    try {
+      log(`Auto-update: contract-diff failed; fetching parent commit ${currentCommit.slice(0, 8)} to retry.`);
+      await execFileAsync('git', ['fetch', '--depth=1', 'origin', currentCommit], {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+      diff = await tryDiff();
+    } catch (fetchErr: any) {
+      log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); building contracts to be safe.`);
+      return true;
+    }
+  }
+  if (!diff.ok) {
+    log(
+      `Auto-update: contract-change check failed (${diff.err?.message ?? diff.err}); building contracts to be safe.`,
+    );
+    return true;
+  }
+  const changedPaths = String(diff.stdout ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
+}
+
+// ─── Persisted update outcome ──────────────────────────────────────────
+
+/**
+ * Single-row history file at `<DKG_HOME>/.update-status.json`. Operators (and
+ * the dashboard / Graylog alerting) read this to detect stuck nodes without
+ * needing to scrape the daemon log. `consecutiveFailures >= 3` is a good
+ * alert threshold given a 30-min check interval.
+ */
+export interface AutoUpdateStatusFile {
+  /** Last check (regardless of outcome). */
+  lastCheck?: { at: string; ref: string; remoteCommit?: string; status: 'available' | 'up-to-date' | 'error' };
+  /** Last attempted update (i.e. a remote commit was newer than local). */
+  lastAttempt?: {
+    at: string;
+    ref: string;
+    fromCommit: string;
+    toCommit?: string;
+    status: UpdateStatus;
+    errorMessage?: string;
+    elapsedMs: number;
+  };
+  /** Last successful update. */
+  lastSuccess?: { at: string; ref: string; fromCommit: string; toCommit: string; version?: string };
+  /** Consecutive failed attempts since the last `updated` outcome. */
+  consecutiveFailures: number;
+}
+
+const STATUS_FILE_NAME = '.update-status.json';
+
+export async function readAutoUpdateStatus(): Promise<AutoUpdateStatusFile | null> {
+  const { dkgDir, readFile } = _autoUpdateIo;
+  try {
+    const raw = await readFile(join(dkgDir(), STATUS_FILE_NAME), 'utf-8');
+    const parsed = JSON.parse(raw) as AutoUpdateStatusFile;
+    if (typeof parsed?.consecutiveFailures !== 'number') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeAutoUpdateStatus(status: AutoUpdateStatusFile): Promise<void> {
+  const { dkgDir, writeFile } = _autoUpdateIo;
+  try {
+    await writeFile(join(dkgDir(), STATUS_FILE_NAME), JSON.stringify(status, null, 2));
+  } catch {
+    /* status file is observability-only; never break update flow */
+  }
+}
+
+async function recordAttempt(args: {
+  ref: string;
+  fromCommit: string;
+  toCommit?: string;
+  status: UpdateStatus;
+  errorMessage?: string;
+  startedAt: number;
+  version?: string;
+}): Promise<void> {
+  const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
+  const nowIso = new Date().toISOString();
+  const elapsedMs = Date.now() - args.startedAt;
+  const next: AutoUpdateStatusFile = {
+    ...prev,
+    lastAttempt: {
+      at: nowIso,
+      ref: args.ref,
+      fromCommit: args.fromCommit,
+      ...(args.toCommit ? { toCommit: args.toCommit } : {}),
+      status: args.status,
+      ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+      elapsedMs,
+    },
+    consecutiveFailures:
+      args.status === 'updated' || args.status === 'up-to-date'
+        ? 0
+        : (prev.consecutiveFailures ?? 0) + 1,
+  };
+  if (args.status === 'updated' && args.toCommit) {
+    next.lastSuccess = {
+      at: nowIso,
+      ref: args.ref,
+      fromCommit: args.fromCommit,
+      toCommit: args.toCommit,
+      ...(args.version ? { version: args.version } : {}),
+    };
+  }
+  await writeAutoUpdateStatus(next);
+}
+
 /**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
  */
+export interface PerformUpdateOptions {
+  refOverride?: string;
+  allowPrerelease?: boolean;
+  verifyTagSignature?: boolean;
+  /**
+   * If true, run `git clean -fdx` in the inactive slot before building.
+   * Default false: preserve `node_modules/` and the Hardhat compile cache so
+   * the build is incremental. Cold rebuilds on ARM64 historically exceeded
+   * the 5-minute build-step timeout. Operators who want a known-clean state
+   * should set this explicitly.
+   */
+  forceClean?: boolean;
+}
+
 export async function performUpdate(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  } = {},
+  opts: PerformUpdateOptions = {},
 ): Promise<boolean> {
   const status = await performUpdateWithStatus(au, log, opts);
   return status === "updated";
@@ -698,11 +974,7 @@ export async function performUpdate(
 export async function performUpdateWithStatus(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  } = {},
+  opts: PerformUpdateOptions = {},
 ): Promise<UpdateStatus> {
   if (_updateInProgress) {
     log("Auto-update: another update is already in progress, skipping");
@@ -714,22 +986,66 @@ export async function performUpdateWithStatus(
     _updateInProgress = false;
     return "failed";
   }
+  const startedAt = Date.now();
+  let status: UpdateStatus = "failed";
+  let errorMessage: string | undefined;
+  let outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } | null = null;
   try {
-    return await _performUpdateInner(au, log, opts);
+    const inner = await _performUpdateInnerInstrumented(au, log, opts);
+    status = inner.status;
+    outcome = inner.outcome;
+    return status;
+  } catch (err: any) {
+    errorMessage = err?.message ?? String(err);
+    throw err;
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
+    // Only persist when we got far enough to know the current commit;
+    // otherwise the attempt is uninteresting (slots not initialized, etc.)
+    // and would just pollute consecutiveFailures.
+    if (outcome && outcome.fromCommit) {
+      try {
+        await recordAttempt({
+          ref: outcome.ref,
+          fromCommit: outcome.fromCommit,
+          toCommit: outcome.toCommit,
+          status,
+          ...(errorMessage ? { errorMessage } : {}),
+          startedAt,
+          ...(outcome.version ? { version: outcome.version } : {}),
+        });
+      } catch {
+        /* status persistence is observability-only */
+      }
+    }
   }
+}
+
+/**
+ * Wraps `_performUpdateInner` to surface the `from`/`to` commit and version
+ * for the persisted status file. The inner function returns only an
+ * `UpdateStatus` enum because consumers like `checkForUpdate` don't care
+ * about the metadata; we capture it here via a shared closure.
+ */
+async function _performUpdateInnerInstrumented(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: PerformUpdateOptions,
+): Promise<{ status: UpdateStatus; outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } | null }> {
+  const captured: { fromCommit: string; toCommit?: string; version?: string; ref: string } = {
+    fromCommit: '',
+    ref: (opts.refOverride ?? au.branch) || 'main',
+  };
+  const status = await _performUpdateInner(au, log, opts, captured);
+  return { status, outcome: captured };
 }
 
 async function _performUpdateInner(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  },
+  opts: PerformUpdateOptions,
+  captured?: { fromCommit: string; toCommit?: string; version?: string; ref: string },
 ): Promise<UpdateStatus> {
   const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
@@ -764,6 +1080,8 @@ async function _performUpdateInner(
     }
   }
 
+  if (captured) captured.fromCommit = currentCommit;
+
   const pending = await readPendingUpdateState();
   if (pending) {
     const active = await activeSlot();
@@ -772,6 +1090,7 @@ async function _performUpdateInner(
       if (pending.version) await writeFile(versionFile, pending.version);
       await clearPendingUpdateState();
       currentCommit = pending.commit || currentCommit;
+      if (captured) captured.fromCommit = currentCommit;
       log(
         `Auto-update: recovered pending update state for slot ${pending.target}.`,
       );
@@ -854,14 +1173,25 @@ async function _performUpdateInner(
       encoding: "utf-8",
       timeout: 60_000,
     });
-    log(
-      `Auto-update: cleaning slot ${target} working tree (git clean -fdx)...`,
-    );
-    await execFileAsync("git", ["clean", "-fdx"], {
-      cwd: targetDir,
-      encoding: "utf-8",
-      timeout: 120_000,
-    });
+    // Intentionally NOT running `git clean -fdx` here. Untracked files in the
+    // slot directory are dominated by `node_modules/` and the Hardhat compile
+    // cache, which we want to PRESERVE so the subsequent build is incremental
+    // (cold rebuilds on ARM64 routinely exceed 5 minutes due to WASM solc and
+    // historically tripped the build-step timeout). `git checkout --force
+    // FETCH_HEAD` already restores tracked files; untracked files left over
+    // from a previous failed build are scoped to dist/ and are overwritten by
+    // the next `pnpm build`. Operators who want a cold rebuild should pass
+    // `opts.forceClean: true` (e.g. via the manual rebuild path).
+    if (opts.forceClean) {
+      log(
+        `Auto-update: forceClean=true; running git clean -fdx in slot ${target} (cold rebuild)...`,
+      );
+      await execFileAsync("git", ["clean", "-fdx"], {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 120_000,
+      });
+    }
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: targetDir,
       encoding: "utf-8",
@@ -881,11 +1211,14 @@ async function _performUpdateInner(
     return "failed";
   }
 
+  const timeouts = resolveBuildTimeouts(au);
+
   try {
-    await execAsync("pnpm install --frozen-lockfile", {
+    await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
-      encoding: "utf-8",
-      timeout: 180_000,
+      timeoutMs: timeouts.install,
+      label: "pnpm install",
+      log,
     });
     let usedFullBuildFallback = false;
     let hasRuntimeBuildScript = false;
@@ -904,19 +1237,21 @@ async function _performUpdateInner(
     }
 
     if (hasRuntimeBuildScript) {
-      await execAsync("pnpm build:runtime", {
+      await runBuildStep(execAsync, "pnpm build:runtime", {
         cwd: targetDir,
-        encoding: "utf-8",
-        timeout: 180_000,
+        timeoutMs: timeouts.build,
+        label: "pnpm build:runtime",
+        log,
       });
     } else {
       log(
         "Auto-update: target repo has no build:runtime script; falling back to pnpm build.",
       );
-      await execAsync("pnpm build", {
+      await runBuildStep(execAsync, "pnpm build", {
         cwd: targetDir,
-        encoding: "utf-8",
-        timeout: 180_000,
+        timeoutMs: timeouts.build,
+        label: "pnpm build",
+        log,
       });
       usedFullBuildFallback = true;
     }
@@ -926,46 +1261,26 @@ async function _performUpdateInner(
         "Auto-update: contract build check skipped (full build fallback already executed).",
       );
     } else {
-      let shouldBuildContracts = false;
-      try {
-        if (
-          /^[0-9a-f]{6,40}$/i.test(currentCommit) &&
-          /^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
-        ) {
-          const { stdout } = await execFileAsync(
-            "git",
-            ["diff", "--name-only", `${currentCommit}..${checkedOutCommit}`],
-            {
-              cwd: targetDir,
-              encoding: "utf-8",
-              timeout: 30_000,
-            },
-          );
-          const changedPaths = String(stdout)
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean);
-          shouldBuildContracts = changedPaths.some((p) =>
-            p.startsWith("packages/evm-module/contracts/"),
-          );
-        }
-      } catch (diffErr: any) {
-        log(
-          `Auto-update: contract-change check failed (${diffErr.message}); skipping contract build.`,
-        );
-        shouldBuildContracts = false;
-      }
+      const shouldBuildContracts = await shouldRebuildContracts({
+        currentCommit,
+        checkedOutCommit,
+        targetDir,
+        execFileAsync,
+        log,
+      });
 
       if (shouldBuildContracts) {
         log(
           "Auto-update: contract folder changes detected; building @origintrail-official/dkg-evm-module...",
         );
-        await execAsync(
+        await runBuildStep(
+          execAsync,
           "pnpm --filter @origintrail-official/dkg-evm-module build",
           {
             cwd: targetDir,
-            encoding: "utf-8",
-            timeout: 300_000,
+            timeoutMs: timeouts.contracts,
+            label: "pnpm --filter dkg-evm-module build",
+            log,
           },
         );
         log(
@@ -980,17 +1295,19 @@ async function _performUpdateInner(
 
     log("Auto-update: staging MarkItDown binary for the inactive slot...");
     try {
-      await execAsync(
+      await runBuildStep(
+        execAsync,
         "node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort",
         {
           cwd: targetDir,
-          encoding: "utf-8",
-          timeout: 900_000,
+          timeoutMs: timeouts.markitdown,
+          label: "bundle-markitdown",
+          log,
         },
       );
     } catch (markItDownErr: any) {
       log(
-        `Auto-update: MarkItDown staging failed in slot ${target} â€” ${markItDownErr.message}. Continuing without document conversion on this node.`,
+        `Auto-update: MarkItDown staging failed in slot ${target} — ${markItDownErr.message}. Continuing without document conversion on this node.`,
       );
     }
   } catch (err: any) {
@@ -1090,6 +1407,10 @@ async function _performUpdateInner(
     log(
       `Auto-update: swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
     );
+    if (captured) {
+      captured.toCommit = checkedOutCommit;
+      if (nextVersion) captured.version = nextVersion;
+    }
   } catch (swapErr: any) {
     await clearPendingUpdateState();
     log(`Auto-update: symlink swap failed — ${swapErr.message}`);
@@ -1099,7 +1420,6 @@ async function _performUpdateInner(
     `Auto-update: build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ""}. Swapped symlink. Restarting...`,
   );
-  log("v9 auto-update test live leeroy jenkins");
   return "updated";
 }
 

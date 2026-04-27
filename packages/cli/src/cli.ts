@@ -17,6 +17,7 @@ import {
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  type AutoUpdateConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveMsOption } from './publisher-runner.js';
@@ -289,17 +290,25 @@ program
     if (enableAutoUpdate) {
       // Effective upstream defaults — what the node would use if nothing were
       // persisted in ~/.dkg/config.json. Network config beats project.json.
-      // We persist repo/branch only when they differ from these, so future
-      // changes to the shipped network or project config propagate on the
-      // next daemon run without requiring a config rewrite.
+      // We persist a field only when it differs from the upstream default, so
+      // future changes to the shipped network or project config propagate on
+      // the next daemon run without requiring a config rewrite. Without this
+      // guard, every accepted-default ends up pinned in the custom config
+      // forever.
       const proj = loadProjectConfig();
       const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
       const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
+      const effectiveAllowPrerelease = network?.autoUpdate?.allowPrerelease ?? true;
+      const effectiveSshKeyPath = network?.autoUpdate?.sshKeyPath ?? '';
+      // Keep this in sync with `resolveAutoUpdateConfig` in config.ts.
+      const effectiveInterval = network?.autoUpdate?.checkIntervalMinutes ?? 30;
+
       const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
       const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
-      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
-      const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
+      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? effectiveAllowPrerelease;
+      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? effectiveSshKeyPath;
+      const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? effectiveInterval;
+
       const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
       const branch = await ask('Branch', defaultBranch);
       const allowPrerelease = (await ask(
@@ -308,14 +317,15 @@ program
       )).toLowerCase() === 'y';
       const sshKeyPath = (await ask('SSH private key path (optional; blank uses agent/default SSH config)', defaultSshKeyPath)).trim();
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
+
       autoUpdate = {
         enabled: true,
         ...(repo && repo !== effectiveRepo ? { repo } : {}),
         ...(branch && branch !== effectiveBranch ? { branch } : {}),
-        allowPrerelease,
-        sshKeyPath: sshKeyPath || undefined,
-        checkIntervalMinutes: interval,
-      };
+        ...(allowPrerelease !== effectiveAllowPrerelease ? { allowPrerelease } : {}),
+        ...(sshKeyPath && sshKeyPath !== effectiveSshKeyPath ? { sshKeyPath } : {}),
+        ...(Number.isFinite(interval) && interval !== effectiveInterval ? { checkIntervalMinutes: interval } : {}),
+      } as AutoUpdateConfig;
     }
 
     // Chain configuration

@@ -1295,3 +1295,151 @@ describe('compareSemver', () => {
     expect(compareSemver('v9.0.0', '9.0.0')).toBe(0);
   });
 });
+
+// ─── Hardening: incremental builds, configurable timeouts, fail-safe contract diff,
+//     persisted update status. See PR `autoupdater-hardening`.
+describe('autoupdater hardening', () => {
+  beforeEach(() => {
+    resetMocks();
+    mockActiveSlot = 'a';
+    installMocks();
+  });
+
+  afterEach(() => {
+    restoreIo();
+  });
+
+  it('does NOT run `git clean -fdx` by default — preserves node_modules/Hardhat cache for incremental rebuild', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {});
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean',
+    );
+    expect(cleanCall).toBeUndefined();
+  });
+
+  it('runs `git clean -fdx` only when forceClean=true is passed', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {}, { forceClean: true });
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean' && c.args[1] === '-fdx',
+    );
+    expect(cleanCall).toBeTruthy();
+  });
+
+  it('honours autoUpdate.buildTimeoutMs.install on pnpm install', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let installTimeout: number | undefined;
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('pnpm install')) installTimeout = opts?.timeout;
+      return { stdout: '', stderr: '' };
+    };
+    const auWithTimeout: AutoUpdateConfig = {
+      ...AU,
+      buildTimeoutMs: { install: 600_000 },
+    };
+    await performUpdate(auWithTimeout as any, () => {});
+    expect(installTimeout).toBe(600_000);
+  });
+
+  it('honours autoUpdate.buildTimeoutMs.contracts when contracts rebuild', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let contractsTimeout: number | undefined;
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsTimeout = opts?.timeout;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    // Force a runtime build path + contract rebuild trigger via diff.
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const auWithTimeout: AutoUpdateConfig = {
+      ...AU,
+      buildTimeoutMs: { contracts: 1_200_000 },
+    };
+    await performUpdate(auWithTimeout as any, () => {});
+    expect(contractsTimeout).toBe(1_200_000);
+  });
+
+  it('contract-diff fails closed in a SAFE direction: rebuilds contracts when diff errors and parent fetch also errors', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let contractsBuilt = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsBuilt = true;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        throw new Error('fatal: bad revision aaa111..bbb222');
+      }
+      if (file === 'git' && args[0] === 'fetch' && args.includes('--depth=1')) {
+        throw new Error('fatal: remote unreachable');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(contractsBuilt).toBe(true);
+  });
+
+  it('persists `.update-status.json` on a successful update with consecutiveFailures=0', async () => {
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
+      // Status file does not yet exist; readFile rejects.
+      if (p.endsWith('.update-status.json')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return '';
+    };
+    makeFetchOk('bbb222');
+    let writtenStatus: any = null;
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).endsWith('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    await performUpdate(AU, () => {});
+    expect(writtenStatus).toBeTruthy();
+    expect(writtenStatus.consecutiveFailures).toBe(0);
+    expect(writtenStatus.lastAttempt?.status).toBe('updated');
+    expect(writtenStatus.lastAttempt?.fromCommit).toBe('aaa111');
+    expect(writtenStatus.lastAttempt?.toCommit).toBe('bbb222');
+    expect(writtenStatus.lastSuccess?.toCommit).toBe('bbb222');
+  });
+
+  it('increments consecutiveFailures on a failed update', async () => {
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
+      if (p.endsWith('.update-status.json')) {
+        return JSON.stringify({ consecutiveFailures: 2 });
+      }
+      return '';
+    };
+    makeFetchOk('bbb222');
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm build')) throw new Error('build exploded');
+      return { stdout: '', stderr: '' };
+    };
+    let writtenStatus: any = null;
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).endsWith('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    await performUpdate(AU, () => {});
+    expect(writtenStatus).toBeTruthy();
+    expect(writtenStatus.consecutiveFailures).toBe(3);
+    expect(writtenStatus.lastAttempt?.status).toBe('failed');
+  });
+});

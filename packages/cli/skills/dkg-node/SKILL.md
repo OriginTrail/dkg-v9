@@ -149,6 +149,47 @@ Never guess — `GET /api/agent/identity` is free and definitive. Call it first.
   Use this to confirm which identity the node is treating you as before
   performing access-controlled operations.
 
+## 4a. Tool vs. HTTP — when to use each
+
+On an **OpenClaw runtime**, prefer the 21 `dkg_*` tools below over raw HTTP — the adapter handles token discovery, parameter aliasing, and error shaping. The 21-tool surface documented here is OpenClaw-specific. Other runtimes may expose different tool surfaces — Cursor / Claude Code / MCP clients should install [`@origintrail-official/dkg-mcp`](../../../mcp-dkg/README.md) for its own (different) tool set. When no tool layer applies (raw CLI, custom HTTP client, or an operation not covered by the tools below), use the HTTP API — the rest of this doc is the reference.
+
+Drop to HTTP when the operation isn't in the table — participant admin (§6), conditional writes (§5), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
+
+| Tool | Wraps | Short description |
+|---|---|---|
+| `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
+| `dkg_wallet_balances` | `GET /api/wallets/balances` | TRAC / ETH balances |
+| `dkg_list_context_graphs` | `GET /api/context-graph/list` | List all context graphs the node knows about — each entry carries `subscribed` and `synced` flags (discovered-but-not-subscribed entries are present too) |
+| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only |
+| `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
+| `dkg_assertion_create` | `POST /api/assertion/create` | Start a WM assertion |
+| `dkg_assertion_write` | `POST /api/assertion/{name}/write` | Append triples to a WM assertion |
+| `dkg_assertion_promote` | `POST /api/assertion/{name}/promote` | Move a WM assertion's triples to SWM |
+| `dkg_assertion_discard` | `POST /api/assertion/{name}/discard` | Drop a WM assertion |
+| `dkg_assertion_import_file` | `POST /api/assertion/{name}/import-file` | Multipart upload a document + extract triples |
+| `dkg_assertion_query` | `POST /api/assertion/{name}/query` | Dump every quad in a single assertion (not SPARQL) |
+| `dkg_assertion_history` | `GET /api/assertion/{name}/history` | Read an assertion's lifecycle descriptor |
+| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper**: first writes supplied quads to SWM via `/write`, then publishes all SWM → VM (TRAC). Calling only the `/publish` route skips the write — if dropping to raw HTTP, use both calls in order |
+| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish SWM → VM, no fresh quads |
+| `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
+| `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
+| `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verified-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (defaults to this node). Omit `view` for a legacy cross-graph data-path query. |
+| `dkg_find_agents` | `GET /api/agents` | Discover other agents (best-effort P2P) |
+| `dkg_send_message` | `POST /api/chat` | Send a direct message (best-effort P2P) |
+| `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
+| `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
+
+P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow.
+
+### HTTP-only operations (no tool wrapper)
+
+- **Participants and join flow** — see §6.
+- **Conditional writes** (`POST /api/shared-memory/conditional-write`) — see §5 SWM.
+- **Async publisher job queue** (`/api/publisher/*`) — see §8.
+- **Raw file retrieval** (`GET /api/file/{fileHash}`) — see §7.
+- **Endorse / verify / update** (`POST /api/endorse`, `/verify`, `/update`) — see §5 VM.
+- **SSE event stream** (`GET /api/events`) — see §8.
+
 ## 5. Memory Model
 
 Knowledge flows through three layers: **WM → SWM → VM**. Always start in Working Memory, then promote outward as the knowledge matures.
@@ -186,7 +227,7 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 SWM is for knowledge you've promoted from WM and want peers to see. Data arrives here via `POST /api/assertion/{name}/promote` (from WM) or via direct SWM writes (escape hatch for team-visible data that doesn't need a WM staging step).
 
 - `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Body: `{ contextGraphId, quads, subGraphName? }`. Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
-- `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Checks each condition atomically before writing; throws `StaleWriteError` on mismatch and leaves SWM unchanged. Use for concurrent multi-agent writes to the same root entity.
+- `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Each condition is `{ subject: IRI, predicate: IRI, expectedValue: string | null }`; `null` means "must not exist", a string must match the current object after N-Triples serialization. Any mismatch throws `StaleWriteError` and leaves SWM unchanged. `conditions` must be non-empty — use `/api/shared-memory/write` for unconditional writes.
 - `POST /api/shared-memory/publish` — promote SWM triples to Verified Memory (costs TRAC)
 
 ### Verified Memory (VM) — Permanent, on-chain
@@ -239,6 +280,39 @@ When the chat turn includes injected context with `target_context_graph`, treat 
 1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
 2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
 
+### Context-First Lookup
+
+For any substantive user request related to the current project, consult the selected project context graph before substantive project work. Use it as the default first source of project context so the agent reuses prior findings, tasks, decisions, and stored facts instead of re-deriving them from scratch.
+
+Exceptions:
+
+- Skip the lookup for trivial acknowledgements, greetings, or simple confirmations.
+- Skip the lookup for purely local or operational requests that do not depend on project memory.
+- Skip or narrow the lookup when the user explicitly tells you to ignore project memory or use another source first.
+
+Fallback behavior:
+
+- If no `target_context_graph` is present and the user does not name a project, first try to infer the intended project from the recent conversation.
+- If the target project is still ambiguous, ask a short clarification question before doing project-scoped work.
+
+Lookup scope:
+
+- Start with the cheapest useful lookup.
+- Prefer narrow graph queries, entity lookups, or recent-memory checks over broad scans when they are sufficient.
+- Avoid repeated or heavy graph queries unless the task actually needs them.
+
+Conflict handling:
+
+- If project memory conflicts with the user's current instruction, the repository, or fresh runtime evidence, do not blindly trust memory.
+- Call out the conflict briefly, prefer fresh evidence for execution, and write corrected context back to memory when appropriate.
+
+Minimum behavior:
+
+1. Identify the selected project context graph from `target_context_graph` or from explicit user instruction.
+2. Query the project context graph for relevant context before substantive work.
+3. Use what you find to shape the response, tool choice, and next actions.
+4. When the turn produces durable new information, write it back to the appropriate memory layer.
+
 Implications:
 
 - If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
@@ -252,8 +326,16 @@ Implications:
 
 - `POST /api/context-graph/create` — create a context graph.
   Body: `{ id, name, description?, accessPolicy? (0=open, 1=private), allowedAgents?: [...], allowedPeers?: [...], private?, register?, participantIdentityIds?, requiredSignatures? }`.
-  By default the CG stays local-only. Pass `register: true` to also register on-chain in the same call; if that fails, the CG is still created locally and the response carries a `registerError` + retry hint. For private CGs (`private: true`), `requiredSignatures` is optional.
-- `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, revealOnChain?, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory.
+
+  Whether the CG stays local depends on the node's chain adapter configuration — there are four distinct regimes:
+
+  - **No chain adapter** (`chainId: 'none'`): CG is local-only permanently. Both `register: true` and a follow-up `/api/context-graph/register` call throw `On-chain registration requires a configured chain adapter`. This is a terminal state — the node operator must configure a chain adapter before on-chain promotion is possible.
+  - **Mock chain adapter** (`chainId` starts with `mock`): the create-time auto-register path is deliberately skipped to avoid polluting test runs. The CG stays local on create; explicit `register: true` or `/api/context-graph/register` may succeed depending on what the mock implements.
+  - **Real chain adapter WITH on-chain identity**: `createContextGraph()` auto-registers on-chain as a best-effort side-effect. Failures are logged as warnings (not surfaced on the create response) and the CG remains local. Passing `register: true` in this regime usually duplicates the auto-register work and returns `200` with `registered: false` + `registerError` + `hint` because the CG is already registered — looks like a failure but isn't one. Use `register: true` here only as an explicit retry hook when the auto-register path failed.
+  - **Real chain adapter WITHOUT on-chain identity**: no auto-register on create; CG stays local until `/api/context-graph/register` or `register: true` promotes it.
+  - **Simple CG** (default): pass `{ id, name }`. Creator alone publishes to VM. Add `accessPolicy: 1` + `allowedAgents` for a curated CG.
+  - **Multi-sig CG**: pass `participantIdentityIds: [...]` + `requiredSignatures: M`. Use `register: true` so the participant set and threshold are anchored on-chain. `requiredSignatures` is optional when `private: true`.
+- `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
 - `POST /api/context-graph/subscribe` — subscribe to a context graph
 - `GET /api/context-graph/list` — list subscribed context graphs
@@ -274,17 +356,17 @@ To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/creat
 
 ### Participants and join flow
 
-| Method | Route | Purpose |
-|---|---|---|
-| `POST` | `/api/context-graph/invite` | Invite a peer. Body: `{ contextGraphId, peerId }`. CG creator only. |
-| `POST` | `/api/context-graph/{id}/add-participant` | Directly add a participant (creator only). |
-| `POST` | `/api/context-graph/{id}/remove-participant` | Remove a participant. |
-| `GET`  | `/api/context-graph/{id}/participants` | List current participants. |
-| `POST` | `/api/context-graph/{id}/request-join` | Signed request from an invitee to join. |
-| `GET`  | `/api/context-graph/{id}/join-requests` | List pending join requests (curator view). |
-| `POST` | `/api/context-graph/{id}/approve-join` | Approve a pending request. |
-| `POST` | `/api/context-graph/{id}/reject-join` | Reject a pending request. |
-| `POST` | `/api/context-graph/{id}/sign-join` | Sign a join request and forward to the curator via P2P (multi-sig CGs). |
+| Method | Route | Body | Purpose |
+|---|---|---|---|
+| `POST` | `/api/context-graph/invite` | `{ contextGraphId, peerId }` | Invite a peer by peer ID. CG creator only. |
+| `POST` | `/api/context-graph/{id}/add-participant` | `{ agentAddress }` | Directly add a participant by agent address (creator only). |
+| `POST` | `/api/context-graph/{id}/remove-participant` | `{ agentAddress }` | Remove a participant (creator only). |
+| `GET`  | `/api/context-graph/{id}/participants` | — | List current participants. Returns `{ contextGraphId, allowedAgents: [...] }`. |
+| `POST` | `/api/context-graph/{id}/request-join` | `{ agentAddress, signature, timestamp, agentName? }` | Signed request from an invitee to join. If local node is the curator, stored locally; otherwise P2P-forwarded to the curator. |
+| `GET`  | `/api/context-graph/{id}/join-requests` | — | List pending join requests (curator view). |
+| `POST` | `/api/context-graph/{id}/approve-join` | `{ agentAddress }` | Approve a pending request. |
+| `POST` | `/api/context-graph/{id}/reject-join` | `{ agentAddress }` | Reject a pending request. |
+| `POST` | `/api/context-graph/{id}/sign-join` | — | Sign a join request as the caller and forward to the curator via P2P (multi-sig CGs). Signs `(contextGraphId, agentAddress, timestamp)` with the caller's private key; the bearer token only resolves which local agent is signing — external agents without a locally-stored private key cannot use this route. No body required. |
 
 ## 7. File Ingestion
 
@@ -363,11 +445,29 @@ curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=res
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape from the in-memory extraction status tracker, or 404 if no import-file has been run for that assertion.
+Returns:
+
+| Field | Type | Notes |
+|---|---|---|
+| `assertionUri` | string | The fully-qualified WM assertion URI the record belongs to |
+| `status` | `"in_progress"` \| `"completed"` \| `"skipped"` \| `"failed"` | Job state. Synchronous extractions return `completed` immediately on the import-file response; async flows may return `in_progress` until the pipeline finishes. Poll until terminal |
+| `fileHash` | string | Content hash (e.g. `keccak256:…`) |
+| `detectedContentType` | string | MIME type the daemon resolved for the uploaded bytes |
+| `pipelineUsed` | string \| `null` | Registered pipeline identifier (e.g. `application/pdf`), or `null` when `skipped` |
+| `tripleCount` | number | Triples assembled by the extraction pipeline for this import. On `completed`, this is the count persisted to the assertion graph. On `failed`, the write is atomic — nothing landed — but this field still reflects the count that was attempted, so do NOT read a non-zero `tripleCount` on a `failed` record as partial-write evidence. On `skipped`, always `0` |
+| `rootEntity` | string, optional | Phase 2 root entity URI when the extractor produced one |
+| `mdIntermediateHash` | string, optional | Hash of the Phase 1 markdown intermediate (present only when a converter ran — PDF/DOCX/etc.) |
+| `error` | string, optional | Present only when `status === "failed"`; short message |
+| `startedAt` | string (ISO-8601) | When the extraction job started |
+| `completedAt` | string (ISO-8601), optional | When the extraction job reached a terminal state |
+
+`404` if no import-file has run for that assertion (tracker is TTL-pruned).
 
 ### Retrieving stored files
 
-- `GET /api/file/{fileHash}` — fetch a previously-imported file by its content hash. The hash in the URL is just the hex portion (the `keccak256:` prefix returned by the import response is for ontology use). Returns the original bytes with the stored `Content-Type`. Use this when you need to re-reference or re-process the source document after import.
+- `GET /api/file/{fileHash}` — fetch a previously-imported file. Accepts `sha256:<hex>`, `keccak256:<hex>`, or bare `<hex>` (treated as sha256) — pass whatever prefix the import response returned.
+
+  The daemon does NOT persist the original content-type. Pass `?contentType=...` to supply it at request time — only types in the safe-preview allowlist (PDF, JSON, plain text, CSV, Markdown, PNG/JPEG/GIF/WEBP) render inline; anything else (including an omitted `?contentType=`) serves as `application/octet-stream` with `Content-Disposition: attachment`. Callers that need inline rendering must remember and re-supply the content-type themselves.
 
 ## 8. Node Administration
 
@@ -378,6 +478,7 @@ Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape fr
 - `GET /api/wallets/balances` — TRAC and ETH balances
 - `GET /api/chain/rpc-health` (PUBLIC) — RPC health
 - `GET /api/identity` — node identity (DID, identity ID)
+- `GET /api/host/info` — OS-level host details for UI flows that need real absolute paths (no `~`). Returns `{ homedir, hostname, username, platform, defaultWorkspaceParent }`. `defaultWorkspaceParent` probes `~/code`, `~/dev`, `~/projects` in order and falls back to `homedir`. Auth-required because `hostname` and `username` can be identifying; does not expose anything sensitive beyond that.
 - `GET /api/events` — SSE stream for real-time notifications (`text/event-stream`). Emits `join_request`, `join_approved`, `project_synced` events with a `: heartbeat` comment every 30 s. Use it to watch for inbound invitations and project sync completions without polling.
 - 🚧 `GET /api/agent/profile` — your agent profile *(planned)*
 

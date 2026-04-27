@@ -1,0 +1,16 @@
+{
+  "wallets": [
+    {
+      "address": "0x5808C4862c25Fc04A28a5E8eEa01557276313267",
+      "privateKey": "0x9235ca9e4399ec48687e2e641892fb23b65740da3c3da36209590991069be57c"
+    },
+    {
+      "address": "0x8c15092a6A78bAAEF036F0DDe13129C7e2bcF1B2",
+      "privateKey": "0x799ca167448077148b84fe94003df58aeeb1a1b0cfae62d158cedf841fd30f03"
+    },
+    {
+      "address": "0xe52745371215ad5d48D61d8069ae867F0A1F8d32",
+      "privateKey": "0x1bc284527795409244b7a5fdfbcf6296c22c3df400917292b35de8b317d44c5c"
+    }
+  ]
+}

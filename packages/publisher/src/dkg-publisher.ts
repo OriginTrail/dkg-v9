@@ -330,6 +330,17 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bare `urn:dkg:file:` (not `urn:dkg:file:keccak256:`) so any future
 // hash-algorithm variant (e.g., `urn:dkg:file:blake3:...`) is also
 // covered without a guard update.
+/**
+ * Thrown when `publish()` receives a quad whose subject sits in the
+ * protocol-reserved URN namespace (`urn:dkg:file:...`, etc.).
+ *
+ * @internal — exported for backwards compatibility with external
+ * consumers that deep-imported this symbol before
+ * `@origintrail-official/dkg-publisher` had an `exports` map.
+ * New code should duck-type via `err.name === 'ReservedNamespaceError'`
+ * (the pattern used by `packages/cli/src/daemon.ts`) since the wire
+ * contract is the `.name` string, not the class identity.
+ */
 export class ReservedNamespaceError extends Error {
   readonly subject: string;
   readonly prefix: string;

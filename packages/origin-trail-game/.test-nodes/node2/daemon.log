@@ -1,0 +1,367 @@
+
+██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗
+██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██║     ██║╚══███╔╝██╔════╝██╔══██╗
+██║  ██║█████╗  ██║     █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     ██║  ███╔╝ █████╗  ██║  ██║
+██║  ██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██║ ███╔╝  ██╔══╝  ██║  ██║
+██████╔╝███████╗╚██████╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║███████╗██║███████╗███████╗██████╔╝
+╚═════╝ ╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═════╝
+
+██╗  ██╗███╗   ██╗ ██████╗ ██╗    ██╗██╗     ███████╗██████╗  ██████╗ ███████╗
+██║ ██╔╝████╗  ██║██╔═══██╗██║    ██║██║     ██╔════╝██╔══██╗██╔════╝ ██╔════╝
+█████╔╝ ██╔██╗ ██║██║   ██║██║ █╗ ██║██║     █████╗  ██║  ██║██║  ███╗█████╗
+██╔═██╗ ██║╚██╗██║██║   ██║██║███╗██║██║     ██╔══╝  ██║  ██║██║   ██║██╔══╝
+██║  ██╗██║ ╚████║╚██████╔╝╚███╔███╔╝███████╗███████╗██████╔╝╚██████╔╝███████╗
+╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝
+
+ ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗
+██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝
+
+[2026-04-21T17:24:53.140Z] Starting DKG core node "test-node-2" (v10.0.0-rc.1, f50bdf12)...
+[2026-04-21T17:24:53.171Z]   0x5808C4862c25Fc04A28a5E8eEa01557276313267
+[2026-04-21T17:24:53.171Z] Operational wallets (3):
+[2026-04-21T17:24:53.171Z]   0x8c15092a6A78bAAEF036F0DDe13129C7e2bcF1B2
+[2026-04-21T17:24:53.171Z]   0xe52745371215ad5d48D61d8069ae867F0A1F8d32
+[2026-04-21T17:24:53.171Z] Relay disabled (config.relay = "none") — this node will not connect to any relay
+2026-04-21 19:24:53 system 5969602b-4368-46ec-9bea-ae488595cec5 [DKGAgent] Persistent triple store (worker thread): /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node2/store.nq
+[2026-04-21T17:24:53.223Z] Network: f81f9df2e9604fca...
+[2026-04-21T17:24:53.223Z] Network config: DKG V10 Testnet (genesis v1)
+2026-04-21 19:24:53 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] Starting DKG node
+2026-04-21 19:24:53 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] Node started, peer ID: 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa
+2026-04-21 19:24:53 system 077d194e-ceaa-48eb-9c5e-bbabe9c92a31 [DKGAgent] Auto-registered default agent "test-node-2" → 0x5808C4862c25Fc04A28a5E8eEa01557276313267
+[2026-04-21T17:24:54.257Z] Connection opened: ivxAPdVj transport=direct dir=outbound addr=/ip4/127.0.0.1/tcp/27111/p2p/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:24:56 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] No on-chain identity found, creating profile and staking...
+2026-04-21 19:24:57 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] ensureProfile error: insufficient funds for intrinsic transaction cost (transaction="0x02f901b283014a3480830f424083a7d8c08307a50f94b46a7bf33fd34a710cf497196beb7c17a0af56fc80b90144f0f9f5dd000000000000000000000000236353f69831f91704875f6b83c4ca82fc81056500000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b746573742d6e6f64652d32000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002024807bdb1fe8550587e3cb7ea88558c4f6f18347f7f944119983cf5b18a1acf4c001a0c38dacd13128a55e6889f7ba23b20aff2addd05b6c3bfe5ce9cc76d492b1da0ea07fafa992ebbfa15ab0a4504689b89013b962225bbb2be379eb28ac65d26a206e", info={ "error": { "code": -32003, "message": "insufficient funds for gas * price + value: have 0 want 5511077000000" } }, code=INSUFFICIENT_FUNDS, version=6.16.0) [WARN]
+2026-04-21 19:24:57 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] No valid on-chain identity — on-chain publishes will be skipped [WARN]
+2026-04-21 19:24:58 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] Skipping V10 StorageACK handler registration — identity not yet provisioned [WARN]
+2026-04-21 19:24:58 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] Registered VERIFY proposal handler
+2026-04-21 19:24:58 publish 822914e1-12a0-42d1-abb8-4f1fa19ab733 [DKGAgent] Publishing agent profile
+2026-04-21 19:24:58 system ba23ced3-f327-43c2-9fa3-083e5c418ba1 [ChainEventPoller] Starting chain event poller (interval=12000ms)
+2026-04-21 19:24:58 connect 39147876-4646-49fb-8a82-b4c7d076217e [DKGAgent] Chain event poller started
+2026-04-21 19:24:58 publish 49703f5e-746c-428f-9cd3-f2058f0365e9 [DKGPublisher] Preparing publish: 11 public triples, 0 private
+2026-04-21 19:24:58 publish 49703f5e-746c-428f-9cd3-f2058f0365e9 [DKGPublisher] Computed kcMerkleRoot (flat) over 11 triple hashes + 0 private root(s)
+2026-04-21 19:24:58 publish 49703f5e-746c-428f-9cd3-f2058f0365e9 [DKGPublisher] Storing 11 triples in local store
+2026-04-21 19:24:58 publish b4d432e3-075b-40ef-ba97-f585ea2b5bf1 [ChainEventPoller] Seeded poller cursor near chain head: 40512005 → scanning from 40511505
+2026-04-21 19:24:58 publish 49703f5e-746c-428f-9cd3-f2058f0365e9 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:24:58 publish 49703f5e-746c-428f-9cd3-f2058f0365e9 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0x5808C4862c25Fc04A28a5E8eEa01557276313267/tmo8w97qd-1
+2026-04-21 19:24:58 publish 822914e1-12a0-42d1-abb8-4f1fa19ab733 [DKGAgent] Broadcasting to topic dkg/context-graph/agents/finalization
+[2026-04-21T17:24:58.531Z] PeerId: 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa
+[2026-04-21T17:24:58.531Z]   /ip4/192.168.1.6/tcp/27112/p2p/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa
+[2026-04-21T17:24:58.531Z]   /ip4/127.0.0.1/tcp/27112/p2p/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa
+2026-04-21 19:24:58 system 46ba2753-f65e-440d-8d11-6fecea4bae08 [DKGAgent] Ensured context graph "origin-trail-game" locally (open)
+[2026-04-21T17:24:58.532Z] Ensured context graph: origin-trail-game
+[2026-04-21T17:24:58.535Z] Ensured context graph: testing
+[2026-04-21T17:24:58.539Z] Dashboard DB initialized at /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node2/node-ui.db
+2026-04-21 19:24:58 system a257663f-e035-418d-a018-c0b67293feeb [DKGAgent] Ensured context graph "testing" locally (open)
+[2026-04-21T17:24:58.540Z] Metrics collector started (2min interval)
+[2026-04-21T17:24:58.540Z] Memory manager ready
+[2026-04-21T17:24:58.540Z] Memory enrichment LLM not configured
+2026-04-21 19:24:58 query 61f15277-b335-4d9c-9e5b-6e1c65b91acf [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }"
+[2026-04-21T17:24:58.543Z] API authentication enabled (2 tokens loaded)
+[2026-04-21T17:24:58.543Z] Token file: /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node2/auth.token
+2026-04-21 19:24:58 query 06ed11a6-048c-47ba-935b-d29f8f399d04 [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontol"
+2026-04-21 19:24:58 query 61f15277-b335-4d9c-9e5b-6e1c65b91acf [DKGAgent] Query returned 1 bindings
+2026-04-21 19:24:58 query 06ed11a6-048c-47ba-935b-d29f8f399d04 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:24:58 query aeddebaf-c131-46ce-887e-c212dc6fa8c2 [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontol"
+[2026-04-21T17:24:58.550Z] 1 DKG app(s) loaded: OriginTrail Game
+[2026-04-21T17:24:58.550Z] App static server listening on http://127.0.0.1:21179
+[2026-04-21T17:24:58.550Z] App loaded: OriginTrail Game (origin-trail-game) → /apps/origin-trail-game/
+[2026-04-21T17:24:58.652Z] Extraction pipelines: text/markdown
+[2026-04-21T17:24:58.652Z] MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)
+[2026-04-21T17:24:58.654Z] CORS allowlist: http://127.0.0.1:21079, http://localhost:21079, http://[::1]:21079
+[2026-04-21T17:24:58.654Z] Node UI: http://127.0.0.1:21079/ui
+[2026-04-21T17:24:58.654Z] API listening on http://127.0.0.1:21079
+2026-04-21 19:24:58 query aeddebaf-c131-46ce-887e-c212dc6fa8c2 [DKGAgent] Query returned 1 bindings
+[2026-04-21T17:24:58.654Z] Node is running. Use "dkg status" or "dkg peers" to interact.
+2026-04-21 19:24:58 query caa6c0f1-deb8-4231-8b35-0f814b45e31a [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontolog"
+2026-04-21 19:24:58 query caa6c0f1-deb8-4231-8b35-0f814b45e31a [DKGAgent] Query returned 1 bindings
+2026-04-21 19:24:58 query 16e3d73e-bb8d-41c2-adfa-fbb926ec28ab [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontolog"
+2026-04-21 19:24:58 query 16e3d73e-bb8d-41c2-adfa-fbb926ec28ab [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:00 query 181a97ad-d8b4-4dd9-ab9d-1c71f85b0d49 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:00 query 181a97ad-d8b4-4dd9-ab9d-1c71f85b0d49 [DKGAgent] Query returned 0 bindings
+[OriginTrailGame] Graph sync: found 0 registered players
+2026-04-21 19:25:00 query 2d47df4d-7d99-4abd-ad0a-1a9fc8d3c743 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:00 query 2d47df4d-7d99-4abd-ad0a-1a9fc8d3c743 [DKGAgent] Query returned 0 bindings
+[OriginTrailGame] Graph sync: found 0 swarms in graph
+2026-04-21 19:25:01 sync 5714e108-c7df-47f9-9fc5-041c12bde149 [DKGAgent] Syncing from peer ivxAPdVj...
+2026-04-21 19:25:01 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent] Syncing context graph "agents" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:01 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   meta: 0 triples fetched
+2026-04-21 19:25:01 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   data: 28 triples fetched
+2026-04-21 19:25:01 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent] Syncing context graph "ontology" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   meta: 0 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   data: 40 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent] Syncing context graph "origin-trail-game" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   meta: 0 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   data: 0 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent] Syncing context graph "testing" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   meta: 0 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent]   data: 0 triples fetched
+2026-04-21 19:25:02 sync 76f9ca33-fdd0-400a-bd47-51df6dc34b6d [DKGAgent] Sync complete: 68 verified triples from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 5714e108-c7df-47f9-9fc5-041c12bde149 [DKGAgent] Synced 68 data triples from peer ivxAPdVj
+2026-04-21 19:25:02 sync 05db5ef7-16ea-427c-83df-7a3c4b86c289 [DKGAgent] Syncing shared memory for context graph "origin-trail-game" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 05db5ef7-16ea-427c-83df-7a3c4b86c289 [DKGAgent]   shared memory: 0 data + 0 meta triples fetched
+2026-04-21 19:25:02 sync 05db5ef7-16ea-427c-83df-7a3c4b86c289 [DKGAgent] Syncing shared memory for context graph "testing" from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:02 sync 05db5ef7-16ea-427c-83df-7a3c4b86c289 [DKGAgent]   shared memory: 0 data + 0 meta triples fetched
+2026-04-21 19:25:02 sync 5714e108-c7df-47f9-9fc5-041c12bde149 [DKGAgent] Synced 0 shared memory triples from peer ivxAPdVj
+2026-04-21 19:25:05 gossip 1ae38e13-ed51-4315-a134-badb38e04935 [from:9a68b06e-94a9-4f78-89b0-845a64c03ac8] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0x3E70E47CfC9bC5Df1bb99E1064b59333093072fe/tmo8w9cs0-1 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:08 share 51a6886c-f63c-4951-bd08-2dc981159955 [from:61c61a40-b41d-4abf-a88c-86a8bbe99ce1] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308546-lkkcl50c
+[OriginTrailGame] Remote swarm discovered: Solo Trek (swarm-mo8w9jk1-f2ua)
+2026-04-21 19:25:08 share 48dee757-3486-488a-a2be-f05122923445 [from:a29d19ae-319c-48df-bab7-a6d08f156645] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308548-7kdop9gp
+2026-04-21 19:25:08 share e1e4776b-5727-4f1a-926b-f1c4b4fc976f [from:3ebd03f2-92be-4933-bbaa-81bc7cf14755] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308552-54bhbx1d
+[OriginTrailGame] Journey started for swarm-mo8w9jk1-f2ua (remote)
+2026-04-21 19:25:08 share 48dee757-3486-488a-a2be-f05122923445 [from:a29d19ae-319c-48df-bab7-a6d08f156645] [SharedMemoryHandler] Stored SWM write swm-1776792308548-7kdop9gp (4 quads)
+2026-04-21 19:25:08 share 51a6886c-f63c-4951-bd08-2dc981159955 [from:61c61a40-b41d-4abf-a88c-86a8bbe99ce1] [SharedMemoryHandler] Stored SWM write swm-1776792308546-lkkcl50c (11 quads)
+2026-04-21 19:25:08 share e1e4776b-5727-4f1a-926b-f1c4b4fc976f [from:3ebd03f2-92be-4933-bbaa-81bc7cf14755] [SharedMemoryHandler] Stored SWM write swm-1776792308552-54bhbx1d (11 quads)
+2026-04-21 19:25:08 gossip a29a68a8-9419-4251-8347-87156a6812c9 [GossipPublishHandler] Rejected gossip policy binding did:dkg:policy:origin-trail-game:sha256-f2ba63dc4fedfdd122522831d50378e8066f36101a57e4be4789527d7079d421: paranet "origin-trail-game" owner is unknown locally [WARN]
+2026-04-21 19:25:08 gossip a29a68a8-9419-4251-8347-87156a6812c9 [GossipPublishHandler] Gossip publish did:dkg:policy:origin-trail-game:sha256-f2ba63dc4fedfdd122522831d50378e8066f36101a57e4be4789527d7079d421 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:08 share cb605274-ad96-4826-9bd0-3f0e9ba52043 [from:f63c5e75-03c6-4d7b-b037-b12d90c6d5e0] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308569-ryyovipj
+[OriginTrailGame] Remote vote: advance from 12D3KooW on turn 1
+2026-04-21 19:25:08 share cb605274-ad96-4826-9bd0-3f0e9ba52043 [from:f63c5e75-03c6-4d7b-b037-b12d90c6d5e0] [SharedMemoryHandler] Stored SWM write swm-1776792308569-ryyovipj (5 quads)
+[OriginTrailGame] Approved proposal for swarm-mo8w9jk1-f2ua turn 1
+2026-04-21 19:25:08 share bc3a1a0e-984b-446b-82b8-bf3e6de88eb4 [from:8e558378-c187-4809-a7fd-f1d4f6818f25] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308573-wjhjceyn
+2026-04-21 19:25:08 share bc3a1a0e-984b-446b-82b8-bf3e6de88eb4 [from:8e558378-c187-4809-a7fd-f1d4f6818f25] [SharedMemoryHandler] Stored SWM write swm-1776792308573-wjhjceyn (16 quads)
+2026-04-21 19:25:08 gossip be7a6b09-bfcf-4ba0-9f29-718005748985 [FinalizationHandler] Finalization: contextGraphId "<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/TurnResult> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <https://origintrail-game.dkg.io/winningAction> "advance" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <https://origintrail-game.dkg.io/gameState> "{\"sessionId\":\"session-9f1dc321-cc59-433d-bc26-852c7d778f1c\",\"player\":\"12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj\",\"epochs\":16,\"trainingTokens\":495,\"apiCredits\":20,\"computeUnits\":4,\"modelWeights\":5,\"trac\":300,\"month\":3,\"day\":2,\"party\":[{\"id\":\"agent-0\",\"name\":\"Solo Alice\",\"health\":100,\"alive\":true}],\"status\":\"active\",\"moveCount\":1}" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <https://origintrail-game.dkg.io/swarm> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn1:c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestationBatch> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn1:c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10> <https://origintrail-game.dkg.io/forTurn> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn1:c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10> <https://origintrail-game.dkg.io/resolution> "consensus" .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn1:c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/proposalHash> "c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1/attestation/c5721f5683ff35dacee9652b5499b1ce97ef055e5c562407f72bb02972d0ae10/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/attestedAt> "1776792308571"^^<http://www.w3.org/2001/XMLSchema#decimal> ." does not match topic "origin-trail-game", ignoring [WARN]
+2026-04-21 19:25:08 share db41f213-ca37-4ff9-aa3f-e6afc0fe58eb [from:518e282c-252d-4476-a30a-05f7a77a1f29] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308928-5ope6u4n
+2026-04-21 19:25:08 share 3ba591a0-95e1-4da2-a313-1cc65e26f3fa [from:41d3de89-b265-4469-bfb1-99892bac904b] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792308930-1ei6gxcf
+2026-04-21 19:25:08 gossip a90bf375-1b12-423f-85a9-2faa67ccd0f0 [from:e7b8557e-7635-4462-a057-0b2a55ce93c1] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-2 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:08 share db41f213-ca37-4ff9-aa3f-e6afc0fe58eb [from:518e282c-252d-4476-a30a-05f7a77a1f29] [SharedMemoryHandler] Stored SWM write swm-1776792308928-5ope6u4n (6 quads)
+2026-04-21 19:25:08 share 3ba591a0-95e1-4da2-a313-1cc65e26f3fa [from:41d3de89-b265-4469-bfb1-99892bac904b] [SharedMemoryHandler] Stored SWM write swm-1776792308930-1ei6gxcf (21 quads)
+2026-04-21 19:25:10 query 6f02d1d6-617c-4ef3-89bc-85d25f69adec [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:10 query 6f02d1d6-617c-4ef3-89bc-85d25f69adec [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:10 query e377664d-c603-42e2-9fb8-90e1cd4bcbaf [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:10 query e377664d-c603-42e2-9fb8-90e1cd4bcbaf [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Graph sync: found 1 swarms in graph
+2026-04-21 19:25:10 query 9b25f9bb-81e6-4c61-a704-a938bacf615b [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:10 query 9b25f9bb-81e6-4c61-a704-a938bacf615b [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:12 share 2ab62690-f589-4578-8e12-728c664a41ec [from:6577e9ea-37ba-4b5b-9738-480a65523611] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792312940-uqnqmuar
+[OriginTrailGame] Remote vote: upgradeSkills from 12D3KooW on turn 2
+[OriginTrailGame] Approved proposal for swarm-mo8w9jk1-f2ua turn 2
+2026-04-21 19:25:12 share f9163789-8ed7-4824-bc05-d3826a2d5998 [from:d986b0a3-09dc-4053-92fd-83f5d26e2f54] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792312943-na3yu9l1
+2026-04-21 19:25:12 share 2ab62690-f589-4578-8e12-728c664a41ec [from:6577e9ea-37ba-4b5b-9738-480a65523611] [SharedMemoryHandler] Stored SWM write swm-1776792312940-uqnqmuar (4 quads)
+2026-04-21 19:25:12 share f9163789-8ed7-4824-bc05-d3826a2d5998 [from:d986b0a3-09dc-4053-92fd-83f5d26e2f54] [SharedMemoryHandler] Stored SWM write swm-1776792312943-na3yu9l1 (16 quads)
+2026-04-21 19:25:13 gossip 20f6e045-17f9-4ebf-b9e8-46ad533d8937 [FinalizationHandler] Finalization: contextGraphId "<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/TurnResult> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <https://origintrail-game.dkg.io/turn> "2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <https://origintrail-game.dkg.io/winningAction> "upgradeSkills" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <https://origintrail-game.dkg.io/gameState> "{\"sessionId\":\"session-9f1dc321-cc59-433d-bc26-852c7d778f1c\",\"player\":\"12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj\",\"epochs\":16,\"trainingTokens\":566,\"apiCredits\":19,\"computeUnits\":4,\"modelWeights\":5,\"trac\":300,\"month\":3,\"day\":3,\"party\":[{\"id\":\"agent-0\",\"name\":\"Solo Alice\",\"health\":100,\"alive\":true}],\"status\":\"active\",\"moveCount\":2}" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <https://origintrail-game.dkg.io/swarm> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn2:fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestationBatch> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn2:fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726> <https://origintrail-game.dkg.io/forTurn> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn2:fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726> <https://origintrail-game.dkg.io/resolution> "consensus" .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn2:fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/turn> "2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/proposalHash> "fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2/attestation/fc6a42631c25ec90c71a8560427dde2163d9c7cfaa2c68d7399c3b4becde7726/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/attestedAt> "1776792312942"^^<http://www.w3.org/2001/XMLSchema#decimal> ." does not match topic "origin-trail-game", ignoring [WARN]
+2026-04-21 19:25:13 share 112b90e2-a59b-47a5-8c7f-ff88ffe8aecf [from:04470a83-652b-4f8c-84f1-9df3fe38c263] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792313264-k3h10pn8
+2026-04-21 19:25:13 share 57881c3f-4f3c-434d-90bc-be98c0057fbe [from:4848f6a8-e979-493c-8ac7-30e127e2ec00] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792313266-5il3ahyu
+2026-04-21 19:25:13 gossip d563a9d5-3134-4680-a772-cccc724a3b30 [from:d5adb788-cd14-4132-8683-2bf6b45d1f59] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-3 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:13 share 112b90e2-a59b-47a5-8c7f-ff88ffe8aecf [from:04470a83-652b-4f8c-84f1-9df3fe38c263] [SharedMemoryHandler] Stored SWM write swm-1776792313264-k3h10pn8 (6 quads)
+2026-04-21 19:25:13 share 57881c3f-4f3c-434d-90bc-be98c0057fbe [from:4848f6a8-e979-493c-8ac7-30e127e2ec00] [SharedMemoryHandler] Stored SWM write swm-1776792313266-5il3ahyu (7 quads)
+[OriginTrailGame] Applied force-resolved turn 3 for swarm-mo8w9jk1-f2ua
+2026-04-21 19:25:14 gossip 57da4361-fb1a-4001-bb8f-2455d6ffad82 [FinalizationHandler] Finalization: contextGraphId "<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/TurnResult> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <https://origintrail-game.dkg.io/turn> "3"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <https://origintrail-game.dkg.io/winningAction> "syncMemory" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <https://origintrail-game.dkg.io/gameState> "{\"sessionId\":\"session-9f1dc321-cc59-433d-bc26-852c7d778f1c\",\"player\":\"12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj\",\"epochs\":16,\"trainingTokens\":563,\"apiCredits\":19,\"computeUnits\":4,\"modelWeights\":5,\"trac\":295,\"month\":3,\"day\":4,\"party\":[{\"id\":\"agent-0\",\"name\":\"Solo Alice\",\"health\":100,\"alive\":true}],\"status\":\"active\",\"moveCount\":3}" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <https://origintrail-game.dkg.io/swarm> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn3:0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestationBatch> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn3:0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a> <https://origintrail-game.dkg.io/forTurn> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3> .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn3:0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a> <https://origintrail-game.dkg.io/resolution> "force-resolved" .
+<urn:dkg:attestation:swarm-mo8w9jk1-f2ua:turn3:0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/turn> "3"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/proposalHash> "0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/attestation/0605d84396f6b3045181cc3fa1fd578fb16e3bf0c622c83138faa1d1fa1bec6a/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/attestedAt> "1776792314272"^^<http://www.w3.org/2001/XMLSchema#decimal> ." does not match topic "origin-trail-game", ignoring [WARN]
+2026-04-21 19:25:14 gossip 34d6c29b-d0c4-48e3-ac6a-c25301f4f223 [from:e6c3d962-81d5-4516-b3b5-173a62ccbdd1] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-4 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:14 share 91541144-3b4d-4d76-a8f5-418bb508b352 [from:07cc28ee-eb20-4d2f-ab57-cb7f81611847] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792314549-u5km1o4v
+2026-04-21 19:25:14 share 91541144-3b4d-4d76-a8f5-418bb508b352 [from:07cc28ee-eb20-4d2f-ab57-cb7f81611847] [SharedMemoryHandler] Stored SWM write swm-1776792314549-u5km1o4v (6 quads)
+2026-04-21 19:25:14 gossip f6c625a5-e60e-49a8-97a4-25473f997cfe [FinalizationHandler] Finalization: contextGraphId "<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/SyncMemoryViaDKG> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/swarm> <https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/turn> "3"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/agent> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/tracSpent> "5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3/sync/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/timestamp> "2026-04-21T17:25:14.550Z" ." does not match topic "origin-trail-game", ignoring [WARN]
+2026-04-21 19:25:14 gossip bd7e7315-a149-492f-bf2d-757d0a4c542e [from:0209d38f-67cd-4521-a70f-cbd72981a810] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-5 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:18 share e15e339c-643c-4005-b8dc-ed1143500755 [from:84a2dba0-84a7-455c-88ed-243366472be8] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792318560-s5ziusle
+[OriginTrailGame] Remote swarm discovered: Leave Test (swarm-mo8w9ra7-c3xf)
+2026-04-21 19:25:18 share e15e339c-643c-4005-b8dc-ed1143500755 [from:84a2dba0-84a7-455c-88ed-243366472be8] [SharedMemoryHandler] Stored SWM write swm-1776792318560-s5ziusle (11 quads)
+2026-04-21 19:25:20 query 530337f4-c839-4f41-9471-d742c681e422 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:20 query 530337f4-c839-4f41-9471-d742c681e422 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:20 query 77ff8293-872d-40c1-82c3-237d3764e547 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:20 query 77ff8293-872d-40c1-82c3-237d3764e547 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:20 query 27640700-842e-445b-adf3-c11dee496006 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+[OriginTrailGame] Graph sync: found 2 swarms in graph
+2026-04-21 19:25:20 query 27640700-842e-445b-adf3-c11dee496006 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:20 query 19d0aa0b-42de-4e1c-8fcd-693751b22cdd [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:20 query 19d0aa0b-42de-4e1c-8fcd-693751b22cdd [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:20 query 8b420f72-c083-4d62-8595-e199d8e166c7 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWDohpmfdKp4zLyDKPnnUAF"
+2026-04-21 19:25:20 share 31be7a7b-9abd-42cc-bf64-551b43ad5786 [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:20 share 31be7a7b-9abd-42cc-bf64-551b43ad5786 [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:20 query 8b420f72-c083-4d62-8595-e199d8e166c7 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:20 share c4c2afd5-b9f6-48cd-82a2-df17fd03c192 [DKGAgent] Sharing 4 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:20 share c4c2afd5-b9f6-48cd-82a2-df17fd03c192 [DKGPublisher] Writing 4 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:20 share 31be7a7b-9abd-42cc-bf64-551b43ad5786 [DKGPublisher] Shared memory write complete: swm-1776792320566-ky09pf63
+[OriginTrailGame] Joined swarm swarm-mo8w9ra7-c3xf as Joiner
+2026-04-21 19:25:20 share c4c2afd5-b9f6-48cd-82a2-df17fd03c192 [DKGPublisher] Shared memory write complete: swm-1776792320567-08ps4vls
+[OriginTrailGame] Player profile for "Joiner" written to shared memory
+2026-04-21 19:25:22 share 747f1d31-167e-478b-bc45-2e933a4a4c72 [from:e506fe86-27cd-42b1-af0d-d404ad4fde4c] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792322580-1x9dbsuu
+[OriginTrailGame] Remote swarm discovered: Disband Test (swarm-mo8w9udw-9lu5)
+2026-04-21 19:25:22 share 747f1d31-167e-478b-bc45-2e933a4a4c72 [from:e506fe86-27cd-42b1-af0d-d404ad4fde4c] [SharedMemoryHandler] Stored SWM write swm-1776792322580-1x9dbsuu (11 quads)
+2026-04-21 19:25:24 share 77140f3b-c07b-4d02-8658-9189467d6b80 [from:673bcebd-cb31-4ffa-a09c-315f1b6d5aa8] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792324595-i3fkai5v
+[OriginTrailGame] Remote swarm discovered: Notif Swarm (swarm-mo8w9vxv-lxxs)
+2026-04-21 19:25:24 share 77140f3b-c07b-4d02-8658-9189467d6b80 [from:673bcebd-cb31-4ffa-a09c-315f1b6d5aa8] [SharedMemoryHandler] Stored SWM write swm-1776792324595-i3fkai5v (11 quads)
+2026-04-21 19:25:27 query 4136d32a-bdfe-4256-b093-1c3759152b9a [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWDohpmfdKp4zLyDKPnnUAF"
+2026-04-21 19:25:27 share 793d4f85-f032-4abf-829b-89f993f44733 [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:27 share 793d4f85-f032-4abf-829b-89f993f44733 [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:27 query 4136d32a-bdfe-4256-b093-1c3759152b9a [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "NotifJoiner" already exists, skipping
+[OriginTrailGame] Joined swarm swarm-mo8w9vxv-lxxs as NotifJoiner
+2026-04-21 19:25:27 share 793d4f85-f032-4abf-829b-89f993f44733 [DKGPublisher] Shared memory write complete: swm-1776792327610-7wfcmc2p
+2026-04-21 19:25:28 system ccc2ed46-0d3a-4107-87ef-906a5708e1b5 [DKGAgent] Peer health ping: 1/1 peers alive
+2026-04-21 19:25:29 share 895d5345-ec33-420b-b4f6-9a3217ae2222 [from:b9fb8397-9b8d-45a3-a72f-838431b79014] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792329622-z9n7nnyv
+[OriginTrailGame] Remote swarm discovered: Partial Swarm (swarm-mo8w9ztg-2jgq)
+2026-04-21 19:25:29 share 924b6caf-b6aa-494e-b8e4-ca8fe118bdbe [from:fa57ad8f-0e47-4d33-9f8b-5f50e7301d23] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792329623-01kfvfxr
+2026-04-21 19:25:29 share 895d5345-ec33-420b-b4f6-9a3217ae2222 [from:b9fb8397-9b8d-45a3-a72f-838431b79014] [SharedMemoryHandler] Stored SWM write swm-1776792329622-z9n7nnyv (11 quads)
+2026-04-21 19:25:29 share 924b6caf-b6aa-494e-b8e4-ca8fe118bdbe [from:fa57ad8f-0e47-4d33-9f8b-5f50e7301d23] [SharedMemoryHandler] Stored SWM write swm-1776792329623-01kfvfxr (4 quads)
+2026-04-21 19:25:30 query d3c024ef-a111-47e5-bae4-7d463b82c6c4 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:30 query d3c024ef-a111-47e5-bae4-7d463b82c6c4 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:30 query 2b1a42b0-31ac-40ba-8663-b1d691298536 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:30 query 2b1a42b0-31ac-40ba-8663-b1d691298536 [DKGAgent] Query returned 5 bindings
+[OriginTrailGame] Graph sync: found 5 swarms in graph
+2026-04-21 19:25:30 query 313a196d-8afb-4a30-b628-4e91bfcb0a1b [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:30 query 313a196d-8afb-4a30-b628-4e91bfcb0a1b [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:30 query 943b6e1b-a1ea-4158-b40a-eb05d0a4ec90 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:30 query 943b6e1b-a1ea-4158-b40a-eb05d0a4ec90 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:30 query 716bb2b1-9315-4641-bb52-dcdba63c568c [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:30 query 716bb2b1-9315-4641-bb52-dcdba63c568c [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:30 query 285d6cdd-7b2c-45ed-b5de-3cac2e42ba4d [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:30 query 285d6cdd-7b2c-45ed-b5de-3cac2e42ba4d [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:31 share 2d9d2483-1715-41bf-a5b3-42d436d424c1 [from:2d25cce3-f7af-4f03-ac81-93e6229ff6b9] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792331640-8jqaoheb
+[OriginTrailGame] Remote swarm discovered: Full Test (swarm-mo8wa1dk-4e2p)
+2026-04-21 19:25:31 share 2d9d2483-1715-41bf-a5b3-42d436d424c1 [from:2d25cce3-f7af-4f03-ac81-93e6229ff6b9] [SharedMemoryHandler] Stored SWM write swm-1776792331640-8jqaoheb (11 quads)
+2026-04-21 19:25:33 query 29fa3fae-e623-49f3-a1ec-60fa9ae93807 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWDohpmfdKp4zLyDKPnnUAF"
+2026-04-21 19:25:33 share 56a1ca26-4083-42f0-b8e3-e26e4c4e647c [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:33 share 56a1ca26-4083-42f0-b8e3-e26e4c4e647c [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:33 query 29fa3fae-e623-49f3-a1ec-60fa9ae93807 [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "Sidekick" already exists, skipping
+[OriginTrailGame] Joined swarm swarm-mo8wa1dk-4e2p as Sidekick
+2026-04-21 19:25:33 share 56a1ca26-4083-42f0-b8e3-e26e4c4e647c [DKGPublisher] Shared memory write complete: swm-1776792333647-rkenvrlw
+2026-04-21 19:25:34 share 96ba1e39-f5c2-470d-8e6c-a7cbfdbb63f9 [from:d5bc06e0-8291-4e1d-92f3-85393a6230e5] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792334655-xl8vm8bs
+[OriginTrailGame] Player Scout joined swarm-mo8wa1dk-4e2p
+2026-04-21 19:25:34 share 96ba1e39-f5c2-470d-8e6c-a7cbfdbb63f9 [from:d5bc06e0-8291-4e1d-92f3-85393a6230e5] [SharedMemoryHandler] Stored SWM write swm-1776792334655-xl8vm8bs (5 quads)
+2026-04-21 19:25:36 share 060dbf81-fddf-4c3e-b78c-cac1f5e4e57d [from:14ea80d9-4c75-42b2-a09f-80f1e2d11d6d] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792336661-gw27sbif
+[OriginTrailGame] Journey started for swarm-mo8wa1dk-4e2p (remote)
+2026-04-21 19:25:36 share 060dbf81-fddf-4c3e-b78c-cac1f5e4e57d [from:14ea80d9-4c75-42b2-a09f-80f1e2d11d6d] [SharedMemoryHandler] Stored SWM write swm-1776792336661-gw27sbif (11 quads)
+2026-04-21 19:25:38 share 62999aef-e909-4983-b48b-e59bd4bc5e22 [from:076cbf6f-6fac-42df-9218-81b93381e3db] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792338671-g4uv2xh8
+[OriginTrailGame] Remote vote: advance from 12D3KooW on turn 1
+2026-04-21 19:25:38 share 62999aef-e909-4983-b48b-e59bd4bc5e22 [from:076cbf6f-6fac-42df-9218-81b93381e3db] [SharedMemoryHandler] Stored SWM write swm-1776792338671-g4uv2xh8 (5 quads)
+2026-04-21 19:25:39 share ff741411-e3c8-4798-bdcc-0be0984cc363 [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:39 share ff741411-e3c8-4798-bdcc-0be0984cc363 [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+[OriginTrailGame] Vote cast: advance for turn 1 on swarm-mo8wa1dk-4e2p
+2026-04-21 19:25:39 share ff741411-e3c8-4798-bdcc-0be0984cc363 [DKGPublisher] Shared memory write complete: swm-1776792339175-goy8o58v
+2026-04-21 19:25:39 share 55daf6f6-d4f2-496d-b771-24947f0b97e9 [from:c7b34981-04cc-4e99-b9d6-bc300ff2c1db] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792339683-1gccdu7b
+[OriginTrailGame] Remote vote: advance from 12D3KooW on turn 1
+[OriginTrailGame] Approved proposal for swarm-mo8wa1dk-4e2p turn 1
+2026-04-21 19:25:39 share 55daf6f6-d4f2-496d-b771-24947f0b97e9 [from:c7b34981-04cc-4e99-b9d6-bc300ff2c1db] [SharedMemoryHandler] Stored SWM write swm-1776792339683-1gccdu7b (5 quads)
+2026-04-21 19:25:39 share 041ccdf6-827f-4b45-a0ea-99795f5f6320 [from:04ed4dd2-da80-4d9a-a283-af60fd51bc92] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792339690-v1upjgja
+2026-04-21 19:25:39 share 041ccdf6-827f-4b45-a0ea-99795f5f6320 [from:04ed4dd2-da80-4d9a-a283-af60fd51bc92] [SharedMemoryHandler] Stored SWM write swm-1776792339690-v1upjgja (32 quads)
+2026-04-21 19:25:40 gossip 18eeaf69-37de-42d5-8bfd-35d250f17887 [FinalizationHandler] Finalization: contextGraphId "<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/TurnResult> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/winningAction> "advance" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/gameState> "{\"sessionId\":\"session-e989f2b1-99d8-47f2-bbff-a9b7faf52dbc\",\"player\":\"12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj\",\"epochs\":16,\"trainingTokens\":485,\"apiCredits\":20,\"computeUnits\":4,\"modelWeights\":5,\"trac\":300,\"month\":3,\"day\":2,\"party\":[{\"id\":\"agent-0\",\"name\":\"Hero\",\"health\":100,\"alive\":true},{\"id\":\"agent-1\",\"name\":\"Sidekick\",\"health\":100,\"alive\":true},{\"id\":\"agent-2\",\"name\":\"Scout\",\"health\":100,\"alive\":true}],\"status\":\"active\",\"moveCount\":1}" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/swarm> <https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> <https://origintrail-game.dkg.io/approvedBy> <https://origintrail-game.dkg.io/player/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestationBatch> .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <https://origintrail-game.dkg.io/forTurn> <https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1> .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <https://origintrail-game.dkg.io/resolution> "consensus" .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> .
+<urn:dkg:attestation:swarm-mo8wa1dk-4e2p:turn1:198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d> <https://origintrail-game.dkg.io/hasAttestation> <https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/proposalHash> "198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj> <https://origintrail-game.dkg.io/attestedAt> "1776792339686"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://origintrail-game.dkg.io/proposalHash> "198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://origintrail-game.dkg.io/attestedAt> "1776792339686"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://origintrail-game.dkg.io/ConsensusAttestation> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <https://origintrail-game.dkg.io/turn> "1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <https://origintrail-game.dkg.io/signer> <https://origintrail-game.dkg.io/player/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <https://origintrail-game.dkg.io/proposalHash> "198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d" .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <https://origintrail-game.dkg.io/approved> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1/attestation/198ee4a82683dbe03d5bd74290d978bbec8911069a17b4e2272c4ea362b7182d/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj> <https://origintrail-game.dkg.io/attestedAt> "1776792339686"^^<http://www.w3.org/2001/XMLSchema#decimal> ." does not match topic "origin-trail-game", ignoring [WARN]
+2026-04-21 19:25:40 share 185a4bca-6c42-485a-96b3-15df528e502a [from:b44291a6-c762-48a5-9ac5-2ca9d93f41c2] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792340032-cw2p1nj6
+2026-04-21 19:25:40 share 185a4bca-6c42-485a-96b3-15df528e502a [from:b44291a6-c762-48a5-9ac5-2ca9d93f41c2] [SharedMemoryHandler] Stored SWM write swm-1776792340032-cw2p1nj6 (6 quads)
+2026-04-21 19:25:40 share 52715972-2cf6-4500-b7d5-269c310bea1d [from:26dd3665-ee04-4811-ac3d-a658859ffc5d] [SharedMemoryHandler] SWM write from 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj for context graph origin-trail-game op=swm-1776792340034-i9lzbdol
+2026-04-21 19:25:40 gossip 7154c8a4-d5d4-4bdd-8b82-b3c22ddf2567 [from:75ec1410-093d-4935-a19d-ee9cf8731010] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-6 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:40 share 52715972-2cf6-4500-b7d5-269c310bea1d [from:26dd3665-ee04-4811-ac3d-a658859ffc5d] [SharedMemoryHandler] Stored SWM write swm-1776792340034-i9lzbdol (21 quads)
+2026-04-21 19:25:40 query 6e8313a0-1f8f-421d-b469-345dcca6d205 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:40 query 6e8313a0-1f8f-421d-b469-345dcca6d205 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:40 query f4ee32bb-2421-4c79-9d5e-b034ce85bfd2 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:40 query f4ee32bb-2421-4c79-9d5e-b034ce85bfd2 [DKGAgent] Query returned 6 bindings
+[OriginTrailGame] Graph sync: found 6 swarms in graph
+2026-04-21 19:25:40 query ce0fb790-f55f-47e5-a92b-2f437a28259c [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:40 query ce0fb790-f55f-47e5-a92b-2f437a28259c [DKGAgent] Query returned 3 bindings
+2026-04-21 19:25:40 query c0578373-6154-4463-9f29-da60f8dff74c [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:40 query c0578373-6154-4463-9f29-da60f8dff74c [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:40 query 7fdc7bfc-e68e-4244-a8aa-e5268548d414 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:40 query 7fdc7bfc-e68e-4244-a8aa-e5268548d414 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:40 query eae7d230-d223-49b4-b10e-7d807f4dd7ce [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:40 query eae7d230-d223-49b4-b10e-7d807f4dd7ce [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:40 query 68940104-67f3-4a7b-9ee0-9f09be31d9af [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:40 query 68940104-67f3-4a7b-9ee0-9f09be31d9af [DKGAgent] Query returned 1 bindings
+[2026-04-21T17:25:44.698Z] Shutting down...
+[2026-04-21T17:25:44.704Z] Connection closed: ivxAPdVj transport=direct duration=50458ms addr=/ip4/127.0.0.1/tcp/27111/p2p/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:25:44 system b7f4d60f-6044-43af-8ff6-2d7c62b36cdc [ChainEventPoller] Chain event poller stopped

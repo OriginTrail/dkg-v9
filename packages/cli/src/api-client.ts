@@ -305,6 +305,7 @@ export class ApiClient {
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -353,6 +354,7 @@ export class ApiClient {
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -405,6 +407,7 @@ export class ApiClient {
       dataSynced: number;
       sharedMemorySynced: number;
       denied: boolean;
+      deniedPeers: number;
       diagnostics?: {
         noProtocolPeers: number;
         durable: {
@@ -446,6 +449,7 @@ export class ApiClient {
     private?: boolean;
     accessPolicy?: number;
     allowedAgents?: string[];
+    participantAgents?: string[];
     participantIdentityIds?: Array<string | number | bigint>;
     requiredSignatures?: number;
   }, allowedPeers?: string[]): Promise<{
@@ -459,6 +463,7 @@ export class ApiClient {
       ...(allowedPeers?.length ? { allowedPeers } : {}),
       ...(options?.accessPolicy != null ? { accessPolicy: options.accessPolicy } : {}),
       ...(options?.allowedAgents?.length ? { allowedAgents: options.allowedAgents } : {}),
+      ...(options?.participantAgents?.length ? { participantAgents: options.participantAgents } : {}),
       ...(options?.private ? { private: true } : {}),
       ...(options?.participantIdentityIds?.length
         ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
@@ -467,12 +472,19 @@ export class ApiClient {
     });
   }
 
-  async registerContextGraph(id: string, opts?: { revealOnChain?: boolean; accessPolicy?: number }): Promise<{
+  async registerContextGraph(id: string, opts?: {
+    /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
+    revealOnChain?: boolean;
+    accessPolicy?: number;
+  }): Promise<{
     registered: string;
     onChainId: string;
     hint?: string;
   }> {
-    return this.post('/api/context-graph/register', { id, ...opts });
+    return this.post('/api/context-graph/register', {
+      id,
+      ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
+    });
   }
 
   /** @deprecated Use addAgent instead. */
@@ -879,6 +891,10 @@ export class ApiClient {
   }
 }
 
+// NOTE: mirrored in `packages/adapter-openclaw/src/DkgNodePlugin.ts`
+// (`UPLOAD_CONTENT_TYPES` there). `adapter-openclaw` can't import this
+// directly (circular workspace dep), so update both tables together when
+// adding a new format until a shared upload module lives in `dkg-core`.
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.md': 'text/markdown',

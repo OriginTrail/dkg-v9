@@ -121,6 +121,16 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
 export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
+  // CLI-16 (BUGS_FOUND.md dup #87): reject path-traversal patterns
+  // explicitly. The character whitelist below allows `.` and `/`
+  // (because URNs / DIDs / URLs legitimately use them), so a naive
+  // identifier like `../etc/passwd` or `legit-cg/../../other-cg`
+  // slips past the regex and gets handed to file-system / on-chain
+  // code that has no business seeing parent-directory segments.
+  if (id.includes('..')) return { valid: false, reason: 'Context graph ID may not contain ".." (path traversal)' };
+  for (const seg of id.split('/')) {
+    if (seg === '.' || seg === '..') return { valid: false, reason: 'Context graph ID path segments may not be "." or ".." (path traversal)' };
+  }
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
   return { valid: true };
 }

@@ -1,0 +1,16 @@
+{
+  "name": "test-node-1",
+  "apiPort": 21078,
+  "listenPort": 27111,
+  "nodeRole": "core",
+  "contextGraphs": [
+    "origin-trail-game"
+  ],
+  "auth": {
+    "enabled": true,
+    "tokens": [
+      "test-token-for-e2e"
+    ]
+  },
+  "relay": "none"
+}

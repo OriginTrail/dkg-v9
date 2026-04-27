@@ -1,0 +1,374 @@
+
+██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗
+██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██║     ██║╚══███╔╝██╔════╝██╔══██╗
+██║  ██║█████╗  ██║     █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     ██║  ███╔╝ █████╗  ██║  ██║
+██║  ██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██║ ███╔╝  ██╔══╝  ██║  ██║
+██████╔╝███████╗╚██████╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║███████╗██║███████╗███████╗██████╔╝
+╚═════╝ ╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═════╝
+
+██╗  ██╗███╗   ██╗ ██████╗ ██╗    ██╗██╗     ███████╗██████╗  ██████╗ ███████╗
+██║ ██╔╝████╗  ██║██╔═══██╗██║    ██║██║     ██╔════╝██╔══██╗██╔════╝ ██╔════╝
+█████╔╝ ██╔██╗ ██║██║   ██║██║ █╗ ██║██║     █████╗  ██║  ██║██║  ███╗█████╗
+██╔═██╗ ██║╚██╗██║██║   ██║██║███╗██║██║     ██╔══╝  ██║  ██║██║   ██║██╔══╝
+██║  ██╗██║ ╚████║╚██████╔╝╚███╔███╔╝███████╗███████╗██████╔╝╚██████╔╝███████╗
+╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝
+
+ ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗
+██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝
+
+[2026-04-21T17:24:46.776Z] Starting DKG core node "test-node-1" (v10.0.0-rc.1, f50bdf12)...
+[2026-04-21T17:24:46.806Z] Operational wallets (3):
+[2026-04-21T17:24:46.806Z]   0xf1095CBd0326730080fAb5645a0043C2B6368d0E
+[2026-04-21T17:24:46.806Z]   0x1f2F8E6cB34b4aFc87429C0545eeD9E250C3d5c6
+[2026-04-21T17:24:46.806Z]   0x8b347dB1a0ba48DE887DF38C8Ea47F2d2B4E5506
+[2026-04-21T17:24:46.806Z] Relay disabled (config.relay = "none") — this node will not connect to any relay
+2026-04-21 19:24:46 system 1250b3c9-1a8e-41ec-a32d-ba04c23e4ddb [DKGAgent] Persistent triple store (worker thread): /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node1/store.nq
+[2026-04-21T17:24:46.858Z] Network config: DKG V10 Testnet (genesis v1)
+[2026-04-21T17:24:46.858Z] Network: f81f9df2e9604fca...
+2026-04-21 19:24:46 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] Starting DKG node
+2026-04-21 19:24:46 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] Node started, peer ID: 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:24:46 system 2883e33c-5e7a-44d8-8f2e-a4af6b053591 [DKGAgent] Auto-registered default agent "test-node-1" → 0xf1095CBd0326730080fAb5645a0043C2B6368d0E
+2026-04-21 19:24:50 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] No on-chain identity found, creating profile and staking...
+2026-04-21 19:24:51 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] ensureProfile error: insufficient funds for intrinsic transaction cost (transaction="0x02f901b283014a3480830f424083a7d8c08307a50f94b46a7bf33fd34a710cf497196beb7c17a0af56fc80b90144f0f9f5dd0000000000000000000000008105e9933035947bb6ff26e47a20b7c4921724fc00000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b746573742d6e6f64652d31000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002017d563ecadfd44f0c6ed9f2112af656d8ba1e69f825caa099debd789ac31dfb0c001a05a1036d26754a28a18e6eb08f05fd926734a66299d17fc9199fbff85f058097aa06011b27f9302eb94906032cee603751a423a63d5a9b13119d6f93f7317f4c2d6", info={ "error": { "code": -32003, "message": "insufficient funds for gas * price + value: have 0 want 5511077000000" } }, code=INSUFFICIENT_FUNDS, version=6.16.0) [WARN]
+2026-04-21 19:24:51 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] No valid on-chain identity — on-chain publishes will be skipped [WARN]
+2026-04-21 19:24:51 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] Skipping V10 StorageACK handler registration — identity not yet provisioned [WARN]
+2026-04-21 19:24:51 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] Registered VERIFY proposal handler
+2026-04-21 19:24:51 system f3062d96-df15-40b4-8f9d-ec018b8ce084 [ChainEventPoller] Starting chain event poller (interval=12000ms)
+2026-04-21 19:24:51 connect d64cbf93-1674-4ef1-af70-8ee187a1e2f9 [DKGAgent] Chain event poller started
+2026-04-21 19:24:51 publish 963ec7bb-d4af-4329-a27a-e4fc8f933ab8 [DKGAgent] Publishing agent profile
+2026-04-21 19:24:51 publish 345b195c-1ad4-4ee4-b855-0be11757de4e [DKGPublisher] Preparing publish: 11 public triples, 0 private
+2026-04-21 19:24:51 publish 345b195c-1ad4-4ee4-b855-0be11757de4e [DKGPublisher] Storing 11 triples in local store
+2026-04-21 19:24:51 publish 345b195c-1ad4-4ee4-b855-0be11757de4e [DKGPublisher] Computed kcMerkleRoot (flat) over 11 triple hashes + 0 private root(s)
+2026-04-21 19:24:52 publish 4b819758-991a-4c33-a1b2-3adba76564ac [ChainEventPoller] Seeded poller cursor near chain head: 40512001 → scanning from 40511501
+2026-04-21 19:24:52 publish 345b195c-1ad4-4ee4-b855-0be11757de4e [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:24:52 publish 345b195c-1ad4-4ee4-b855-0be11757de4e [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-1
+2026-04-21 19:24:52 publish 963ec7bb-d4af-4329-a27a-e4fc8f933ab8 [DKGAgent] Broadcasting to topic dkg/context-graph/agents/finalization
+[2026-04-21T17:24:52.269Z] PeerId: 12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+[2026-04-21T17:24:52.269Z]   /ip4/192.168.1.6/tcp/27111/p2p/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+[2026-04-21T17:24:52.269Z]   /ip4/127.0.0.1/tcp/27111/p2p/12D3KooWEbunR9vrdBY3DSuGa6LzeHFrhJXHg6Vs74jRivxAPdVj
+2026-04-21 19:24:52 system e1548b96-c54d-4e56-ad79-8a7c782010e0 [DKGAgent] Ensured context graph "origin-trail-game" locally (open)
+[2026-04-21T17:24:52.270Z] Ensured context graph: origin-trail-game
+2026-04-21 19:24:52 system c4b6de7a-d881-44a2-92b8-b2d77b980db0 [DKGAgent] Ensured context graph "testing" locally (open)
+[2026-04-21T17:24:52.270Z] Ensured context graph: testing
+[2026-04-21T17:24:52.284Z] Dashboard DB initialized at /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node1/node-ui.db
+[2026-04-21T17:24:52.284Z] Metrics collector started (2min interval)
+[2026-04-21T17:24:52.284Z] Memory enrichment LLM not configured
+[2026-04-21T17:24:52.284Z] Memory manager ready
+2026-04-21 19:24:52 query 147fb80a-4cd9-442c-9448-dc15a81c677d [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }"
+[2026-04-21T17:24:52.286Z] Token file: /Users/bojancolic/dkg-v9/packages/origin-trail-game/.test-nodes/node1/auth.token
+[2026-04-21T17:24:52.286Z] API authentication enabled (2 tokens loaded)
+2026-04-21 19:24:52 query 147fb80a-4cd9-442c-9448-dc15a81c677d [DKGAgent] Query returned 1 bindings
+2026-04-21 19:24:52 query 7e78ac9f-e91b-4d94-98b5-97c7e390a0c3 [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontol"
+2026-04-21 19:24:52 query 451ba59c-2bad-4034-96c9-310d8db87fc0 [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontol"
+2026-04-21 19:24:52 query 7e78ac9f-e91b-4d94-98b5-97c7e390a0c3 [DKGAgent] Query returned 1 bindings
+[2026-04-21T17:24:52.300Z] App loaded: OriginTrail Game (origin-trail-game) → /apps/origin-trail-game/
+[2026-04-21T17:24:52.300Z] 1 DKG app(s) loaded: OriginTrail Game
+[2026-04-21T17:24:52.301Z] App static server listening on http://127.0.0.1:21178
+[2026-04-21T17:24:52.427Z] Extraction pipelines: text/markdown
+[2026-04-21T17:24:52.427Z] MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)
+2026-04-21 19:24:52 query b4a450a9-f1fc-45eb-8109-ca727ac8ae63 [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontolog"
+2026-04-21 19:24:52 query 451ba59c-2bad-4034-96c9-310d8db87fc0 [DKGAgent] Query returned 1 bindings
+[2026-04-21T17:24:52.430Z] CORS allowlist: http://127.0.0.1:21078, http://localhost:21078, http://[::1]:21078
+[2026-04-21T17:24:52.430Z] API listening on http://127.0.0.1:21078
+[2026-04-21T17:24:52.430Z] Node UI: http://127.0.0.1:21078/ui
+[2026-04-21T17:24:52.430Z] Node is running. Use "dkg status" or "dkg peers" to interact.
+2026-04-21 19:24:52 query b4a450a9-f1fc-45eb-8109-ca727ac8ae63 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:24:52 query b7fa1158-1331-415d-beb7-1c273c9428df [DKGAgent] Query on contextGraph="all" sparql="SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontolog"
+2026-04-21 19:24:52 query b7fa1158-1331-415d-beb7-1c273c9428df [DKGAgent] Query returned 1 bindings
+[2026-04-21T17:24:54.259Z] Connection opened: ss47BAqa transport=direct dir=inbound addr=/ip4/127.0.0.1/tcp/60288/p2p/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa
+2026-04-21 19:24:54 query f21c3864-f315-4c8e-8d17-05e5f5118731 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:24:54 query f21c3864-f315-4c8e-8d17-05e5f5118731 [DKGAgent] Query returned 0 bindings
+[OriginTrailGame] Graph sync: found 0 registered players
+2026-04-21 19:24:54 query b96a99a2-a642-4d8c-b3d6-eaa50c4295e4 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:24:54 query b96a99a2-a642-4d8c-b3d6-eaa50c4295e4 [DKGAgent] Query returned 0 bindings
+[OriginTrailGame] Graph sync: found 0 swarms in graph
+2026-04-21 19:24:57 sync 80b7dae6-b04e-4687-9755-435ee52069d7 [DKGAgent] Peer ss47BAqa does not support sync protocol (protocols: /dkg/10.0.0/private-access, /dkg/10.0.0/publish, /dkg/10.0.0/query-remote, /floodsub/1.0.0, /ipfs/id/1.0.0, /ipfs/ping/1.0.0, /libp2p/circuit/relay/0.2.0/hop, /libp2p/circuit/relay/0.2.0/stop, /libp2p/dcutr, /meshsub/1.0.0, /meshsub/1.1.0, /meshsub/1.2.0)
+2026-04-21 19:24:58 gossip be0a549b-0e0d-489f-8758-4b8469ff735a [from:-42d1-abb8-4f1fa19ab733] [FinalizationHandler] Finalization: contextGraphId "<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#Agent> .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#CoreNode> .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://schema.org/name> "test-node-2" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://dkg.network/ontology#peerId> "12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://dkg.network/ontology#nodeRole> "core" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://dkg.network/ontology#publicKey> "O0NkPwYMhGN/dkj5rUB7IqeYBzR2PesBEsDliJwOU5U=" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://dkg.network/ontology#agentAddress> "0x5808C4862c25Fc04A28a5E8eEa01557276313267" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <https://dkg.origintrail.io/skill#framework> "DKG" .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa> <http://www.w3.org/ns/prov#wasGeneratedBy> <did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa/.well-known/genid/registration> .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa/.well-known/genid/registration> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/prov#Activity> .
+<did:dkg:agent:12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa/.well-known/genid/registration> <http://www.w3.org/ns/prov#atTime> "2026-04-21T17:24:58.221Z" ." does not match topic "agents", ignoring [WARN]
+2026-04-21 19:24:58 gossip 1647ac44-017c-4235-a5ff-c35d73478ea4 [from:822914e1-12a0-42d1-abb8-4f1fa19ab733] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0x5808C4862c25Fc04A28a5E8eEa01557276313267/tmo8w97qd-1 stored as tentative (no on-chain proof in message)
+[2026-04-21T17:25:00.794Z] Connection opened: kNCeXwcj transport=direct dir=inbound addr=/ip4/127.0.0.1/tcp/60307/p2p/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj
+2026-04-21 19:25:03 sync 2ddd8134-a085-421e-8148-91a76d13a730 [DKGAgent] Peer kNCeXwcj does not support sync protocol (protocols: /dkg/10.0.0/private-access, /dkg/10.0.0/publish, /dkg/10.0.0/query-remote, /floodsub/1.0.0, /ipfs/id/1.0.0, /ipfs/ping/1.0.0, /libp2p/circuit/relay/0.2.0/hop, /libp2p/circuit/relay/0.2.0/stop, /libp2p/dcutr, /meshsub/1.0.0, /meshsub/1.1.0, /meshsub/1.2.0)
+2026-04-21 19:25:04 query 7af93338-f3a3-4f52-8f6f-d08b1d5f1d98 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:04 query 7af93338-f3a3-4f52-8f6f-d08b1d5f1d98 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:04 query 3494d98e-4d82-4d3b-a5fe-2674fb29746d [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:04 query 3494d98e-4d82-4d3b-a5fe-2674fb29746d [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:05 gossip 0756fdec-a747-424c-92bf-0c065a308926 [from:9a68b06e-94a9-4f78-89b0-845a64c03ac8] [GossipPublishHandler] Gossip publish did:dkg:base:84532/0x3E70E47CfC9bC5Df1bb99E1064b59333093072fe/tmo8w9cs0-1 stored as tentative (no on-chain proof in message)
+2026-04-21 19:25:08 query 91ffd539-d81b-43c0-bea1-0ebd119b24a4 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWEbunR9vrdBY3DSuGa6Lze"
+2026-04-21 19:25:08 share 61c61a40-b41d-4abf-a88c-86a8bbe99ce1 [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 61c61a40-b41d-4abf-a88c-86a8bbe99ce1 [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 query 91ffd539-d81b-43c0-bea1-0ebd119b24a4 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:08 share a29d19ae-319c-48df-bab7-a6d08f156645 [DKGPublisher] Writing 4 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 share a29d19ae-319c-48df-bab7-a6d08f156645 [DKGAgent] Sharing 4 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 61c61a40-b41d-4abf-a88c-86a8bbe99ce1 [DKGPublisher] Shared memory write complete: swm-1776792308546-lkkcl50c
+[OriginTrailGame] Swarm created: Solo Trek (swarm-mo8w9jk1-f2ua)
+2026-04-21 19:25:08 share a29d19ae-319c-48df-bab7-a6d08f156645 [DKGPublisher] Shared memory write complete: swm-1776792308548-7kdop9gp
+[OriginTrailGame] Player profile for "Solo Alice" written to shared memory
+2026-04-21 19:25:08 share 3ebd03f2-92be-4933-bbaa-81bc7cf14755 [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 3ebd03f2-92be-4933-bbaa-81bc7cf14755 [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 share 3ebd03f2-92be-4933-bbaa-81bc7cf14755 [DKGPublisher] Shared memory write complete: swm-1776792308552-54bhbx1d
+[OriginTrailGame] Skipping context graph: 1/1 players lack an identityId
+[OriginTrailGame] Expedition launched for swarm-mo8w9jk1-f2ua
+2026-04-21 19:25:08 system 1c723033-3b8d-4fbe-9723-1682a255772f [DKGAgent] Published CCL policy turn-validation@1.3.0 for paranet "origin-trail-game"
+[OriginTrailGame] CCL policy installation failed: Paranet "origin-trail-game" has no registered owner; cannot manage policies. — CCL governance not available, proceeding without
+2026-04-21 19:25:08 share f63c5e75-03c6-4d7b-b037-b12d90c6d5e0 [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share f63c5e75-03c6-4d7b-b037-b12d90c6d5e0 [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 share f63c5e75-03c6-4d7b-b037-b12d90c6d5e0 [DKGPublisher] Shared memory write complete: swm-1776792308569-ryyovipj
+[OriginTrailGame] Vote cast: advance for turn 1 on swarm-mo8w9jk1-f2ua
+2026-04-21 19:25:08 share 8e558378-c187-4809-a7fd-f1d4f6818f25 [DKGAgent] Sharing 16 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 8e558378-c187-4809-a7fd-f1d4f6818f25 [DKGPublisher] Writing 16 quads to shared memory for context graph origin-trail-game
+[OriginTrailGame] Turn 1 proposal broadcast for swarm-mo8w9jk1-f2ua (hash=c5721f56, CCL-governed)
+2026-04-21 19:25:08 share 8e558378-c187-4809-a7fd-f1d4f6818f25 [DKGPublisher] Shared memory write complete: swm-1776792308573-wjhjceyn
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGAgent] Starting publish to context graph "origin-trail-game" with 16 triples
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] Preparing publish: 16 public triples, 0 private
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] Computed kcMerkleRoot (flat) over 16 triple hashes + 0 private root(s)
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] Storing 16 triples in local store
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] V10 ACK collection failed — will attempt self-signed ACK fallback: V10 ACK collection requires a numeric on-chain context graph id; got 'origin-trail-game'. Register the CG on-chain via ContextGraphs.createContextGraph first. [WARN]
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-2
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGAgent] Local publish complete, broadcasting to peers
+[OriginTrailGame] Turn 1 published (no context graph)
+2026-04-21 19:25:08 share 518e282c-252d-4476-a30a-05f7a77a1f29 [DKGAgent] Sharing 6 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 518e282c-252d-4476-a30a-05f7a77a1f29 [DKGPublisher] Writing 6 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGAgent] Broadcasting to topic dkg/context-graph/origin-trail-game/finalization
+2026-04-21 19:25:08 publish e7b8557e-7635-4462-a057-0b2a55ce93c1 [DKGAgent] Publish complete — status=tentative kcId=0
+2026-04-21 19:25:08 share 518e282c-252d-4476-a30a-05f7a77a1f29 [DKGPublisher] Shared memory write complete: swm-1776792308928-5ope6u4n
+[OriginTrailGame] Provenance chain written to shared memory for https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/1: tx=
+2026-04-21 19:25:08 share 41d3de89-b265-4469-bfb1-99892bac904b [DKGAgent] Sharing 21 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:08 share 41d3de89-b265-4469-bfb1-99892bac904b [DKGPublisher] Writing 21 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:08 share 41d3de89-b265-4469-bfb1-99892bac904b [DKGPublisher] Shared memory write complete: swm-1776792308930-1ei6gxcf
+[OriginTrailGame] Recorded shared memory lineage for 3 operation(s)
+2026-04-21 19:25:12 share 6577e9ea-37ba-4b5b-9738-480a65523611 [DKGAgent] Sharing 4 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:12 share 6577e9ea-37ba-4b5b-9738-480a65523611 [DKGPublisher] Writing 4 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:12 share 6577e9ea-37ba-4b5b-9738-480a65523611 [DKGPublisher] Shared memory write complete: swm-1776792312940-uqnqmuar
+2026-04-21 19:25:12 share d986b0a3-09dc-4053-92fd-83f5d26e2f54 [DKGAgent] Sharing 16 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:12 share d986b0a3-09dc-4053-92fd-83f5d26e2f54 [DKGPublisher] Writing 16 quads to shared memory for context graph origin-trail-game
+[OriginTrailGame] Vote cast: upgradeSkills for turn 2 on swarm-mo8w9jk1-f2ua
+[OriginTrailGame] Turn 2 proposal broadcast for swarm-mo8w9jk1-f2ua (hash=fc6a4263, CCL-governed)
+2026-04-21 19:25:12 share d986b0a3-09dc-4053-92fd-83f5d26e2f54 [DKGPublisher] Shared memory write complete: swm-1776792312943-na3yu9l1
+2026-04-21 19:25:12 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGAgent] Starting publish to context graph "origin-trail-game" with 16 triples
+2026-04-21 19:25:12 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] Preparing publish: 16 public triples, 0 private
+2026-04-21 19:25:12 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] Computed kcMerkleRoot (flat) over 16 triple hashes + 0 private root(s)
+2026-04-21 19:25:12 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] Storing 16 triples in local store
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] V10 ACK collection failed — will attempt self-signed ACK fallback: V10 ACK collection requires a numeric on-chain context graph id; got 'origin-trail-game'. Register the CG on-chain via ContextGraphs.createContextGraph first. [WARN]
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-3
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGAgent] Publish complete — status=tentative kcId=0
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGAgent] Local publish complete, broadcasting to peers
+2026-04-21 19:25:13 publish d5adb788-cd14-4132-8683-2bf6b45d1f59 [DKGAgent] Broadcasting to topic dkg/context-graph/origin-trail-game/finalization
+[OriginTrailGame] Turn 2 published (no context graph)
+2026-04-21 19:25:13 share 04470a83-652b-4f8c-84f1-9df3fe38c263 [DKGPublisher] Writing 6 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:13 share 04470a83-652b-4f8c-84f1-9df3fe38c263 [DKGAgent] Sharing 6 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:13 share 04470a83-652b-4f8c-84f1-9df3fe38c263 [DKGPublisher] Shared memory write complete: swm-1776792313264-k3h10pn8
+[OriginTrailGame] Provenance chain written to shared memory for https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/2: tx=
+2026-04-21 19:25:13 share 4848f6a8-e979-493c-8ac7-30e127e2ec00 [DKGPublisher] Writing 7 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:13 share 4848f6a8-e979-493c-8ac7-30e127e2ec00 [DKGAgent] Sharing 7 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:13 share 4848f6a8-e979-493c-8ac7-30e127e2ec00 [DKGPublisher] Shared memory write complete: swm-1776792313266-5il3ahyu
+[OriginTrailGame] Recorded shared memory lineage for 1 operation(s)
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGAgent] Starting publish to context graph "origin-trail-game" with 16 triples
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] Preparing publish: 16 public triples, 0 private
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] Computed kcMerkleRoot (flat) over 16 triple hashes + 0 private root(s)
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] Storing 16 triples in local store
+2026-04-21 19:25:14 query 82e31e04-551c-4a90-866e-01c2ed6696b0 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:14 query 82e31e04-551c-4a90-866e-01c2ed6696b0 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:14 query dbf6f549-d5de-4e28-acfb-1a660d761e1a [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:14 query dbf6f549-d5de-4e28-acfb-1a660d761e1a [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Graph sync: found 1 swarms in graph
+2026-04-21 19:25:14 query 1c919492-1c4d-4c4c-91cb-4238ec683321 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:14 query 1c919492-1c4d-4c4c-91cb-4238ec683321 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] V10 ACK collection failed — will attempt self-signed ACK fallback: V10 ACK collection requires a numeric on-chain context graph id; got 'origin-trail-game'. Register the CG on-chain via ContextGraphs.createContextGraph first. [WARN]
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-4
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGAgent] Local publish complete, broadcasting to peers
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGAgent] Broadcasting to topic dkg/context-graph/origin-trail-game/finalization
+2026-04-21 19:25:14 publish e6c3d962-81d5-4516-b3b5-173a62ccbdd1 [DKGAgent] Publish complete — status=tentative kcId=0
+[OriginTrailGame] Force-resolve turn 3 published (plain, no context graph)
+2026-04-21 19:25:14 share 07cc28ee-eb20-4d2f-ab57-cb7f81611847 [DKGAgent] Sharing 6 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:14 share 07cc28ee-eb20-4d2f-ab57-cb7f81611847 [DKGPublisher] Writing 6 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:14 share 07cc28ee-eb20-4d2f-ab57-cb7f81611847 [DKGPublisher] Shared memory write complete: swm-1776792314549-u5km1o4v
+[OriginTrailGame] Provenance chain written to shared memory for https://origintrail-game.dkg.io/swarm/swarm-mo8w9jk1-f2ua/turn/3: tx=
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGAgent] Starting publish to context graph "origin-trail-game" with 6 triples
+[OriginTrailGame] Force-resolve: turn 3 resolved immediately for swarm-mo8w9jk1-f2ua
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] Preparing publish: 6 public triples, 0 private
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] Computed kcMerkleRoot (flat) over 6 triple hashes + 0 private root(s)
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] Storing 6 triples in local store
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] V10 ACK collection failed — will attempt self-signed ACK fallback: V10 ACK collection requires a numeric on-chain context graph id; got 'origin-trail-game'. Register the CG on-chain via ContextGraphs.createContextGraph first. [WARN]
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-5
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGAgent] Broadcasting to topic dkg/context-graph/origin-trail-game/finalization
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGAgent] Publish complete — status=tentative kcId=0
+2026-04-21 19:25:14 publish 0209d38f-67cd-4521-a70f-cbd72981a810 [DKGAgent] Local publish complete, broadcasting to peers
+[OriginTrailGame] Sync Memory via DKG published for swarm swarm-mo8w9jk1-f2ua, turn 3 (5 TRAC spent)
+2026-04-21 19:25:18 query b8e2963a-1ddc-4d0f-bf7a-a4eb1dc27b89 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWEbunR9vrdBY3DSuGa6Lze"
+2026-04-21 19:25:18 share 84a2dba0-84a7-455c-88ed-243366472be8 [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:18 share 84a2dba0-84a7-455c-88ed-243366472be8 [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:18 query b8e2963a-1ddc-4d0f-bf7a-a4eb1dc27b89 [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "Leader" already exists, skipping
+2026-04-21 19:25:18 share 84a2dba0-84a7-455c-88ed-243366472be8 [DKGPublisher] Shared memory write complete: swm-1776792318560-s5ziusle
+[OriginTrailGame] Swarm created: Leave Test (swarm-mo8w9ra7-c3xf)
+2026-04-21 19:25:20 share b8edf8ee-ce76-45e6-8d3b-d42cccbf6afb [from:31be7a7b-9abd-42cc-bf64-551b43ad5786] [SharedMemoryHandler] SWM write from 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa for context graph origin-trail-game op=swm-1776792320566-ky09pf63
+[OriginTrailGame] Player Joiner joined swarm-mo8w9ra7-c3xf
+2026-04-21 19:25:20 share 72370bda-7991-44a9-bf79-4001b06a0388 [from:c4c2afd5-b9f6-48cd-82a2-df17fd03c192] [SharedMemoryHandler] SWM write from 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa for context graph origin-trail-game op=swm-1776792320567-08ps4vls
+2026-04-21 19:25:20 share b8edf8ee-ce76-45e6-8d3b-d42cccbf6afb [from:31be7a7b-9abd-42cc-bf64-551b43ad5786] [SharedMemoryHandler] Stored SWM write swm-1776792320566-ky09pf63 (5 quads)
+2026-04-21 19:25:20 share 72370bda-7991-44a9-bf79-4001b06a0388 [from:c4c2afd5-b9f6-48cd-82a2-df17fd03c192] [SharedMemoryHandler] Stored SWM write swm-1776792320567-08ps4vls (4 quads)
+2026-04-21 19:25:22 system 578cc38b-e5c0-454c-855f-ff4077549bfa [DKGAgent] Peer health ping: 2/2 peers alive
+[OriginTrailGame] Player Joiner joined swarm-mo8w9ra7-c3xf
+2026-04-21 19:25:22 query 2040763c-c407-4f95-971c-da3173034edb [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWEbunR9vrdBY3DSuGa6Lze"
+2026-04-21 19:25:22 share e506fe86-27cd-42b1-af0d-d404ad4fde4c [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:22 share e506fe86-27cd-42b1-af0d-d404ad4fde4c [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:22 query 2040763c-c407-4f95-971c-da3173034edb [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "TempLeader" already exists, skipping
+2026-04-21 19:25:22 share e506fe86-27cd-42b1-af0d-d404ad4fde4c [DKGPublisher] Shared memory write complete: swm-1776792322580-1x9dbsuu
+[OriginTrailGame] Swarm created: Disband Test (swarm-mo8w9udw-9lu5)
+2026-04-21 19:25:24 query 1fb99e06-c8ad-446a-b2d5-e167cea3aa84 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:24 query 1fb99e06-c8ad-446a-b2d5-e167cea3aa84 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:24 query e72291b0-da07-4a63-930e-b31bd90f10f6 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:24 query e72291b0-da07-4a63-930e-b31bd90f10f6 [DKGAgent] Query returned 3 bindings
+[OriginTrailGame] Graph sync: found 3 swarms in graph
+2026-04-21 19:25:24 query da6d15aa-2ebd-49e4-8a6c-3ac979b56858 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:24 query da6d15aa-2ebd-49e4-8a6c-3ac979b56858 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:24 query 17359c42-725c-4956-80ef-4e2ce8ba808d [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:24 query 17359c42-725c-4956-80ef-4e2ce8ba808d [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:24 query 1f22f657-6f60-407d-9474-3680c85415ba [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWEbunR9vrdBY3DSuGa6Lze"
+2026-04-21 19:25:24 share 673bcebd-cb31-4ffa-a09c-315f1b6d5aa8 [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:24 share 673bcebd-cb31-4ffa-a09c-315f1b6d5aa8 [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:24 query 1f22f657-6f60-407d-9474-3680c85415ba [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "Notifier" already exists, skipping
+2026-04-21 19:25:24 share 673bcebd-cb31-4ffa-a09c-315f1b6d5aa8 [DKGPublisher] Shared memory write complete: swm-1776792324595-i3fkai5v
+[OriginTrailGame] Swarm created: Notif Swarm (swarm-mo8w9vxv-lxxs)
+2026-04-21 19:25:27 share 2a549051-333b-48e6-9064-b6bd2c5f4dcc [from:793d4f85-f032-4abf-829b-89f993f44733] [SharedMemoryHandler] SWM write from 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa for context graph origin-trail-game op=swm-1776792327610-7wfcmc2p
+[OriginTrailGame] Player NotifJoiner joined swarm-mo8w9vxv-lxxs
+2026-04-21 19:25:27 share 2a549051-333b-48e6-9064-b6bd2c5f4dcc [from:793d4f85-f032-4abf-829b-89f993f44733] [SharedMemoryHandler] Stored SWM write swm-1776792327610-7wfcmc2p (5 quads)
+2026-04-21 19:25:29 share e9ffbd59-4122-4fce-95d1-8618513a5053 [from:b9fb8397-9b8d-45a3-a72f-838431b79014] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792329622-z9n7nnyv
+[OriginTrailGame] Remote swarm discovered: Partial Swarm (swarm-mo8w9ztg-2jgq)
+2026-04-21 19:25:29 share aa9f8879-defc-4a71-825a-554fb202f2f8 [from:fa57ad8f-0e47-4d33-9f8b-5f50e7301d23] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792329623-01kfvfxr
+2026-04-21 19:25:29 share e9ffbd59-4122-4fce-95d1-8618513a5053 [from:b9fb8397-9b8d-45a3-a72f-838431b79014] [SharedMemoryHandler] Stored SWM write swm-1776792329622-z9n7nnyv (11 quads)
+2026-04-21 19:25:29 share aa9f8879-defc-4a71-825a-554fb202f2f8 [from:fa57ad8f-0e47-4d33-9f8b-5f50e7301d23] [SharedMemoryHandler] Stored SWM write swm-1776792329623-01kfvfxr (4 quads)
+2026-04-21 19:25:31 query 2a9dab42-9670-44a0-8b44-90fb4b6ca9ce [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarm"
+2026-04-21 19:25:31 query 2a9dab42-9670-44a0-8b44-90fb4b6ca9ce [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:31 query 547c3c9f-b9d5-4501-962d-594dd209f85a [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT (1 AS ?exists) WHERE { <did:dkg:game:player:12D3KooWEbunR9vrdBY3DSuGa6Lze"
+2026-04-21 19:25:31 share 2d25cce3-f7af-4f03-ac81-93e6229ff6b9 [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:31 share 2d25cce3-f7af-4f03-ac81-93e6229ff6b9 [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:31 query 547c3c9f-b9d5-4501-962d-594dd209f85a [DKGAgent] Query returned 1 bindings
+[OriginTrailGame] Player profile for "Hero" already exists, skipping
+2026-04-21 19:25:31 share 2d25cce3-f7af-4f03-ac81-93e6229ff6b9 [DKGPublisher] Shared memory write complete: swm-1776792331640-8jqaoheb
+[OriginTrailGame] Swarm created: Full Test (swarm-mo8wa1dk-4e2p)
+2026-04-21 19:25:33 share c1ce549b-4644-4bab-9064-9332d3a3b03a [from:56a1ca26-4083-42f0-b8e3-e26e4c4e647c] [SharedMemoryHandler] SWM write from 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa for context graph origin-trail-game op=swm-1776792333647-rkenvrlw
+[OriginTrailGame] Player Sidekick joined swarm-mo8wa1dk-4e2p
+2026-04-21 19:25:33 share c1ce549b-4644-4bab-9064-9332d3a3b03a [from:56a1ca26-4083-42f0-b8e3-e26e4c4e647c] [SharedMemoryHandler] Stored SWM write swm-1776792333647-rkenvrlw (5 quads)
+2026-04-21 19:25:34 query b4cf959d-501c-4dbe-b3d6-da65f1a8db26 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:34 query b4cf959d-501c-4dbe-b3d6-da65f1a8db26 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:34 query e9b7ac8d-a711-48a7-b0dc-4129b43899fc [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:34 query e9b7ac8d-a711-48a7-b0dc-4129b43899fc [DKGAgent] Query returned 6 bindings
+[OriginTrailGame] Graph sync: found 6 swarms in graph
+2026-04-21 19:25:34 query 5ffa54bd-677d-433f-bbd5-000ce12eaeaf [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:34 query 5ffa54bd-677d-433f-bbd5-000ce12eaeaf [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:34 query d77ac306-8f15-4848-9350-ed2abe7cb955 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:34 query d77ac306-8f15-4848-9350-ed2abe7cb955 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:34 query 3326273c-b974-48bf-b5f5-e408dc593072 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:34 query 3326273c-b974-48bf-b5f5-e408dc593072 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:34 query fa77a68b-59b1-4358-8045-7c3a8c23ac07 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:34 query fa77a68b-59b1-4358-8045-7c3a8c23ac07 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:34 query 47f5d148-cd61-4742-8c3e-61d35ff5c1fa [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:34 query 47f5d148-cd61-4742-8c3e-61d35ff5c1fa [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:34 share 540c412e-8360-42f2-9c06-2c10596e3763 [from:d5bc06e0-8291-4e1d-92f3-85393a6230e5] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792334655-xl8vm8bs
+[OriginTrailGame] Player Scout joined swarm-mo8wa1dk-4e2p
+2026-04-21 19:25:34 share 540c412e-8360-42f2-9c06-2c10596e3763 [from:d5bc06e0-8291-4e1d-92f3-85393a6230e5] [SharedMemoryHandler] Stored SWM write swm-1776792334655-xl8vm8bs (5 quads)
+2026-04-21 19:25:36 share 14ea80d9-4c75-42b2-a09f-80f1e2d11d6d [DKGAgent] Sharing 11 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:36 share 14ea80d9-4c75-42b2-a09f-80f1e2d11d6d [DKGPublisher] Writing 11 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:36 share 14ea80d9-4c75-42b2-a09f-80f1e2d11d6d [DKGPublisher] Shared memory write complete: swm-1776792336661-gw27sbif
+[OriginTrailGame] Skipping context graph: 3/3 players lack an identityId
+[OriginTrailGame] Expedition launched for swarm-mo8wa1dk-4e2p
+[OriginTrailGame] CCL policy installation failed: Paranet "origin-trail-game" has no registered owner; cannot manage policies. — CCL governance not available, proceeding without
+2026-04-21 19:25:38 share 076cbf6f-6fac-42df-9218-81b93381e3db [DKGAgent] Sharing 5 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:38 share 076cbf6f-6fac-42df-9218-81b93381e3db [DKGPublisher] Writing 5 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:38 share 076cbf6f-6fac-42df-9218-81b93381e3db [DKGPublisher] Shared memory write complete: swm-1776792338671-g4uv2xh8
+[OriginTrailGame] Vote cast: advance for turn 1 on swarm-mo8wa1dk-4e2p
+2026-04-21 19:25:39 share b7377655-8b91-48fc-bbea-96fae08ef677 [from:ff741411-e3c8-4798-bdcc-0be0984cc363] [SharedMemoryHandler] SWM write from 12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa for context graph origin-trail-game op=swm-1776792339175-goy8o58v
+[OriginTrailGame] Remote vote: advance from 12D3KooW on turn 1
+2026-04-21 19:25:39 share b7377655-8b91-48fc-bbea-96fae08ef677 [from:ff741411-e3c8-4798-bdcc-0be0984cc363] [SharedMemoryHandler] Stored SWM write swm-1776792339175-goy8o58v (5 quads)
+2026-04-21 19:25:39 share 9912da1f-bffd-4d11-9d0c-f79b968a0a39 [from:c7b34981-04cc-4e99-b9d6-bc300ff2c1db] [SharedMemoryHandler] SWM write from 12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj for context graph origin-trail-game op=swm-1776792339683-1gccdu7b
+[OriginTrailGame] Remote vote: advance from 12D3KooW on turn 1
+[OriginTrailGame] Turn 1 proposal broadcast for swarm-mo8wa1dk-4e2p (hash=198ee4a8, CCL-governed)
+2026-04-21 19:25:39 share 9912da1f-bffd-4d11-9d0c-f79b968a0a39 [from:c7b34981-04cc-4e99-b9d6-bc300ff2c1db] [SharedMemoryHandler] Stored SWM write swm-1776792339683-1gccdu7b (5 quads)
+[OriginTrailGame] Approval from 12D3KooW for turn 1 (sigs=0/2 needed)
+2026-04-21 19:25:39 share 04ed4dd2-da80-4d9a-a283-af60fd51bc92 [DKGPublisher] Writing 32 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:39 share 04ed4dd2-da80-4d9a-a283-af60fd51bc92 [DKGAgent] Sharing 32 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:39 share 04ed4dd2-da80-4d9a-a283-af60fd51bc92 [DKGPublisher] Shared memory write complete: swm-1776792339690-v1upjgja
+2026-04-21 19:25:39 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGAgent] Starting publish to context graph "origin-trail-game" with 32 triples
+2026-04-21 19:25:39 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] Preparing publish: 32 public triples, 0 private
+2026-04-21 19:25:39 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] Computed kcMerkleRoot (flat) over 32 triple hashes + 0 private root(s)
+2026-04-21 19:25:39 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] Storing 32 triples in local store
+2026-04-21 19:25:39 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] V10 ACK collection failed — will attempt self-signed ACK fallback: V10 ACK collection requires a numeric on-chain context graph id; got 'origin-trail-game'. Register the CG on-chain via ContextGraphs.createContextGraph first. [WARN]
+2026-04-21 19:25:40 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] Identity not set (0) — skipping on-chain publish [WARN]
+2026-04-21 19:25:40 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGPublisher] Stored as tentative: UAL=did:dkg:base:84532/0xf1095CBd0326730080fAb5645a0043C2B6368d0E/tmo8w92tj-6
+2026-04-21 19:25:40 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGAgent] Broadcasting to topic dkg/context-graph/origin-trail-game/finalization
+2026-04-21 19:25:40 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGAgent] Local publish complete, broadcasting to peers
+2026-04-21 19:25:40 publish 75ec1410-093d-4935-a19d-ee9cf8731010 [DKGAgent] Publish complete — status=tentative kcId=0
+[OriginTrailGame] Turn 1 published (no context graph)
+2026-04-21 19:25:40 share b44291a6-c762-48a5-9ac5-2ca9d93f41c2 [DKGAgent] Sharing 6 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:40 share b44291a6-c762-48a5-9ac5-2ca9d93f41c2 [DKGPublisher] Writing 6 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:40 share b44291a6-c762-48a5-9ac5-2ca9d93f41c2 [DKGPublisher] Shared memory write complete: swm-1776792340032-cw2p1nj6
+[OriginTrailGame] Provenance chain written to shared memory for https://origintrail-game.dkg.io/swarm/swarm-mo8wa1dk-4e2p/turn/1: tx=
+2026-04-21 19:25:40 share 26dd3665-ee04-4811-ac3d-a658859ffc5d [DKGAgent] Sharing 21 quads to SWM for context graph origin-trail-game
+2026-04-21 19:25:40 share 26dd3665-ee04-4811-ac3d-a658859ffc5d [DKGPublisher] Writing 21 quads to shared memory for context graph origin-trail-game
+2026-04-21 19:25:40 share 26dd3665-ee04-4811-ac3d-a658859ffc5d [DKGPublisher] Shared memory write complete: swm-1776792340034-i9lzbdol
+[OriginTrailGame] Recorded shared memory lineage for 3 operation(s)
+2026-04-21 19:25:44 query a9adef58-c6c6-43f7-b576-6440a37edb18 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <https://or"
+2026-04-21 19:25:44 query a9adef58-c6c6-43f7-b576-6440a37edb18 [DKGAgent] Query returned 0 bindings
+2026-04-21 19:25:44 query f3005d2c-89a1-434b-bba3-8830a2f796b6 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+       "
+2026-04-21 19:25:44 query f3005d2c-89a1-434b-bba3-8830a2f796b6 [DKGAgent] Query returned 6 bindings
+2026-04-21 19:25:44 query 8a9776b5-429e-4ada-9914-cc0817988691 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:44 query 8a9776b5-429e-4ada-9914-cc0817988691 [DKGAgent] Query returned 3 bindings
+2026-04-21 19:25:44 query 4ee9dcc3-1bc1-4bd5-9500-74a6d2a3a1d0 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:44 query 4ee9dcc3-1bc1-4bd5-9500-74a6d2a3a1d0 [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:44 query 21f0a9d0-f0f8-4738-8609-43d486ba2a00 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:44 query 21f0a9d0-f0f8-4738-8609-43d486ba2a00 [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:44 query 99645f35-e7e4-4e4f-bad7-8cc2703210bd [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:44 query 99645f35-e7e4-4e4f-bad7-8cc2703210bd [DKGAgent] Query returned 2 bindings
+2026-04-21 19:25:44 query c9faed46-72ab-4912-a00e-e891931a267a [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <https://or"
+2026-04-21 19:25:44 query c9faed46-72ab-4912-a00e-e891931a267a [DKGAgent] Query returned 1 bindings
+2026-04-21 19:25:44 query b6e99987-3fd2-4c7a-b25e-54d982210179 [DKGAgent] Query on contextGraph="origin-trail-game" sparql="SELECT ?name ?peerId ?registeredAt WHERE {
+          ?player a <https://origintr"
+2026-04-21 19:25:44 query b6e99987-3fd2-4c7a-b25e-54d982210179 [DKGAgent] Query returned 3 bindings
+[2026-04-21T17:25:44.698Z] Shutting down...
+2026-04-21 19:25:44 system 09a341f2-5c59-4f05-8a78-fec3a2e69d6a [ChainEventPoller] Chain event poller stopped
+[2026-04-21T17:25:44.702Z] Connection closed: kNCeXwcj transport=direct duration=43917ms addr=/ip4/127.0.0.1/tcp/60307/p2p/12D3KooWRSneKvbFnNqodpL84uc8Frb9CPpDJ5ddugN5kNCeXwcj
+[2026-04-21T17:25:44.703Z] Connection closed: ss47BAqa transport=direct duration=50457ms addr=/ip4/127.0.0.1/tcp/60288/p2p/12D3KooWDohpmfdKp4zLyDKPnnUAF4QianyGzP79LE7qss47BAqa

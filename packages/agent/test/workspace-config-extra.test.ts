@@ -217,6 +217,57 @@ describe('A-13: alternative config locations', () => {
     expect(parseAgentsMdFrontmatter(json).contextGraph).toBe('json-fence');
   });
 
+  // PR #229 bot review r3131820489 (workspace-config.ts:76): the
+  // previous frontmatter regex required a trailing newline AFTER the
+  // closing `---`, so a valid AGENTS.md whose frontmatter block was
+  // the entire file (no trailing body, no final newline) would never
+  // match and fall through to the "no carrier found" diagnostic.
+  // Lock in that frontmatter at EOF works.
+  it('PR #229 bugbot: parses frontmatter that is the whole file (no trailing newline)', () => {
+    const md = '---\ndkg:\n  contextGraph: "eof-fm"\n  node: "http://n"\n---';
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('eof-fm');
+  });
+
+  it('PR #229 bugbot: parses frontmatter that ends right at EOF with a trailing CR', () => {
+    const md = '---\r\ndkg:\r\n  contextGraph: "eof-cr"\r\n  node: "http://n"\r\n---\r\n';
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('eof-cr');
+  });
+
+  // PR #229 CodeQL polynomial-regex warning (workspace-config.ts:138):
+  // the previous mega-regex could backtrack super-linearly on inputs
+  // with many candidate `\n` start positions. The new line-by-line
+  // scan must remain linear; we exercise a few edge cases the lazy
+  // regex would have hit hardest.
+  it('PR #229 bugbot: ignores fence-shaped lines that do not match the dkg-config info-string', () => {
+    const md = [
+      '# header',
+      '```bash',
+      'echo not-our-fence',
+      '```',
+      '',
+      '```dkg-config',
+      'contextGraph: "after-decoy"',
+      'node: "http://n"',
+      '```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('after-decoy');
+  });
+
+  it('PR #229 bugbot: an unterminated dkg-config fence falls through to the "no carrier" error', () => {
+    const md = [
+      '# header',
+      '',
+      '```dkg-config',
+      'contextGraph: "never-closed"',
+      'node: "http://n"',
+      // intentionally no closing ```
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
+  });
+
   // PR #229 bot review (r22-5): when AGENTS.md has unrelated
   // frontmatter (extremely common for tags/owner/prompt metadata in
   // the AI-agent ecosystem) but the dkg config lives in a fenced

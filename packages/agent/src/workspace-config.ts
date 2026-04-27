@@ -73,7 +73,18 @@ export function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
   };
 }
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/;
+// PR #229 bot review r3131820489 (workspace-config.ts:76):
+// the original regex required a trailing newline AFTER the closing
+// `---`, so a valid AGENTS.md whose entire body is just the YAML
+// frontmatter — or whose frontmatter block is the LAST thing in the
+// file (very common when authors save without a final newline) —
+// would never match and `loadWorkspaceConfig` would silently fall
+// through to the "no carriers found" error.
+//
+// Make the trailing newline optional. The closing fence can be
+// followed by a newline + body (the typical case), or by EOF (the
+// frontmatter-only / no-final-newline case).
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
 /**
  * PR #229 bot review (post-v10-rc-merge, r21-4): also accept a fenced
@@ -101,8 +112,55 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/;
  * fence wins; later ones are ignored so a project can demote a
  * draft block by renaming the info-string to something else.
  */
-const DKG_CONFIG_FENCE_RE =
-  /(^|\n)```(?:\s*(?:yaml|yml|json)\s+)?dkg-config\s*\r?\n([\s\S]*?)\r?\n```/i;
+// PR #229 CodeQL polynomial-regex warning (workspace-config.ts:138):
+// the previous mega-regex
+//   /(^|\n)```(?:\s*(?:yaml|yml|json)\s+)?dkg-config\s*\r?\n([\s\S]*?)\r?\n```/i
+// combined a lazy `[\s\S]*?` body with a non-anchored opening
+// (`(^|\n)`) and an optional sub-pattern (`(?:\s*…\s+)?`). On a
+// pathological input shaped like `\n``` dkg-config\n` followed by
+// many lines that LOOK like fences but aren't (`\n   `, `\n\t`, …),
+// the engine repeatedly retried the lazy quantifier from every
+// candidate `\n` start, which CodeQL flagged as super-linear.
+//
+// Replace it with a deterministic line-by-line scan: find the first
+// line whose content matches the open-fence shape, then look for the
+// next line whose content matches the close-fence shape. Each char
+// of the input is now visited a bounded number of times — the whole
+// scan is strictly linear and impossible to backtrack.
+const OPEN_FENCE_LINE_RE = /^```(?:\s*(?:yaml|yml|json))?\s*dkg-config\s*$/i;
+const CLOSE_FENCE_LINE_RE = /^```\s*$/;
+
+/**
+ * Find the body of the first ```dkg-config``` (or
+ * ```yaml dkg-config``` / ```json dkg-config```) fenced block.
+ * Returns `undefined` when no such fence exists. The scan is a
+ * deterministic single pass over the input lines (no regex
+ * backtracking on the body), so it is safe against the pathological
+ * inputs CodeQL flagged on the previous mega-regex.
+ *
+ * If an opening fence is found but no matching closing fence
+ * follows, returns `undefined` (treated as "no fence present"); the
+ * caller then falls through to the standard "no carrier found"
+ * diagnostic, which is the right behaviour for an unterminated
+ * block.
+ */
+function extractDkgConfigFenceBody(src: string): string | undefined {
+  const lines = src.split(/\r?\n/);
+  let openIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (OPEN_FENCE_LINE_RE.test(lines[i])) {
+      openIdx = i;
+      break;
+    }
+  }
+  if (openIdx === -1) return undefined;
+  for (let j = openIdx + 1; j < lines.length; j++) {
+    if (CLOSE_FENCE_LINE_RE.test(lines[j])) {
+      return lines.slice(openIdx + 1, j).join('\n');
+    }
+  }
+  return undefined;
+}
 
 /**
  * Extract the `dkg:` workspace config from an AGENTS.md file. Tries:
@@ -135,15 +193,15 @@ export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
       return parseWorkspaceConfig(parsed.dkg);
     }
   }
-  const fence = DKG_CONFIG_FENCE_RE.exec(src);
-  if (fence) {
+  const fenceBody = extractDkgConfigFenceBody(src);
+  if (fenceBody !== undefined) {
     // The fenced block speaks the same shape as `.dkg/config.yaml`
     // / `.dkg/config.json` directly (NOT the frontmatter shape that
     // wraps the schema under a top-level `dkg:` key) so the body of
     // the fence is identical to a standalone config file. This
     // keeps the three carriers symmetric and avoids forcing
     // AGENTS.md authors to add an indentation level.
-    const body = fence[2];
+    const body = fenceBody;
     let parsed: unknown;
     try {
       parsed = yaml.load(body);

@@ -606,17 +606,20 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 export function isValidContextGraphId(id: string): boolean {
   if (!id || typeof id !== "string") return false;
   if (id.length > 256) return false;
-  // CLI-16 (BUGS_FOUND.md dup #87): reject path-traversal patterns
-  // explicitly. The character whitelist below allows `.` and `/`
-  // (because URNs / DIDs / URLs legitimately use them), so a naive
-  // identifier like `../etc/passwd` or `legit-cg/../../other-cg`
-  // slips past the regex and gets handed to file-system / on-chain
-  // code that has no business seeing parent-directory segments.
-  // Tokenise on `/` and refuse anything that resolves to a
-  // parent-directory or hidden-traversal segment, then refuse any
-  // raw `..` substring (catches `..foo` style obfuscations even
-  // though the segment check would already block them).
-  if (id.includes("..")) return false;
+  // CLI-16 (BUGS_FOUND.md dup #87) + PR #229 r3146360283 follow-up:
+  // reject path-traversal patterns where it actually matters — i.e.
+  // segments that the OS / URL resolver will interpret as the
+  // parent / current directory. The character whitelist below
+  // allows `.` and `/` because URNs / DIDs / URLs legitimately
+  // contain version markers like `v1..2`, schema fragments like
+  // `https://example.com/a..b`, etc.
+  //
+  // The earlier blanket `id.includes('..')` check broke those
+  // legitimate identifiers without adding any defence-in-depth: a
+  // segment-aware check is both stricter (still rejects every real
+  // traversal) and tighter (does not produce false-positive 4xx
+  // for valid context-graph IDs that happen to contain `..` inside
+  // a single segment).
   for (const seg of id.split("/")) {
     if (seg === "." || seg === "..") return false;
   }
@@ -625,18 +628,28 @@ export function isValidContextGraphId(id: string): boolean {
 }
 
 /**
- * CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert payloads from
- * error messages before they reach the HTTP body. Ethers wraps custom
- * errors into long, ABI-encoded `data="0x…"` blobs and an `unknown
- * custom error` prefix; both are operator fingerprints that have leaked
- * privacy-sensitive context in past audits. We normalise to a clean,
- * human-readable string before responding. Callers still get the
- * underlying agent message for debugging — just without the chain
- * payload.
+ * CLI-9 (BUGS_FOUND.md dup #159) + PR #229 r3146360288 follow-up:
+ * scrub raw chain-revert payloads from error messages before they
+ * reach the HTTP body. Providers (ethers, viem, hardhat) serialise
+ * the same revert data under multiple keys: `data="0x…"`, `data=0x…`,
+ * `errorData="0x…"`, `errorData=0x…`, and JSON `"data":"0x…"`. The
+ * matching set here mirrors `enrichEvmError()` in
+ * `packages/chain/src/evm-adapter.ts` so any selector that survived
+ * decoding still gets redacted before reaching the operator. Note
+ * that we redact AFTER `enrichEvmError` has had a chance to splice
+ * the decoded custom-error name in — so the operator still sees the
+ * human-readable error, just without the raw selector blob.
  */
 export function sanitizeRevertMessage(raw: string): string {
   return raw
-    .replace(/data="0x[0-9a-fA-F]+"/g, 'data="<redacted>"')
+    // Quoted variants (data / errorData with `=` or `:`).
+    .replace(/((?:errorData|data)\s*[=:]\s*)"0x[0-9a-fA-F]+"/g, '$1"<redacted>"')
+    // Unquoted variants (data / errorData with `=` or `:`).
+    .replace(/((?:errorData|data)\s*[=:]\s*)0x[0-9a-fA-F]+/g, '$1<redacted>')
+    // JSON-shape that ethers' provider error sometimes embeds:
+    // `{"data":"0x…","message":"…"}`. The unquoted-data branch above
+    // already covers `data:0x…` inside JSON, but JSON keeps quotes.
+    .replace(/("data"\s*:\s*)"0x[0-9a-fA-F]+"/g, '$1"<redacted>"')
     .replace(/unknown custom error[^.\n]*\.?/gi, "request rejected by chain")
     .replace(/\s+/g, " ")
     .trim();

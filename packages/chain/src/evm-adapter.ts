@@ -1797,7 +1797,7 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    const tx = await nft.stake(identityId, amount, lockEpochs);
+    const tx = await nft.createConviction(identityId, amount, lockEpochs);
     const receipt = await tx.wait();
 
     return {

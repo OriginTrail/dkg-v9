@@ -54,6 +54,17 @@
         "type": "uint72"
       }
     ],
+    "name": "NodeAlreadyFrozen",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
     "name": "NodeAlreadyMigrated",
     "type": "error"
   },

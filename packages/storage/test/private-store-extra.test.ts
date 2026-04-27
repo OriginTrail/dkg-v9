@@ -192,6 +192,164 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted[0].object).toBe(`"${SECRET}"`);
   });
 
+  // PR #229 bot review (r3148... — private-store.ts:553). Pre-fix
+  // the dedup query unconditionally wrapped every incoming subject
+  // in `<${assertSafeIri(subject)}>`. RDF allows blank-node subjects
+  // (`_:b0`), and `assertSafeIri()` throws on them — that throw
+  // escaped the surrounding try/catch (which only wrapped
+  // `store.query`, not the SPARQL CONSTRUCTION) and `storePrivateTriples()`
+  // failed outright instead of falling back to the no-dedup path.
+  // Tests below pin both the now-survives behaviour and that
+  // dedup STILL works correctly for blank-node-subject quads.
+  it('r30-5: storePrivateTriples accepts blank-node subjects (does not throw on _:b0)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    // RDF blank node as subject is legal. Pre-fix this would throw
+    // inside `assertSafeIri('_:b0')`.
+    const quads = [
+      { subject: '_:b0', predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+      { subject: '_:b0', predicate: 'http://schema.org/role', object: '"holder"', graph: '' },
+    ];
+    await expect(
+      ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads),
+    ).resolves.not.toThrow();
+
+    // The two private rows actually landed (encrypted at rest).
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    expect(raw.bindings.length).toBe(2);
+  });
+
+  it('r30-5: storePrivateTriples with a MIX of IRI and blank-node subjects survives — IRI subjects still dedup, blank-node subjects do not (correct RDF semantics)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const quads = [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+      { subject: '_:bn', predicate: 'http://schema.org/role', object: '"holder"', graph: '' },
+    ];
+    // Pre-fix: the dedup path emitted `<_:bn>` as a SPARQL IRI,
+    // oxigraph rejected it, the surrounding catch silently dropped
+    // ALL dedup (including the IRI subject's), and a replay
+    // duplicated every row. Post-fix the SPARQL query downshifts to
+    // a predicate-only VALUES + subject-membership post-filter when
+    // a non-IRI subject is detected, so the IRI subject still
+    // dedups correctly.
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads);
+
+    // Replay the same batch.
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads);
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+
+    // Expected count = 3:
+    //   - IRI subject: 1 row (dedup succeeded — pre-fix this would
+    //     have leaked a duplicate due to the silent catch).
+    //   - Blank-node subject: 2 rows. RDF blank-node labels have
+    //     document-local scope; oxigraph mints a fresh internal
+    //     identifier on each `store.insert()` call, so a `_:bn`
+    //     stored in call #1 is NOT the same node as a `_:bn`
+    //     stored in call #2. This is correct per the RDF 1.1
+    //     concepts spec — blank-node label equality across
+    //     separate documents/transactions is undefined.
+    //
+    // Pre-fix this assertion was unreachable for a different
+    // reason (the dedup catch was silent, so both calls landed
+    // verbatim and we'd have got 4). The 3-row landing is what
+    // demonstrates the fix: the IRI half deduped where it
+    // previously didn't.
+    expect(raw.bindings.length).toBe(3);
+
+    // Strong guard: the IRI subject row appears exactly once
+    // (i.e. the dedup actually fired for it — no false positive
+    // from "well, 3 rows is between 2 and 4").
+    const iriRows = raw.bindings.filter((row) => row['s'] === ROOT);
+    expect(iriRows.length).toBe(1);
+    // And the blank-node rows are 2 — both kept (correct per RDF).
+    const bnRows = raw.bindings.filter(
+      (row) => typeof row['s'] === 'string' && row['s'].startsWith('_:'),
+    );
+    expect(bnRows.length).toBe(2);
+  });
+
+  it('r30-5: storePrivateTriples with a MIX of IRI and blank-node subjects — replaying ONLY the IRI subject still dedups (regression guard for the silent-catch bug)', async () => {
+    // The mixed-batch case above shows the IRI dedup survives
+    // when blank-node subjects are also present in the SAME batch.
+    // This test pins the inverse case: if a later call replays
+    // ONLY the IRI subject, dedup must STILL fire (the in-batch
+    // blank node should not have left durable state that breaks
+    // dedup for subsequent IRI-only batches).
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const mixedBatch = [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+      { subject: '_:bn', predicate: 'http://schema.org/role', object: '"holder"', graph: '' },
+    ];
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, mixedBatch);
+
+    const iriOnlyReplay = [
+      { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
+    ];
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, iriOnlyReplay);
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    // Mixed batch: 2 rows. IRI-only replay deduped: 0 new rows.
+    // Total: 2.
+    expect(raw.bindings.length).toBe(2);
+    expect(raw.bindings.filter((r) => r['s'] === ROOT).length).toBe(1);
+  });
+
+  it('r30-5: blank-node-only batch still benefits from predicate-narrowed dedup path (no full-graph scan)', async () => {
+    // Plant an unrelated row in the private graph that uses a
+    // DIFFERENT predicate and therefore must NOT show up in the
+    // predicate-narrowed query. If the fallback accidentally
+    // dropped predicate narrowing too, this row would slip into
+    // the dedup set and (depending on plaintext collision) cause
+    // bogus dedup hits.
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [
+      { subject: ROOT, predicate: 'http://schema.org/UNRELATED', object: `"${SECRET}"`, graph: '' },
+    ]);
+
+    const blankNodeBatch = [
+      { subject: '_:x', predicate: 'http://schema.org/role', object: `"${SECRET}"`, graph: '' },
+    ];
+    // Same plaintext but different predicate AND different subject.
+    // The predicate-narrowed VALUES filter must keep the unrelated
+    // row out of the dedup set, so this insert MUST land.
+    await ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, blankNodeBatch);
+
+    const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const raw = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
+    );
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    expect(raw.bindings.length).toBe(2);
+  });
+
   it('storePrivateTriples still adds NEW plaintext alongside existing (no false-positive dedup)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);

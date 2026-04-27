@@ -1342,6 +1342,94 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.body).not.toContain('"ok":true');
   });
 
+  // -------------------------------------------------------------
+  // PR #229 bot review (r3148... — auth.ts:1205). The previous
+  // `waitForRequestEnd()` had `if (req.complete || req.readableEnded)
+  // resolve()` as a fast-path. `req.complete === true` only means
+  // the HTTP parser has finished reading the body off the socket —
+  // buffered body bytes can still be sitting in IncomingMessage's
+  // internal read buffer waiting for `resume()` to flow them
+  // through `data` listeners. The deferred branch, when it called
+  // `attachDrainListeners()` AFTER parser completion, never received
+  // those buffered chunks because the `resume()` call was skipped
+  // by the early return. So `Buffer.concat(drainedChunks)` was
+  // empty and the HMAC was bound to `""` — re-opening the body-
+  // binding bypass for handlers that ignore the body.
+  //
+  // Fix: only fast-path on `readableEnded === true` (which means
+  // 'end' has already fired AND consumers have read all data); for
+  // `complete && !readableEnded` we ALWAYS call `resume()` and
+  // await the real 'end' event so buffered bytes flush through
+  // our `data` listener and `drainedChunks` reflects the true
+  // wire body.
+  // -------------------------------------------------------------
+  it('r30-5: signed POST whose body fits in the TCP segment alongside headers (parser completes pre-handler) — tampered body is fail-closed to 401', async () => {
+    // Sign the EMPTY body. Send Content-Length>0 with a different
+    // payload so the wire body diverges from what the signature
+    // attests to. With the headers + body in one socket write the
+    // server is most likely to set `req.complete = true` before the
+    // route handler runs — the precise window the previous fast-path
+    // mishandled.
+    const wireBody = '{"tampered":1}';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // CORRECT signature for the EMPTY body — the attacker's lure.
+    const sigForEmpty = sigFor(VALID, 'POST', '/api/agents', ts, nonce, '');
+    const { hostname, port } = new URL(baseUrl);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${sigForEmpty}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      wireBody;
+    const res = await sendRawHttp(Number(port), rawReq);
+    // Pre-fix this would have been 200 — the empty-body signature
+    // matched an empty `Buffer.concat(drainedChunks)` because the
+    // `complete` fast-path skipped `resume()` and the buffered
+    // wireBody never flowed through our `data` listener.
+    expect(res.status).toBe(401);
+    expect(res.body.toLowerCase()).toContain('signed request rejected');
+    expect(res.body).not.toContain('"ok":true');
+  });
+
+  it('r30-5: a sequence of independent signed POST/empty-body lures using random bodies all fail closed (no flaky timing window survives)', async () => {
+    // Run the same scenario back-to-back with fresh nonces and
+    // randomly-sized bodies. The previous fast-path bug was timing-
+    // dependent (it only triggered when `complete` happened to be
+    // true at the moment `waitForRequestEnd()` resolved), so a
+    // single-shot test could easily pass spuriously even with the
+    // bug present. Hammering the path with N requests probes the
+    // window from multiple angles.
+    const { hostname, port } = new URL(baseUrl);
+    for (let i = 0; i < 8; i++) {
+      const wireBody = randomBytes(16 + (i * 7) % 128).toString('hex');
+      const ts = String(Date.now());
+      const nonce = `n-${randomBytes(8).toString('hex')}`;
+      const sigForEmpty = sigFor(VALID, 'POST', '/api/agents', ts, nonce, '');
+      const rawReq =
+        `POST /api/agents HTTP/1.1\r\n` +
+        `Host: ${hostname}:${port}\r\n` +
+        `Authorization: Bearer ${VALID}\r\n` +
+        `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+        `x-dkg-timestamp: ${ts}\r\n` +
+        `x-dkg-nonce: ${nonce}\r\n` +
+        `x-dkg-signature: ${sigForEmpty}\r\n` +
+        `Connection: close\r\n` +
+        `\r\n` +
+        wireBody;
+      const res = await sendRawHttp(Number(port), rawReq);
+      expect(
+        res.status,
+        `iteration ${i}: tampered body must always be 401, got ${res.status}: ${res.body.slice(0, 200)}`,
+      ).toBe(401);
+    }
+  });
+
   it('r3146563616: signed POST with Content-Length>0 and HONESTLY-signed body (handler ignores body) still returns 200', async () => {
     // Counterpoint: a legitimate signed body whose handler chose not
     // to read it must still pass — the drain-and-verify path is

@@ -1,4 +1,4 @@
-import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { assertSafeIri, escapeSparqlLiteral, isSafeIri } from '@origintrail-official/dkg-core';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -550,25 +550,116 @@ export class PrivateContentStore {
     }
     if (subjects.size === 0 || predicates.size === 0) return new Set();
 
-    const escIri = (iri: string) => `<${assertSafeIri(iri)}>`;
-    const subjectVals = [...subjects].map(escIri).join(' ');
-    const predicateVals = [...predicates].map(escIri).join(' ');
-    const sparql = `
-      SELECT ?s ?p ?o WHERE {
-        GRAPH <${assertSafeIri(graphUri)}> {
-          VALUES ?s { ${subjectVals} }
-          VALUES ?p { ${predicateVals} }
-          ?s ?p ?o .
+    // PR #229 bot review (r3148... — private-store.ts:553). The
+    // dedup query previously assumed every subject was an IRI and
+    // ran `assertSafeIri()` over each — but private RDF can legally
+    // contain blank-node subjects (`_:b0`) and `assertSafeIri()`
+    // throws on them. That throw escaped the surrounding try/catch
+    // (which only wraps `this.store.query(sparql)`, not the SPARQL
+    // construction), so a single blank-node-subject quad anywhere
+    // in the batch failed `storePrivateTriples()` outright instead
+    // of letting it fall back to the no-dedup path.
+    //
+    // Two complications govern the fix:
+    //   1. `assertSafeIri()` on `predicate` is FINE — RDF predicates
+    //      MUST be IRIs, never blank nodes. So we keep that strict.
+    //   2. Blank node IDENTITY is not stable across SPARQL queries
+    //      in the general case (a `_:b0` literal in a fresh query
+    //      may or may not bind to the same store-internal blank
+    //      node, depending on the implementation). So we cannot
+    //      rely on `VALUES ?s { _:b0 }` to dedup correctly even if
+    //      the parser accepted it. Instead, we OMIT the `?s VALUES`
+    //      pin entirely whenever ANY incoming subject is non-IRI
+    //      and rely on the predicate VALUES (always IRIs) +
+    //      post-filter to bound the working set. Predicate VALUES
+    //      alone is still a dramatic narrowing vs reading the
+    //      entire private graph; a private graph that uses the
+    //      same predicate for thousands of subjects already pays
+    //      that scan in `getPrivateTriples()`.
+    //   3. The post-filter still pre-computes the
+    //      `subject\u0001predicate\u0001plain` key BEFORE inserting
+    //      into the dedup set, so a blank-node subject in the
+    //      store still dedups against the SAME blank-node label in
+    //      the incoming batch — which is exactly the contract we
+    //      want for retry idempotency (the same caller writing the
+    //      same `_:b0` twice).
+    let escapedPredicateVals: string;
+    try {
+      escapedPredicateVals = [...predicates]
+        .map((p) => `<${assertSafeIri(p)}>`)
+        .join(' ');
+    } catch {
+      // Predicate that fails `assertSafeIri` is malformed RDF; bail
+      // to no-dedup rather than throwing out of an idempotency
+      // helper.
+      return new Set();
+    }
+
+    let escapedGraph: string;
+    try {
+      escapedGraph = `<${assertSafeIri(graphUri)}>`;
+    } catch {
+      // graphUri is constructed by the privateGraph() helper from
+      // contextGraphId + subGraphName — both already validated
+      // upstream — so this catch is purely defence-in-depth.
+      return new Set();
+    }
+
+    const incomingSubjects = [...subjects];
+    // PR #229 bot review (r3148... — private-store.ts:553) — note on
+    // detection. `assertSafeIri()` only rejects characters that would
+    // break SPARQL `<...>` framing; it accepts strings like `_:bn`
+    // because `_` and `:` aren't unsafe glyphs. That meant a previous
+    // attempt at this fix (gating on `assertSafeIri()` not throwing)
+    // still emitted invalid `<_:bn>` IRI tokens for blank-node
+    // subjects, the SPARQL parser rejected the query, and dedup
+    // silently fell back to no-op for ALL mixed batches — including
+    // the IRI subjects that should still have deduped. We now use the
+    // strict `isSafeIri()` check, which requires a `scheme:` prefix
+    // (and so reliably distinguishes IRIs from blank nodes / literals
+    // that happen to be character-safe).
+    const allSubjectsSafe = incomingSubjects.every((s) => isSafeIri(s));
+
+    let sparql: string;
+    if (allSubjectsSafe) {
+      const subjectVals = incomingSubjects
+        .map((s) => `<${assertSafeIri(s)}>`)
+        .join(' ');
+      sparql = `
+        SELECT ?s ?p ?o WHERE {
+          GRAPH ${escapedGraph} {
+            VALUES ?s { ${subjectVals} }
+            VALUES ?p { ${escapedPredicateVals} }
+            ?s ?p ?o .
+          }
         }
-      }
-    `;
+      `;
+    } else {
+      // At least one blank-node (or otherwise non-IRI) subject.
+      // Drop the subject pin and rely on predicate narrowing +
+      // post-filter against `subjects` set membership.
+      sparql = `
+        SELECT ?s ?p ?o WHERE {
+          GRAPH ${escapedGraph} {
+            VALUES ?p { ${escapedPredicateVals} }
+            ?s ?p ?o .
+          }
+        }
+      `;
+    }
     const keys = new Set<string>();
     try {
       const result = await this.store.query(sparql);
       if (result.type !== 'bindings') return keys;
       for (const row of result.bindings) {
+        const subjectStr = row['s'];
+        if (subjectStr === undefined) continue;
+        // Post-filter for the blank-node fallback path: only
+        // dedup against subjects we are about to write. (For the
+        // strict-IRI path the SPARQL VALUES already enforces this.)
+        if (!allSubjectsSafe && !subjects.has(subjectStr)) continue;
         const plain = this.decryptLiteral(row['o']);
-        keys.add(`${row['s']}\u0001${row['p']}\u0001${plain}`);
+        keys.add(`${subjectStr}\u0001${row['p']}\u0001${plain}`);
       }
     } catch {
       // If the scoped read fails we fall back to no-dedup: worst case

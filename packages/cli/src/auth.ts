@@ -1202,7 +1202,29 @@ function installSignedRequestResponseGuard(
   const waitForRequestEnd = (): Promise<void> =>
     new Promise((resolve) => {
       const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
-      if (reqAny.complete || reqAny.readableEnded) { resolve(); return; }
+      // PR #229 bot review (r3148... — auth.ts:1205). The previous
+      // fast-path `(complete || readableEnded)` was UNSAFE.
+      // `req.complete === true` only means Node's HTTP parser has
+      // finished reading the body off the socket — buffered body
+      // bytes may still be sitting in the IncomingMessage's internal
+      // read buffer waiting for `resume()` (or a `read()` call) to
+      // flow them through `data` listeners. Resolving here without
+      // calling `resume()` left `drainedChunks` empty and the
+      // surrounding `Buffer.concat(drainedChunks)` bound the HMAC to
+      // an EMPTY string — which re-opened the body-binding bypass
+      // for signed POST/PUT routes whose handler ignores the body.
+      //
+      // Only `readableEnded === true` is a safe fast-path: it means
+      // the 'end' event has ALREADY been emitted, which (per Node
+      // stream contract) requires the consumer to have read all
+      // buffered bytes. `attachDrainListeners()` ran synchronously
+      // before this Promise was constructed, so any buffered bytes
+      // were captured in `drainedChunks` before `end` fired.
+      //
+      // For the `complete && !readableEnded` case we fall through
+      // and call `resume()` so the buffered data flushes through our
+      // `data` listener and we then await `end`.
+      if (reqAny.readableEnded) { resolve(); return; }
       const done = (): void => resolve();
       req.once('end', done);
       req.once('close', done);

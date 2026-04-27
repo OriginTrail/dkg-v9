@@ -561,17 +561,16 @@ export class DkgNodePlugin {
       registrationMode,
       transportMode: this.channelPlugin?.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
+    // The integration is only honestly `ready` once the standalone bridge is
+    // listening — the daemon's send/probe flow goes through transport.bridgeUrl,
+    // and the gateway-side /api/dkg-channel/* routes reject the daemon's auth.
+    // Even when registerHttpRoute succeeded (gateway owns its own listener),
+    // we wait for our own start() to resolve before flipping ready=true. That
+    // happens in the follow-up updateLocalAgentIntegration PUT below, which
+    // also publishes transport.bridgeUrl/healthUrl pointing at whichever port
+    // start() actually bound to (may differ from the configured port — see
+    // issue #272 fallback in DkgChannelPlugin.start()).
     const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
-    // When the gateway owns the channel routes (set by api.registerHttpRoute
-    // success in DkgChannelPlugin.register), the gateway is already serving
-    // the channel even before the standalone bridge finishes binding. Treat
-    // that as "ready at registration time" so the UI doesn't see a transient
-    // 'connecting' state. The follow-up start().then() PUT below still fires
-    // — it's what publishes transport.bridgeUrl/healthUrl after start()
-    // resolves to a bound port (which may differ from the configured port if
-    // the gateway also bound it — see issue #272 fallback in DkgChannelPlugin.start()).
-    const gatewayOwnsRoute = this.channelPlugin?.isUsingGatewayRoute === true;
-    const readyAtRegistration = bridgeAlreadyReady || gatewayOwnsRoute;
     const basePayload = {
       id: 'openclaw',
       enabled: true,
@@ -587,8 +586,8 @@ export class DkgNodePlugin {
       await this.client.connectLocalAgentIntegration({
         ...basePayload,
         runtime: {
-          status: readyAtRegistration ? 'ready' : 'connecting',
-          ready: readyAtRegistration,
+          status: bridgeAlreadyReady ? 'ready' : 'connecting',
+          ready: bridgeAlreadyReady,
           lastError: null,
         },
       });

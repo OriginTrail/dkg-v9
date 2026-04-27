@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
+import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import { SemanticEnrichmentWorker } from '../src/SemanticEnrichmentWorker.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -16,6 +17,50 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
     });
     expect(plugin).toBeDefined();
+  });
+
+  it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
+    // Pre-fix: when memory slot was owned by a different plugin, the
+    // resolver bootstrap (`memoryResolverApi = api` + `refreshMemoryResolverState`)
+    // was inside the slot-registered branch and got skipped. The
+    // memory_search tool was still exposed but stuck in a permanent
+    // "backend not ready" response forever (no peer ID, no CG cache).
+    // Fix moves bootstrap OUT, runs whenever memory module is enabled.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const mockApi = {
+      config: { plugins: { slots: { memory: 'some-other-memory-plugin' } } },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) return { ok: true, status: 200, json: async () => ({ peerId: 'p-r102' }) } as Response;
+      if (url.includes('/api/context-graph/list')) return { ok: true, status: 200, json: async () => ({ contextGraphs: [] }) } as Response;
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+    try {
+      plugin.register(mockApi);
+      // Slot owned by another plugin → registerMemoryCapability never called.
+      expect(mockApi.registerMemoryCapability).not.toHaveBeenCalled();
+      // But resolver bootstrap MUST still happen so memory_search works
+      // against the daemon directly. Wait for the async refresh to settle.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect((plugin as any).memoryResolverApi).toBe(mockApi);
+      expect((plugin as any).nodePeerId).toBe('p-r102');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 
   it('registers session_end hook and all exported tools via register()', () => {
@@ -36,10 +81,18 @@ describe('DkgNodePlugin', () => {
     expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
 
     const toolNames = registeredTools.map(t => t.name);
+    // Existing active tools
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
     expect(toolNames).toContain('dkg_list_context_graphs');
     expect(toolNames).toContain('dkg_context_graph_create');
+    expect(toolNames).toContain('dkg_context_graph_invite');
+    expect(toolNames).toContain('dkg_participant_add');
+    expect(toolNames).toContain('dkg_participant_remove');
+    expect(toolNames).toContain('dkg_participant_list');
+    expect(toolNames).toContain('dkg_join_request_list');
+    expect(toolNames).toContain('dkg_join_request_approve');
+    expect(toolNames).toContain('dkg_join_request_reject');
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
@@ -47,9 +100,993 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(toolNames).toContain('dkg_list_paranets');
-    expect(toolNames).toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(13);
+    // 10 new tools from PR #254 (assertion lifecycle + sub-graph management + SWM→VM publish)
+    expect(toolNames).toContain('dkg_assertion_create');
+    expect(toolNames).toContain('dkg_assertion_write');
+    expect(toolNames).toContain('dkg_assertion_promote');
+    expect(toolNames).toContain('dkg_assertion_discard');
+    expect(toolNames).toContain('dkg_assertion_import_file');
+    expect(toolNames).toContain('dkg_assertion_query');
+    expect(toolNames).toContain('dkg_assertion_history');
+    expect(toolNames).toContain('dkg_sub_graph_create');
+    expect(toolNames).toContain('dkg_sub_graph_list');
+    expect(toolNames).toContain('dkg_shared_memory_publish');
+    // Legacy V9 paranet aliases are removed as of v10-rc.
+    expect(toolNames).not.toContain('dkg_list_paranets');
+    expect(toolNames).not.toContain('dkg_paranet_create');
+    // memory_search added by this feature branch (W2 — agent-callable recall button).
+    expect(toolNames).toContain('memory_search');
+    // 28 from main (originals + assertion/subgraph/SWM/CG-registration tools) + 1 memory_search = 29
+    expect(registeredTools.length).toBe(29);
+  });
+
+  it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
+    const plugin = new DkgNodePlugin();
+    const registeredTools: OpenClawTool[] = [];
+
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registerTool: (tool) => registeredTools.push(tool),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    };
+
+    plugin.register(mockApi);
+
+    const byName = new Map(registeredTools.map(t => [t.name, t] as const));
+
+    const expectRequired = (name: string, required: string[]) => {
+      const tool = byName.get(name);
+      expect(tool, `${name} should be registered`).toBeTruthy();
+      const props = tool!.parameters.properties;
+      for (const key of required) {
+        expect(props, `${name}.${key} should be declared in parameters.properties`).toHaveProperty(key);
+      }
+      expect(tool!.parameters.required).toEqual(expect.arrayContaining(required));
+    };
+
+    expectRequired('dkg_assertion_create', ['context_graph_id', 'name']);
+    expectRequired('dkg_context_graph_invite', ['context_graph_id', 'peer_id']);
+    expectRequired('dkg_participant_add', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_participant_remove', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_participant_list', ['context_graph_id']);
+    expectRequired('dkg_join_request_list', ['context_graph_id']);
+    expectRequired('dkg_join_request_approve', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_join_request_reject', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_assertion_write', ['context_graph_id', 'name', 'quads']);
+    expectRequired('dkg_assertion_promote', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_import_file', ['context_graph_id', 'name', 'file_path']);
+    expectRequired('dkg_assertion_query', ['context_graph_id', 'name']);
+    expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
+    expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
+    expectRequired('dkg_sub_graph_list', ['context_graph_id']);
+    expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
+
+    // dkg_shared_memory_publish must declare `sub_graph_name` so agents that
+    // create/write/promote into a sub-graph can publish the promoted data
+    // through the same sub-graph instead of hitting the root SWM graph.
+    const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
+    expect(publishProps).toHaveProperty('sub_graph_name');
+    expect(publishProps.sub_graph_name.type).toBe('string');
+    expect(publishProps).toHaveProperty('register_if_needed');
+    expect(publishProps.register_if_needed.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('reveal_on_chain');
+    expect(publishProps.reveal_on_chain.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('access_policy');
+    expect(publishProps.access_policy.type).toBe('number');
+
+    // dkg_assertion_write.quads is an array of {subject,predicate,object}
+    const writeTool = byName.get('dkg_assertion_write')!;
+    expect(writeTool.parameters.properties.quads.type).toBe('array');
+    expect(writeTool.parameters.properties.quads.items).toBeDefined();
+
+    // dkg_subscribe: `include_shared_memory` is boolean-only (subscribe is a
+    // catch-up/sync flag, not a memory-layer selector).
+    const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
+    expect(subSchema).toBe('boolean');
+
+    // dkg_query: `view` is a plain string — validation lives in the
+    // handler, not as a JSON-schema enum. Rationale: strict-schema
+    // hosts would otherwise reject typos at the boundary before the
+    // handler can surface the valid-list error. Description
+    // enumerates accepted values for discoverability; handler
+    // enforces them.
+    //
+    // WM reads are supported: the handler defaults `agent_address` to
+    // this node's peerId (matches the memory plugin's default from
+    // `memorySessionResolver.getDefaultAgentAddress`). Callers in
+    // multi-agent deployments can override with an explicit
+    // `agent_address`.
+    //
+    // The legacy `include_shared_memory` boolean is removed — there
+    // is no exact replacement because the old `true` path queried
+    // the data graph ∪ SWM (union), which no single `view` reproduces.
+    const queryProps = byName.get('dkg_query')!.parameters.properties;
+    expect(queryProps).not.toHaveProperty('include_shared_memory');
+    expect(queryProps.view.type).toBe('string');
+    expect(queryProps.view).not.toHaveProperty('enum');
+    // Description advertises all three layers.
+    expect(queryProps.view.description).toContain('working-memory');
+    expect(queryProps.view.description).toContain('shared-working-memory');
+    expect(queryProps.view.description).toContain('verified-memory');
+    // agent_address is exposed as an optional tool param for WM targeting.
+    expect(queryProps.agent_address.type).toBe('string');
+    expect(queryProps.agent_address.description).toMatch(/working-memory/i);
+
+    const inviteTool = byName.get('dkg_context_graph_invite')!;
+    expect(inviteTool.description).toMatch(/primary user-facing deliverable/i);
+    expect(inviteTool.description).toMatch(/paste into Join/i);
+
+    const addParticipantTool = byName.get('dkg_participant_add')!;
+    expect(addParticipantTool.description).toMatch(/allowlisting alone is not the full UI join flow/i);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Handler-level parameter drift guards: for each new tool, invoke
+  // `tool.execute(snakeCaseArgs)` with a mocked fetch and assert the daemon
+  // receives the exact camelCase body / query-string keys the route handlers
+  // in packages/cli/src/daemon.ts destructure. This catches
+  // snake_case → camelCase drift at the handler boundary — the same class of
+  // bug that cost PR A multiple review rounds.
+  // ---------------------------------------------------------------------------
+
+  describe('handler-level drift guards: snake_case args → camelCase daemon body', () => {
+    const setupPluginWithFetch = (response: unknown = {}) => {
+      const fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      return { fetchMock, plugin, byName };
+    };
+
+    const originalFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('dkg_assertion_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      await byName.get('dkg_assertion_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'chat-turns',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        name: 'chat-turns',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_context_graph_invite forwards snake_case → camelCase body', async () => {
+      const statusResponse = {
+        peerId: '12D3Kooself',
+        multiaddrs: [
+          '/ip4/127.0.0.1/tcp/9201/p2p/12D3Kooself',
+          '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself',
+        ],
+      };
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/status') {
+          return new Response(JSON.stringify(statusResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ invited: '12D3KooWfriend', contextGraphId: 'ctx' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      const result = await byName.get('dkg_context_graph_invite')!.execute('tc', {
+        context_graph_id: 'ctx',
+        peer_id: '12D3KooWfriend',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/invite');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        peerId: '12D3KooWfriend',
+      });
+      const body = JSON.parse(result.content[0].text);
+      expect(body.peerId).toBe('12D3KooWfriend');
+      expect(body.curatorMultiaddr).toBe('/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself');
+      expect(body.inviteCode).toBe('ctx\n/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself');
+    });
+
+    it('dkg_participant_add forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, contextGraphId: 'ctx', agentAddress: '0xabc' });
+      await byName.get('dkg_participant_add')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/add-participant');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_participant_remove forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, contextGraphId: 'ctx', agentAddress: '0xabc' });
+      await byName.get('dkg_participant_remove')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/remove-participant');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_participant_list forwards the context-graph path', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', allowedAgents: ['0xabc'] });
+      await byName.get('dkg_participant_list')!.execute('tc', {
+        context_graph_id: 'ctx',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/participants');
+      expect(init.method).toBe('GET');
+    });
+
+    it('dkg_join_request_list forwards the context-graph path', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', requests: [] });
+      await byName.get('dkg_join_request_list')!.execute('tc', {
+        context_graph_id: 'ctx',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/join-requests');
+      expect(init.method).toBe('GET');
+    });
+
+    it('dkg_join_request_approve forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, status: 'approved', agentAddress: '0xabc' });
+      await byName.get('dkg_join_request_approve')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/approve-join');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_join_request_reject forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, status: 'rejected', agentAddress: '0xabc' });
+      await byName.get('dkg_join_request_reject')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/reject-join');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_assertion_write forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/write');
+      const body = JSON.parse(init.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.quads).toHaveLength(1);
+    });
+
+    it('dkg_assertion_promote forwards snake_case → camelCase body and rejects stray string "all"', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: ['urn:root-1', 'urn:root-2'],
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/promote');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        entities: ['urn:root-1', 'urn:root-2'],
+        subGraphName: 'protocols',
+      });
+
+      // Blocker guard: the previous string-"all" shortcut is gone from the public
+      // tool surface. The handler now returns an error result instead of sending.
+      fetchMock.mockClear();
+      const bad = await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: 'all',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_assertion_promote omits entities when not supplied (daemon default kicks in)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_assertion_promote')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.entities).toBeUndefined();
+    });
+
+    it('dkg_assertion_discard forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ discarded: true });
+      await byName.get('dkg_assertion_discard')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'draft',
+        sub_graph_name: 'scratch',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/draft/discard');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'scratch',
+      });
+    });
+
+    it('dkg_assertion_query forwards snake_case → camelCase body (no sparql)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ quads: [], count: 0 });
+      await byName.get('dkg_assertion_query')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/query');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'protocols' });
+      expect(body).not.toHaveProperty('sparql');
+    });
+
+    it('dkg_assertion_history forwards snake_case → camelCase query params (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ createdAt: 't' });
+      await byName.get('dkg_assertion_history')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        agent_address: '0xabc',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/assertion/notes/history');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(parsed.searchParams.get('agentAddress')).toBe('0xabc');
+      expect(parsed.searchParams.get('subGraphName')).toBe('protocols');
+      expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_assertion_import_file reads the file and forwards camelCase multipart fields (.md → text/markdown)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-test-'));
+      const filePath = join(tmpDir, 'doc.md');
+      writeFileSync(filePath, '# Hello\n');
+
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+        ontology_ref: 'urn:onto',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/notes/import-file');
+      expect(init.method).toBe('POST');
+      const form = init.body as FormData;
+      expect(form).toBeInstanceOf(FormData);
+      expect(form.get('contextGraphId')).toBe('ctx');
+      // content_type was omitted but file has .md extension — handler should infer text/markdown
+      expect(form.get('contentType')).toBe('text/markdown');
+      expect(form.get('ontologyRef')).toBe('urn:onto');
+      expect(form.get('subGraphName')).toBe('protocols');
+      expect((form.get('file') as File).name).toBe('doc.md');
+    });
+
+    it('dkg_assertion_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+
+      const cases: Array<[string, string]> = [
+        ['doc.pdf', 'application/pdf'],
+        ['doc.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+        ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+        ['page.html', 'text/html'],
+        ['page.htm', 'text/html'],
+        ['feed.xml', 'application/xml'],
+        ['book.epub', 'application/epub+zip'],
+        ['notes.txt', 'text/plain'],
+        ['data.csv', 'text/csv'],
+        ['config.json', 'application/json'],
+      ];
+
+      for (const [fileName, expectedMime] of cases) {
+        const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+        const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-mime-'));
+        const filePath = join(tmpDir, fileName);
+        writeFileSync(filePath, 'dummy');
+        await byName.get('dkg_assertion_import_file')!.execute('tc', {
+          context_graph_id: 'ctx',
+          name: 'notes',
+          file_path: filePath,
+        });
+        const form = fetchMock.mock.calls[0][1]?.body as FormData;
+        expect(form.get('contentType'), `${fileName} should infer ${expectedMime}`).toBe(expectedMime);
+      }
+    });
+
+    it('dkg_assertion_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-unknown-'));
+      const filePath = join(tmpDir, 'blob.xyz');
+      writeFileSync(filePath, 'dummy');
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+      });
+      const form = fetchMock.mock.calls[0][1]?.body as FormData;
+      // Handler left contentType undefined → client does NOT append the form field,
+      // daemon falls through to the Blob's default 'application/octet-stream' type.
+      expect(form.has('contentType')).toBe(false);
+    });
+
+    it('dkg_sub_graph_create forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ created: 'protocols', contextGraphId: 'ctx' });
+      await byName.get('dkg_sub_graph_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/sub-graph/create');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_sub_graph_list forwards snake_case → camelCase query param (GET, no body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', subGraphs: [] });
+      await byName.get('dkg_sub_graph_list')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe('/api/sub-graph/list');
+      expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_shared_memory_publish forwards snake_case → camelCase body with selection="all" when omitted', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-1', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/shared-memory/publish');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: 'all', clearAfter: true });
+    });
+
+    it('dkg_shared_memory_publish forwards explicit root_entities as selection array with clearAfter=false (subset safety default)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-2', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: ['urn:a', 'urn:b'],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Subset publishes default to clearAfter=false so roots NOT in `selection`
+      // aren't clobbered as a side-effect of publishing a subset.
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
+    });
+
+    it('dkg_shared_memory_publish plumbs sub_graph_name through to subGraphName for sub-graph-scoped publishes', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-5', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Without this, an agent that created/wrote/promoted into a sub-graph
+      // would publish to the root shared-memory graph instead of the sub-graph.
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.contextGraphId).toBe('ctx');
+    });
+
+    it('dkg_shared_memory_publish can register the context graph before publish when requested', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ registered: 'ctx', onChainId: '42', txHash: '0xabc' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-7', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+        reveal_on_chain: true,
+        access_policy: 1,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:9200/api/context-graph/register');
+      expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+        id: 'ctx',
+        accessPolicy: 1,
+      });
+      expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:9200/api/shared-memory/publish');
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toEqual({ registered: 'ctx', onChainId: '42', txHash: '0xabc' });
+      expect(body.kcId).toBe('kc-7');
+    });
+
+    it('dkg_shared_memory_publish ignores already-registered conflicts and still publishes', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ error: 'Context graph "ctx" is already registered on-chain (42)' }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-8', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toBeUndefined();
+      expect(body.kcId).toBe('kc-8');
+    });
+
+    it('dkg_shared_memory_publish validates register_if_needed and registration options locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: 'yes',
+        reveal_on_chain: 'yes',
+        access_policy: 3,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('register_if_needed');
+
+      const badReveal = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        reveal_on_chain: 'yes',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(badReveal.content[0].text).toContain('reveal_on_chain');
+    });
+
+    it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: 'all', // Agents must send an array, never a bare string.
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('root_entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_query explicitly rejects the v9 paranet_id field with a clear error', async () => {
+      // V10-rc is the first product release; there is no v9 back-compat on the
+      // public tool surface. Silently ignoring `paranet_id` would let stale v9
+      // agent code run unscoped queries thinking it was scoping them — a
+      // dangerous failure mode. The handler rejects the field explicitly so
+      // the caller's wrong assumption surfaces instead of producing garbage.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        paranet_id: 'my-cg',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_query rejects the legacy include_shared_memory field with a hint that names the union-semantics break', async () => {
+      // The boolean was removed in favor of `view`. There is NO
+      // one-line replacement: legacy `true` unioned the data graph with
+      // SWM (engine wraps sparql in both and merges), which no single
+      // `view` reproduces. `view: "shared-working-memory"` reads only
+      // SWM and silently drops data-graph triples for `true` callers.
+      // The hint must surface this break explicitly and name the HTTP
+      // escape hatch for callers who need the exact union.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        include_shared_memory: true,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const msg = result.content[0].text;
+      expect(msg).toContain('include_shared_memory');
+      expect(msg).toContain('view');
+      // Surface the non-equivalence.
+      expect(msg).toMatch(/no exact|no single `view`/i);
+      // Name the HTTP escape hatch for callers who need the original
+      // union semantics — otherwise they have no migration path at all.
+      expect(msg).toContain('/api/query');
+      expect(msg).toContain('includeSharedMemory');
+      // Also name the SWM closest-intent replacement + the omit path.
+      expect(msg).toContain('shared-working-memory');
+      expect(msg).toMatch(/omit/i);
+    });
+
+    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads', async () => {
+      // WM reads are agent-scoped; the daemon requires an agentAddress.
+      // The tool exposes `agent_address` so multi-agent callers can
+      // target another agent's WM namespace.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: '0xabc123',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('working-memory');
+      expect(body.agentAddress).toBe('0xabc123');
+    });
+
+    it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
+      // An explicitly-supplied whitespace string is still "caller meant
+      // something here" — treating `"   "` as "missing" and defaulting
+      // to `this.nodePeerId` would silently swap a cross-agent read for
+      // a self-read, same failure mode as the non-string case.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: '   ',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('agent_address');
+      expect(result.content[0].text).toMatch(/non-empty|empty/i);
+    });
+
+    it('dkg_query `view` validation uses the shared GET_VIEWS from dkg-core (no local mirror)', async () => {
+      // Guard against the local VALID_VIEWS mirror being reintroduced.
+      // When a view is added to core's GET_VIEWS but the adapter
+      // maintains its own list, the tool silently rejects the new
+      // view before the daemon can serve it. The handler must use
+      // the shared constant so this class of drift can't happen.
+      //
+      // We verify behavior (not import graph): the error message lists
+      // exactly the three views core publishes today, and a v9-removed
+      // view is rejected.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'authoritative', // a REMOVED_VIEWS entry from core
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const text = result.content[0].text;
+      expect(text).toContain('working-memory');
+      expect(text).toContain('shared-working-memory');
+      expect(text).toContain('verified-memory');
+    });
+
+    it('dkg_query rejects a non-string agent_address instead of silently falling back to the node peerId', async () => {
+      // Permissive hosts can pass through non-string values. If the
+      // handler treated those as "missing", `view: "working-memory"`
+      // would default to this node's peerId — a caller intending a
+      // cross-agent WM read with a malformed value would silently get
+      // the node's own WM back. Surface the bug instead: reject with
+      // a clear type-error, don't leak namespaces.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: 12345,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('agent_address');
+      expect(result.content[0].text).toContain('string');
+    });
+
+    it('dkg_query normalizes DID-form agent_address for WM reads (Bug B43)', async () => {
+      // The daemon's WM view scopes graphs by the bare peer ID. A
+      // DID-prefixed value (`did:dkg:agent:<peerId>`) lands the query
+      // in a non-existent namespace and returns empty bindings. The
+      // handler must strip the prefix before forwarding — same B43
+      // normalization `DkgMemoryPlugin` applies at its boundary.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
+      // Bare peer IDs must pass through unchanged (no double-stripping).
+      expect(body.agentAddress).not.toContain('did:dkg:agent:');
+    });
+
+    it('dkg_query does NOT normalize agent_address on non-WM views (it only matters for WM routing)', async () => {
+      // Non-WM views don't use `agentAddress` for graph resolution —
+      // leave the value untouched so other downstream uses (e.g. audit
+      // logging at the daemon) see the caller's original input.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'shared-working-memory',
+        agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe('did:dkg:agent:12D3KooWExamplePeerId');
+    });
+
+    it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'long-term-memory', // a v9 view name, removed in v10
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const text = result.content[0].text;
+      expect(text).toContain('view');
+      expect(text).toContain('working-memory');
+      expect(text).toContain('shared-working-memory');
+      expect(text).toContain('verified-memory');
+    });
+
+    it('dkg_query rejects a `view` without `context_graph_id` locally (no daemon round-trip)', async () => {
+      // Engine throws "view '…' requires a contextGraphId" — catch it at
+      // the tool boundary so callers see a clean, tool-shaped error
+      // instead of a cryptic 500 from a round-trip.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'shared-working-memory',
+        // context_graph_id intentionally omitted
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const msg = result.content[0].text;
+      expect(msg).toContain('context_graph_id');
+      expect(msg).toContain('shared-working-memory');
+    });
+
+    it('dkg_query description accurately describes the no-`view` routing (legacy path, not WM)', () => {
+      // Documented-vs-actual: when `view` is omitted, the daemon +
+      // DKGQueryEngine route through the legacy V9 data-graph path
+      // (`DKGQueryEngine.query` → the `if (options?.view)` branch is
+      // SKIPPED and falls through to "Legacy routing (V9 compat)"). It
+      // is NOT implicit working-memory semantics, despite some stale
+      // comments in the daemon hinting otherwise. This test guards the
+      // tool description against re-introducing the misleading "omit
+      // for WM" claim.
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const query = tools.find((t) => t.name === 'dkg_query')!;
+      // Positive: description must call out the legacy routing for the omit case.
+      expect(query.description).toMatch(/legacy/i);
+      // Negative: specifically guard against re-introducing the misleading
+      // "omit → WM default" phrasing. Use targeted substrings that would
+      // only appear in the wrong claim, not the correct HTTP escape-hatch
+      // sentence that mentions working-memory by name.
+      expect(query.description).not.toMatch(/omit[^.]*default[^.]*working-memory/i);
+      expect(query.description).not.toMatch(/default[^.]*WM semantics/i);
+      expect(query.description).not.toMatch(/Omit `?view`? for the default/i);
+    });
+
+    it('dkg_query description steers WM reads toward current_agent_address and retries identity variants', () => {
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const query = tools.find((t) => t.name === 'dkg_query')!;
+      const agentAddress = query.parameters.properties.agent_address as { description?: string };
+
+      expect(query.description).toContain('current_agent_address');
+      expect(query.description).toMatch(/retry alternate identity forms/i);
+      expect(agentAddress.description).toContain('current_agent_address');
+      expect(agentAddress.description).toMatch(/wallet\/address form, raw peer ID, or DID form/i);
+    });
+
+    it('share-flow tool descriptions prefer invite code output for friend-sharing requests', () => {
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      expect(byName.get('dkg_context_graph_invite')!.description).toContain('ready-to-share invite code');
+      expect(byName.get('dkg_context_graph_invite')!.description).toContain('paste into Join');
+      expect(byName.get('dkg_participant_add')!.description).toContain('allowlisting alone is not the full UI join flow');
+    });
+
+    it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {
+      // Handler-level drift guard: the daemon's /api/query route destructures
+      // `view` from the body. If we renamed the field in the handler, this
+      // test catches the drift.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'verified-memory',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('verified-memory');
+      expect(body.contextGraphId).toBe('my-cg');
+      expect(body).not.toHaveProperty('includeSharedMemory');
+    });
+
+    it('dkg_subscribe rejects a stringified include_shared_memory (same rationale as dkg_query)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_subscribe')!.execute('tc', {
+        context_graph_id: 'ctx',
+        include_shared_memory: 'true',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('include_shared_memory');
+      expect(result.content[0].text).toContain('boolean');
+    });
+
+    it('dkg_assertion_promote description points to dkg_shared_memory_publish as the next step', () => {
+      // dkg_publish is a one-shot write-AND-publish helper. After promote the
+      // data is already in SWM, so the correct finalizer is
+      // dkg_shared_memory_publish — calling dkg_publish would append
+      // duplicates. The promote description must steer agents correctly.
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const promote = tools.find((t) => t.name === 'dkg_assertion_promote')!;
+      expect(promote.description).toContain('dkg_shared_memory_publish');
+      expect(promote.description).toMatch(/NOT dkg_publish/);
+    });
+
+    it('dkg_assertion_write escapes every N-Triples ECHAR control character in literal objects', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
+      await byName.get('dkg_assertion_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        quads: [
+          {
+            subject: 'https://example.org/a',
+            predicate: 'https://schema.org/text',
+            // Includes: \n, \t, \r, ", \, \f (form-feed), \b (backspace).
+            // Missing \f / \b escapes would leave raw 0x0C / 0x08 bytes in
+            // the JSON body and cause strict triple-store parsers to reject
+            // the literal.
+            object: 'line1\nline2\tcol\rend"with quote\\and backslash\fff\bbb',
+          },
+        ],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.quads[0].object).toBe(
+        '"line1\\nline2\\tcol\\rend\\"with quote\\\\and backslash\\fff\\bbb"',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // No v9 back-compat: v10-rc is the first product release. Any v9-era field
+  // (`paranet_id`, stringified `include_shared_memory`, etc.) is out of scope
+  // for the public tool surface. Handlers and schemas only accept the V10
+  // shape. Strict JSON-schema validators and permissive hosts behave the
+  // same: a stray legacy field is simply ignored (not a special-cased error),
+  // and `context_graph_id` is the single source of truth on every tool that
+  // needs it.
+  // ---------------------------------------------------------------------------
+
+  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 paranet_id alias', () => {
+    const plugin = new DkgNodePlugin();
+    const tools: OpenClawTool[] = [];
+    plugin.register({
+      config: {},
+      registerTool: (t) => tools.push(t),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    });
+    const byName = new Map(tools.map((t) => [t.name, t] as const));
+    for (const name of ['dkg_subscribe', 'dkg_publish', 'dkg_query'] as const) {
+      const props = byName.get(name)!.parameters.properties;
+      expect(props).not.toHaveProperty('paranet_id');
+    }
   });
 
   it('all tools have name, description, parameters, and execute', () => {
@@ -124,17 +1161,22 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
-      );
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      // Post-pivot, connect publishes the ready/bound transport upfront
+      // (no follow-up PUT). syncLocalAgentIntegrationState awaits start()
+      // before firing connect, so isListening is already true and
+      // bridgeUrl/healthUrl/runtime.ready are all populated in this call.
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody).toMatchObject({
         id: 'openclaw',
         enabled: true,
         transport: { kind: 'openclaw-channel' },
@@ -149,30 +1191,32 @@ describe('DkgNodePlugin', () => {
           channelId: 'dkg-ui',
           registrationMode: 'full',
         },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
       });
-      expect(readyCall).toBeTruthy();
-      const readyBody = JSON.parse(String(readyCall?.[1]?.body));
-      expect(readyBody.enabled).toBe(true);
-      expect(readyBody.capabilities).toMatchObject({
+      expect(connectBody.capabilities).toMatchObject({
         localChat: true,
         connectFromUi: true,
         dkgPrimaryMemory: true,
         semanticEnrichment: false,
       });
-      expect(readyBody.manifest).toEqual({
+      expect(connectBody.manifest).toEqual({
         packageName: '@origintrail-official/dkg-adapter-openclaw',
         setupEntry: './setup-entry.mjs',
       });
-      expect(readyBody.setupEntry).toBe('./setup-entry.mjs');
-      expect(readyBody.transport.kind).toBe('openclaw-channel');
-      expect(readyBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-      expect(readyBody.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
-      expect(readyBody.transport.wakeAuth).toBe('bridge-token');
-      expect(readyBody.runtime).toMatchObject({
-        status: 'degraded',
-        ready: true,
-        lastError: 'Semantic enrichment worker unavailable after integration sync',
-      });
+      expect(connectBody.setupEntry).toBe('./setup-entry.mjs');
+      expect(connectBody.transport.kind).toBe('openclaw-channel');
+      expect(connectBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(connectBody.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
+      expect(connectBody.transport.wakeAuth).toBe('bridge-token');
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -502,7 +1546,113 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('persists gatewayUrl on first registration when gateway routing is available', async () => {
+  // Issue #272: when the gateway hosts the channel routes via registerHttpRoute,
+  // start() still binds the standalone bridge — but on a fallback OS-allocated
+  // port if the configured one is held by the gateway. To eliminate the
+  // ready-but-not-yet-bound window the daemon would otherwise see, we await
+  // start() BEFORE firing the connect call. The connect publishes ready:true
+  // with the actually-bound bridgeUrl/healthUrl in one shot — there is no
+  // separate post-start PUT.
+  it('awaits channelPlugin.start() before firing connect (gateway routes active)', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+    // Patch start() on the prototype so the spy is in place BEFORE the
+    // DkgChannelPlugin instance is constructed by DkgNodePlugin.register().
+    // Patching the instance after register() is too late — start() has
+    // already been invoked through the await in syncLocalAgentIntegrationState.
+    let resolveStart: () => void = () => {};
+    const startGate = new Promise<void>((resolve) => { resolveStart = resolve; });
+    const startSpy = vi.spyOn(DkgChannelPlugin.prototype, 'start').mockImplementation(() => startGate);
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { gateway: { port: 19789 } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerHttpRoute: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+
+      // Wait until start() has been invoked — proves the registration path
+      // reached the await. Connect must NOT fire while start is pending.
+      await vi.waitFor(() => {
+        expect(startSpy).toHaveBeenCalled();
+      });
+
+      // Settle pending microtasks before the negative assertion so we don't
+      // race a connect call queued after start was observed.
+      await Promise.resolve();
+      await Promise.resolve();
+      const connectBeforeResolve = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(connectBeforeResolve).toBeUndefined();
+
+      // Release start() — the await resolves and the connect call fires.
+      resolveStart();
+
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
+
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      // start() is stubbed (never actually binds), so isListening stays false.
+      // The connect call fires with status:'connecting' / ready:false in this
+      // case. What matters for the round-2 review is the ORDERING (start
+      // awaited before connect), not the bound-port shape — the bridge-mode
+      // test below exercises the real-bind path against a port:0 server and
+      // asserts the ready/bridgeUrl shape.
+      expect(connectBody).toMatchObject({
+        transport: {
+          kind: 'openclaw-channel',
+          gatewayUrl: 'http://127.0.0.1:19789',
+        },
+        metadata: {
+          transportMode: 'gateway+bridge',
+        },
+      });
+      // No follow-up PUT — connect publishes the bound transport upfront.
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
+    } finally {
+      resolveStart();
+      startSpy.mockRestore();
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Bridge-mode (fallback) path — older gateways or runtimes where
+  // api.registerHttpRoute is not available. The standalone bridge binds on
+  // an OS-allocated port (channel.port: 0), then connect publishes ready:true
+  // with the actually-bound bridgeUrl/healthUrl. There is no follow-up PUT.
+  it('publishes ready:true with the bound bridgeUrl in bridge mode (no registerHttpRoute)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -521,52 +1671,54 @@ describe('DkgNodePlugin', () => {
         memory: { enabled: false },
       });
       const mockApi: OpenClawPluginApi = {
-        config: {
-          gateway: {
-            port: 19789,
-          },
-        },
+        config: { gateway: { port: 19789 } },
         registrationMode: 'full',
         registerTool: () => {},
         registerHook: () => {},
-        registerHttpRoute: () => {},
+        // No registerHttpRoute — fallback to standalone bridge mode.
         on: () => {},
         logger: {},
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+        metadata: {
+          transportMode: 'bridge',
+        },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+        transport: {
+          kind: 'openclaw-channel',
+          bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+          healthUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/health$/),
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
+        },
+      });
+
+      // Confirm there's NO follow-up PUT — connect now publishes the bound
+      // transport upfront. This locks the round-2 simplification: the daemon
+      // never sees a transient ready:true integration whose bridgeUrl can't
+      // serve traffic yet.
       const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       );
-
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:19789',
-          wakeUrl: 'http://127.0.0.1:19789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
-        },
-        metadata: {
-          transportMode: 'gateway+bridge',
-        },
-      });
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:19789',
-          bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
-          wakeUrl: 'http://127.0.0.1:19789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
-        },
-      });
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -617,49 +1769,25 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
-      );
-
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toEqual({
+      // Post-pivot: connect publishes ready/bound transport upfront. The
+      // stale stored gatewayUrl from the GET above must be dropped because
+      // the current runtime (no registerHttpRoute → bridge-only) does not
+      // serve gateway routes. bridgeUrl/healthUrl reflect the actually
+      // bound port from the awaited start().
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody).toMatchObject({
         id: 'openclaw',
         enabled: true,
-        description: 'Connect a local OpenClaw agent through the DKG node.',
-        transport: {
-          kind: 'openclaw-channel',
-        },
-        capabilities: expect.objectContaining({
-          localChat: true,
-          connectFromUi: true,
-          dkgPrimaryMemory: true,
-          wmImportPipeline: true,
-          nodeServedSkill: true,
-        }),
-        manifest: {
-          packageName: '@origintrail-official/dkg-adapter-openclaw',
-          setupEntry: './setup-entry.mjs',
-        },
-        setupEntry: './setup-entry.mjs',
-        metadata: expect.objectContaining({
-          channelId: 'dkg-ui',
-          registrationMode: 'full',
-          transportMode: 'bridge',
-        }),
-        runtime: expect.objectContaining({
-          status: 'connecting',
-          ready: false,
-          lastError: null,
-        }),
-      });
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
           bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
@@ -667,8 +1795,24 @@ describe('DkgNodePlugin', () => {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
         },
+        metadata: expect.objectContaining({
+          channelId: 'dkg-ui',
+          registrationMode: 'full',
+          transportMode: 'bridge',
+        }),
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
       });
-      expect(JSON.parse(String(readyCall?.[1]?.body)).transport.gatewayUrl).toBeUndefined();
+      expect(connectBody.transport.gatewayUrl).toBeUndefined();
+
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -736,8 +1880,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'https://localhost:18789',
-          wakeUrl: 'https://localhost:18789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {
@@ -806,8 +1950,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:18789',
-          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {
@@ -874,8 +2018,8 @@ describe('DkgNodePlugin', () => {
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:18789',
-          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {
@@ -1180,7 +2324,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('preserves a stored bridgeUrl and healthUrl when the current bridge has not bound a port yet', async () => {
+  it('overwrites a stored bridgeUrl with the freshly bound port (post-pivot await-before-connect)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1224,20 +2368,26 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          bridgeUrl: 'http://127.0.0.1:9201',
-          healthUrl: 'http://127.0.0.1:9201/health',
-        },
-      });
+      // Post-pivot: syncLocalAgentIntegrationState awaits start() before
+      // building the connect payload, so bridgePort > 0 by the time
+      // buildOpenClawTransport runs and the stored stale bridgeUrl is
+      // overwritten with the freshly bound port. The stored values from the
+      // GET above (port 9201) are intentionally NOT preserved on this path —
+      // they would be wrong (the gateway holds 9201 in 2026.3.31).
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(connectBody.transport.bridgeUrl).not.toBe('http://127.0.0.1:9201');
+      expect(connectBody.transport.healthUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/health$/);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1289,18 +2439,22 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const readyCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
         },
       });
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1352,18 +2506,22 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const readyCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
         },
       });
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1416,18 +2574,22 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const readyCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
           wakeAuth: 'bridge-token',
         },
       });
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1549,13 +2711,12 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      const readyCall = fakeFetch.mock.calls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
 
-      expect(readyCall).toBeTruthy();
-      const payload = JSON.parse(String(readyCall?.[1]?.body));
+      expect(connectCall).toBeTruthy();
+      const payload = JSON.parse(String(connectCall?.[1]?.body));
       expect(payload).toMatchObject({
         transport: {
           wakeAuth: 'bridge-token',
@@ -1563,6 +2724,11 @@ describe('DkgNodePlugin', () => {
       });
       expect(payload.transport.wakeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/);
       expect(payload.transport.wakeUrl).not.toBe('http://127.0.0.1:9201/semantic-enrichment/wake');
+      const readyCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;

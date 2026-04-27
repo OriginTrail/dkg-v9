@@ -253,7 +253,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Finalization Chain Test', description: '' });
     await nodeA.registerContextGraph(PARANET);
-    nodeA.subscribeToContextGraph(PARANET);
+    // V10 Verified Memory publish requires explicit on-chain registration.
+    // B only needs to join the gossip topic; A is already subscribed via create().
     nodeB.subscribeToContextGraph(PARANET);
     await sleep(1000);
   }, 30_000);

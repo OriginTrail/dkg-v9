@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 export interface AutoUpdateConfig {
   enabled: boolean;
-  repo: string;
-  branch: string;
+  /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
+  repo?: string;
+  /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
+  branch?: string;
   /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
   allowPrerelease?: boolean;
   /** Optional SSH private key path for git-based update fetches/clones. */
@@ -16,6 +18,18 @@ export interface AutoUpdateConfig {
   sshCommand?: string;
   checkIntervalMinutes: number;
 }
+
+/**
+ * AutoUpdateConfig with `repo` and `branch` guaranteed present — the shape
+ * returned by `resolveAutoUpdateConfig()` after falling back through
+ * ~/.dkg/config.json -> network/<env>.json -> project.json. Consumers of the
+ * auto-update subsystem should accept this type, not the raw `AutoUpdateConfig`,
+ * since the raw form allows `repo`/`branch` to be omitted.
+ */
+export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
+  repo: string;
+  branch: string;
+};
 
 export interface NetworkConfig {
   networkName: string;
@@ -223,13 +237,183 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
 }
 
 let _networkConfig: NetworkConfig | null = null;
+let _networkConfigName: string | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
+  _networkConfigName = null;
+}
+
+export interface ProjectConfig {
+  repo: string;
+  defaultBranch: string;
+  githubUrl: string;
+  projectName: string;
+  syslogAppName: string;
+  defaultNetwork: string;
+}
+
+let _projectConfig: ProjectConfig | null = null;
+
+/**
+ * Return true when `dir` is the published DKG CLI package root, as
+ * determined by an adjacent `package.json` whose `name` is
+ * `@origintrail-official/dkg`. This is resilient to `projectName`
+ * renames in `project.json` and cannot be spoofed by an unrelated app.
+ */
+function isDkgPackageRoot(dir: string): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
+    return pkg?.name === '@origintrail-official/dkg'
+      && existsSync(join(dir, 'project.json'));
+  } catch { return false; }
 }
 
 /**
- * Load the network config from network/testnet.json.
+ * Return true when `dir` is the DKG monorepo root.
+ *
+ * We combine two layers of evidence so this never matches an unrelated
+ * consumer workspace (e.g. a pnpm/Nx repo that also happens to have a
+ * root `project.json`):
+ *
+ *  1. Structural markers — `pnpm-workspace.yaml`, `packages/`, and
+ *     `project.json` — which are required but not sufficient.
+ *  2. A DKG-specific sub-marker — `packages/cli/package.json` whose
+ *     `name` is exactly `@origintrail-official/dkg`. The package name
+ *     is reserved for us on npm and cannot be spoofed by a consumer
+ *     repo without colliding with our own published package.
+ */
+function isDkgMonorepoRoot(dir: string): boolean {
+  try {
+    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
+    if (!existsSync(join(dir, 'packages'))) return false;
+    if (!existsSync(join(dir, 'project.json'))) return false;
+
+    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
+    if (!existsSync(cliPkgPath)) return false;
+    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
+    return cliPkg?.name === '@origintrail-official/dkg';
+  } catch { return false; }
+}
+
+/**
+ * Resolve candidate directories where repo-root files (project.json,
+ * network/*.json) may live, in priority order.
+ *
+ * Ordering rationale:
+ *   - In a monorepo checkout the DKG root is the single source of
+ *     truth, so any detected monorepo ancestor MUST win. Otherwise,
+ *     once `packages/cli/build` has copied `project.json` and
+ *     `network/*.json` into `packages/cli/`, those stale artifacts
+ *     would shadow edits made to the root files until the next
+ *     rebuild — breaking the intended "edit root config, rerun" dev
+ *     flow.
+ *   - In a published npm install there is no monorepo ancestor, so
+ *     we fall back to the package-local root (identified unambiguously
+ *     by its `package.json.name`). This also guarantees we never
+ *     accidentally read a consumer's own `project.json` from
+ *     `node_modules/..`.
+ */
+function candidateRoots(): string[] {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  const out: string[] = [];
+
+  // Monorepo ancestors first (dev / source checkout). `dist/` and
+  // `src/` live at different depths, so both paths are tried.
+  const monorepoCandidates = [
+    join(thisDir, '..', '..', '..'),        // from dist/
+    join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
+  ];
+  for (const dir of monorepoCandidates) {
+    if (isDkgMonorepoRoot(dir)) out.push(dir);
+  }
+
+  // Package-local root as the fallback — the only location that ever
+  // wins in a published install, and unambiguous via its package.json.
+  const pkgRoot = join(thisDir, '..');
+  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
+
+  return out;
+}
+
+/**
+ * Load project.json — the single source of truth for repo name,
+ * branch, GitHub URL, and default network. Values here drive the
+ * startup banner, auto-update fallbacks, and network selection.
+ *
+ * To rename the repo or change the default branch/network, edit
+ * project.json at the repo root — all runtime code follows.
+ */
+export function loadProjectConfig(): ProjectConfig {
+  if (_projectConfig) return _projectConfig;
+  for (const root of candidateRoots()) {
+    try {
+      const raw = readFileSync(join(root, 'project.json'), 'utf-8');
+      _projectConfig = JSON.parse(raw) as ProjectConfig;
+      return _projectConfig;
+    } catch { /* try next */ }
+  }
+  _projectConfig = {
+    repo: 'OriginTrail/dkg',
+    defaultBranch: 'main',
+    githubUrl: 'https://github.com/OriginTrail/dkg',
+    projectName: 'dkg',
+    syslogAppName: 'dkg',
+    defaultNetwork: 'testnet',
+  };
+  return _projectConfig;
+}
+
+export function _resetProjectConfigCache(): void {
+  _projectConfig = null;
+}
+
+/**
+ * Field-level merge of the effective auto-update configuration.
+ *
+ * Precedence per field: `~/.dkg/config.json` → `network/<env>.json` →
+ * `project.json` (or static fallback). Returns null when auto-update is
+ * explicitly disabled in the local config.
+ *
+ * Rationale: `dkg init` intentionally omits `repo`/`branch` from the
+ * persisted config when the user accepts the defaults, so that future
+ * changes to the shipped network/project defaults propagate without a
+ * config rewrite. Callers must therefore resolve the effective values
+ * instead of reading `config.autoUpdate.repo` directly.
+ */
+export function resolveAutoUpdateConfig(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): ResolvedAutoUpdateConfig | null {
+  const cfg = config?.autoUpdate;
+  const net = network?.autoUpdate;
+  const enabled = cfg?.enabled ?? net?.enabled ?? false;
+  if (!enabled) return null;
+
+  const proj = loadProjectConfig();
+  const repo = cfg?.repo ?? net?.repo ?? proj.repo;
+  const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
+  const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
+  const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
+  const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
+  const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
+
+  return {
+    enabled: true,
+    repo,
+    branch,
+    allowPrerelease,
+    ...(sshKeyPath ? { sshKeyPath } : {}),
+    ...(sshCommand ? { sshCommand } : {}),
+    checkIntervalMinutes,
+  };
+}
+
+/**
+ * Load a network config from network/<name>.json.
+ *
+ * @param network - Network name (e.g. 'testnet', 'mainnet'). Defaults to
+ *   the `defaultNetwork` value from project.json.
  *
  * Candidate paths (tried in order):
  *  1. Monorepo root when running from packages/cli/dist/
@@ -237,22 +421,20 @@ export function _resetNetworkConfigCache(): void {
  *  3. Bundled alongside dist/ in the published NPM package (dist/../network/)
  *
  * Monorepo paths are checked first so that edits to the repo-root
- * network/testnet.json are picked up immediately during development
+ * network/ files are picked up immediately during development
  * without requiring a rebuild of the CLI package.
  */
-export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
-  if (_networkConfig) return _networkConfig;
+export async function loadNetworkConfig(network?: string): Promise<NetworkConfig | null> {
+  const name = network ?? loadProjectConfig().defaultNetwork;
+  if (_networkConfig && _networkConfigName === name) return _networkConfig;
   try {
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-      join(thisDir, '..', '..', '..', 'network', 'testnet.json'),       // monorepo from dist/
-      join(thisDir, '..', '..', '..', '..', 'network', 'testnet.json'), // monorepo from src/ during dev
-      join(thisDir, '..', 'network', 'testnet.json'),                   // NPM package (network/ at package root)
-    ];
+    const file = `${name}.json`;
+    const candidates = candidateRoots().map(root => join(root, 'network', file));
     for (const path of candidates) {
       try {
         const raw = await readFile(path, 'utf-8');
         _networkConfig = JSON.parse(raw) as NetworkConfig;
+        _networkConfigName = name;
         return _networkConfig;
       } catch { /* try next */ }
     }
@@ -276,12 +458,7 @@ export function isDkgMonorepo(): boolean {
   if (_isDkgMonorepo !== null) return _isDkgMonorepo;
   const root = repoDir();
   if (!root) { _isDkgMonorepo = false; return false; }
-  try {
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-    _isDkgMonorepo = pkg.name === 'dkg-v9';
-  } catch {
-    _isDkgMonorepo = false;
-  }
+  _isDkgMonorepo = isDkgMonorepoRoot(root);
   return _isDkgMonorepo;
 }
 

@@ -56,6 +56,21 @@ export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 export const PROJECT_MEMORY_ASSERTION = 'memory';
 
+function buildDkgMemoryPromptSections(): string[] {
+  return [
+    'DKG memory rules:',
+    '- To inspect whether a project has data, check all three layers explicitly: `working-memory`, `shared-working-memory`, and `verified-memory`.',
+    '- If the user asks to share a private project with a friend, prefer the full join UX: generate an invite code first, then add the friend to the allowlist when you have their agent address.',
+    '- If you have both a peer ID and an agent address for a private-project share, do both automatically: return the invite code and add the participant.',
+    '- If you only have an agent address, explain that allowlisting is not the full UI join flow and ask for the peer ID if the user wants a paste-into-Join invite code.',
+    '- For `working-memory`, prefer the injected `current_agent_address` from the turn context when present.',
+    '- If `current_agent_address` is absent, use the local node\'s default `agent_address` fallback.',
+    '- Do not assume a libp2p peer ID is the correct WM identity unless the tool or graph naming proves it.',
+    '- If a WM read comes back empty but the user expects data, retry with alternate identity forms before concluding the project is empty: wallet/address form first, then DID form, then peer ID if needed.',
+    '- Do not claim a project is empty until you have exhausted WM identity variants and also checked SWM and VM.',
+  ];
+}
+
 const NS = {
   schema: 'http://schema.org/',
 };
@@ -116,7 +131,30 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.cachedStatus = this.buildStatus();
   }
 
+  /**
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Runs the
+   * full 6-layer fan-out (agent-context WM/SWM/VM + project WM/SWM/VM if
+   * resolved) but caps the returned hits tighter than the agent-callable
+   * `memory_search` tool. Both surfaces share the same ranking; W3 is
+   * "small auto-snapshot of all tiers", W2 is "large agent-driven recall
+   * of all tiers". The cap is what differs, not the layer scope.
+   */
+  async searchNarrow(
+    query: string,
+    options?: { maxResults?: number; minScore?: number; sessionKey?: string },
+  ): Promise<MemorySearchResult[]> {
+    const cap = options?.maxResults ?? 5;
+    return this.runSearch(query, { ...options, maxResults: cap });
+  }
+
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
+    return this.runSearch(query, options);
+  }
+
+  private async runSearch(
+    query: string,
+    options?: MemorySearchOptions,
+  ): Promise<MemorySearchResult[]> {
     // B37: The clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause below, so it must be an integer. A fractional
     // input like `2.5` would produce `LIMIT 2.5`, which is invalid
@@ -578,6 +616,21 @@ export class DkgMemoryPlugin {
   }
 
   /**
+   * Invalidate the cached capability + api so subsequent
+   * `reAssertCapability()` calls become no-ops.
+   *
+   * Called by `DkgNodePlugin` whenever a later `register()` call returns
+   * `false` (slot ownership lost to another plugin). Without this clear,
+   * the cached capability would persist and per-turn re-assert anchors
+   * (`before_prompt_build`, `message:received`/`sent`, `memory_search`)
+   * would silently steal the slot back from the newly elected provider.
+   */
+  invalidateRegistration(): void {
+    this.registeredCapability = null;
+    this.registeredApi = null;
+  }
+
+  /**
    * Registers the memory-slot capability. Two gates must pass:
    *
    * 1. The gateway must expose `api.registerMemoryCapability` — older
@@ -611,6 +664,7 @@ export class DkgMemoryPlugin {
     }
 
     const capability: MemoryPluginCapability = {
+      promptBuilder: () => buildDkgMemoryPromptSections(),
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);
@@ -673,10 +727,16 @@ function errorMessage(err: unknown): string {
  * string and finds nothing. Normalize once at the boundary and use
  * the correct form at each consumption site. Codex Bug B43.
  */
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
+export const AGENT_DID_PREFIX = 'did:dkg:agent:';
 
-/** Return the raw peer-ID form used for WM view routing. */
-function toAgentPeerId(agentAddress: string): string {
+/**
+ * Return the raw peer-ID form used for WM view routing. Exported so
+ * `DkgNodePlugin.handleQuery` can apply the same B43 normalization
+ * before forwarding `agent_address` / the node peerId fallback to the
+ * daemon (DID-form values otherwise route to a non-existent namespace
+ * and return empty results).
+ */
+export function toAgentPeerId(agentAddress: string): string {
   return agentAddress.startsWith(AGENT_DID_PREFIX)
     ? agentAddress.slice(AGENT_DID_PREFIX.length)
     : agentAddress;

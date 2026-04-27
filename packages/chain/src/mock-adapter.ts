@@ -16,7 +16,6 @@ import type {
   OnChainPublishResult,
   ConvictionAccountInfo,
   PermanentPublishParams,
-  FairSwapPurchaseInfo,
   KAUpdateVerification,
   CreateOnChainContextGraphParams,
   CreateOnChainContextGraphResult,
@@ -25,6 +24,7 @@ import type {
   V10PublishDirectParams,
   V10UpdateKCParams,
 } from './chain-adapter.js';
+import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
@@ -309,6 +309,28 @@ export class MockChainAdapter implements ChainAdapter {
       return this.txResult(false);
     }
 
+    // P-1 review (Codex iter-5/iter-6): match the real EVM adapter's
+    // "fail closed on hook error" contract — listeners are the durable
+    // WAL and must be able to abort broadcast by throwing.
+    //
+    // Codex iter-6: the breadcrumb MUST equal the tx hash the adapter
+    // eventually returns, otherwise recovery tests cannot reconcile
+    // "persisted before send" with "confirmed after send". Using
+    // `peekTxHash()` (same deterministic generator that feeds `txResult`
+    // below) guarantees the pre-broadcast hash === the post-broadcast
+    // hash, and naturally varies across repeated updates of the same
+    // `kcId` because `txIndexInBlock` advances per-tx.
+    const mockUpdateTxHash = this.peekTxHash();
+    try {
+      // Codex PR #241 iter-7: `await` an async WAL hook.
+      await params.onBroadcast?.({ txHash: mockUpdateTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
+
     existing.merkleRoot = params.newMerkleRoot;
     const txIndex = this.txIndexInBlock;
     const blockNumber = this.nextBlock;
@@ -404,7 +426,7 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // --- Context Graphs (V9 Registry) ---
+  // --- Context Graphs (name-hash commitment via ContextGraphNameRegistry) ---
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     const name = params.name ?? 'mock-context-graph';
@@ -417,7 +439,7 @@ export class MockChainAdapter implements ChainAdapter {
       throw new Error(`Context graph "${id}" already exists on chain`);
     }
     this.contextGraphRegistry.set(id, meta);
-    this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
+    this.pushEvent('NameClaimed', { contextGraphId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
     return { ...result, contextGraphId: id };
   }
@@ -431,7 +453,7 @@ export class MockChainAdapter implements ChainAdapter {
     const meta = this.contextGraphRegistry.get(contextGraphId);
     if (!meta) throw new Error(`Context graph "${contextGraphId}" not found`);
     this.contextGraphRegistry.set(contextGraphId, { ...meta, name, description, revealed: 'true' });
-    this.pushEvent('ParanetMetadataRevealed', { paranetId: contextGraphId, name, description });
+    this.pushEvent('NameMetadataRevealed', { contextGraphId, name, description });
     return this.txResult(true);
   }
 
@@ -504,90 +526,6 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  // --- FairSwap Judge ---
-
-  private fairSwapPurchases = new Map<bigint, {
-    buyer: string;
-    seller: string;
-    kcId: bigint;
-    kaId: bigint;
-    price: bigint;
-    state: number;
-    encryptedDataRoot: Uint8Array;
-    keyCommitment: Uint8Array;
-    revealedKey: Uint8Array;
-  }>();
-  private nextFairSwapPurchaseId = 1n;
-
-  async initiatePurchase(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult> {
-    const purchaseId = this.nextFairSwapPurchaseId++;
-    this.fairSwapPurchases.set(purchaseId, {
-      buyer: this.signerAddress,
-      seller,
-      kcId,
-      kaId,
-      price,
-      state: 1, // Initiated
-      encryptedDataRoot: new Uint8Array(32),
-      keyCommitment: new Uint8Array(32),
-      revealedKey: new Uint8Array(32),
-    });
-    this.pushEvent('PurchaseInitiated', { purchaseId: purchaseId.toString(), buyer: this.signerAddress, seller });
-    return { ...this.txResult(true), purchaseId };
-  }
-
-  async fulfillPurchase(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 1) return this.txResult(false);
-    p.encryptedDataRoot = encryptedDataRoot;
-    p.keyCommitment = keyCommitment;
-    p.state = 2; // Fulfilled
-    return this.txResult(true);
-  }
-
-  async revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 2) return this.txResult(false);
-    p.revealedKey = key;
-    p.state = 3; // KeyRevealed
-    return this.txResult(true);
-  }
-
-  async disputeDelivery(purchaseId: bigint, _proof: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 3) return this.txResult(false);
-    p.state = 5; // Disputed
-    return this.txResult(true);
-  }
-
-  async claimPayment(purchaseId: bigint): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 3) return this.txResult(false);
-    p.state = 4; // Completed
-    return this.txResult(true);
-  }
-
-  async claimRefund(purchaseId: bigint): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || (p.state !== 1 && p.state !== 2)) return this.txResult(false);
-    p.state = 7; // Expired
-    return this.txResult(true);
-  }
-
-  async getFairSwapPurchase(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p) return null;
-    return {
-      purchaseId,
-      buyer: p.buyer,
-      seller: p.seller,
-      kcId: p.kcId,
-      kaId: p.kaId,
-      price: p.price,
-      state: p.state,
-    };
-  }
-
   // --- Staking Conviction ---
 
   private delegatorLocks = new Map<string, { lockEpochs: number; startEpoch: number }>();
@@ -613,8 +551,12 @@ export class MockChainAdapter implements ChainAdapter {
   private contextGraphs = new Map<bigint, {
     manager: string;
     participantIdentityIds: bigint[];
+    participantAgents: string[];
     requiredSignatures: number;
     metadataBatchId: bigint;
+    publishPolicy: number;
+    publishAuthority?: string;
+    publishAuthorityAccountId: bigint;
     active: boolean;
     batches: bigint[];
   }>();
@@ -632,13 +574,63 @@ export class MockChainAdapter implements ChainAdapter {
         throw new Error('Mock: participantIdentityIds must be strictly increasing (sorted, unique)');
       }
     }
+    const publishPolicy = params.publishPolicy ?? 1;
+    if (publishPolicy !== 0 && publishPolicy !== 1) {
+      throw new Error('Mock: invalid publishPolicy');
+    }
+    let publishAuthority = params.publishAuthority ?? ethers.ZeroAddress;
+    let publishAuthorityAccountId = params.publishAuthorityAccountId ?? 0n;
+    if (!ethers.isAddress(publishAuthority)) {
+      throw new Error(`Mock: invalid publishAuthority ${publishAuthority}`);
+    }
+    publishAuthority = ethers.getAddress(publishAuthority);
+    if (publishPolicy === 0) {
+      if (publishAuthorityAccountId !== 0n) {
+        throw new Error('Mock: PCA publishAuthorityAccountId is not supported');
+      }
+      if (publishAuthority === ethers.ZeroAddress) {
+        publishAuthority = ethers.getAddress(this.signerAddress);
+      }
+    } else {
+      if (publishAuthority !== ethers.ZeroAddress) {
+        throw new Error('Mock: open policy requires zero publishAuthority');
+      }
+      if (publishAuthorityAccountId !== 0n) {
+        throw new Error('Mock: open policy requires zero publishAuthorityAccountId');
+      }
+      publishAuthority = ethers.ZeroAddress;
+      publishAuthorityAccountId = 0n;
+    }
+    const participantAgents = params.participantAgents ?? [];
+    if (participantAgents.length > 256) {
+      throw new Error('Mock: participantAgents cap');
+    }
+    const seenParticipantAgents = new Set<string>();
+    for (const agent of participantAgents) {
+      if (!ethers.isAddress(agent)) {
+        throw new Error(`Mock: invalid participant agent ${agent}`);
+      }
+      const normalized = ethers.getAddress(agent);
+      if (normalized === ethers.ZeroAddress) {
+        throw new Error('Mock: zero participant agent');
+      }
+      const key = normalized.toLowerCase();
+      if (seenParticipantAgents.has(key)) {
+        throw new Error(`Mock: duplicate participant agent ${normalized}`);
+      }
+      seenParticipantAgents.add(key);
+    }
 
     const contextGraphId = this.nextContextGraphId++;
     this.contextGraphs.set(contextGraphId, {
       manager: this.signerAddress,
       participantIdentityIds: [...params.participantIdentityIds],
+      participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
       metadataBatchId: params.metadataBatchId ?? 0n,
+      publishPolicy,
+      publishAuthority,
+      publishAuthorityAccountId,
       active: true,
       batches: [],
     });
@@ -647,7 +639,9 @@ export class MockChainAdapter implements ChainAdapter {
       contextGraphId: contextGraphId.toString(),
       manager: this.signerAddress,
       participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
+      participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
+      publishPolicy,
     });
 
     return {
@@ -793,6 +787,33 @@ export class MockChainAdapter implements ChainAdapter {
     // flow without migrating every fixture to on-chain numeric ids.
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
+    }
+
+    // P-1 review (follow-up): mirror the EVM adapter's write-ahead
+    // hook so mock-backed publisher tests observe the same phase
+    // boundary contract (`chain:writeahead:start` fires only when a
+    // concrete broadcast is imminent).
+    //
+    // Codex iter-5/iter-6: fail closed on hook error — matching the
+    // real EVM adapter's refactored send path. WAL persistence
+    // failures MUST abort the broadcast.
+    //
+    // Codex iter-6: make the pre-broadcast hash equal the hash the
+    // adapter will eventually return in the result (via `txResult`)
+    // by deriving both from `peekTxHash()`. This lets recovery tests
+    // match "persisted before send" against "confirmed after send"
+    // without two separate hash namespaces, and gives each publish
+    // a unique breadcrumb (previously keyed only on `nextBatchId`).
+    const mockPublishTxHash = this.peekTxHash();
+    try {
+      // Codex PR #241 iter-7: `await` so async WAL writes run to
+      // completion before the mock "broadcasts".
+      await params.onBroadcast?.({ txHash: mockPublishTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before createKnowledgeAssetsV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
     }
 
     const kcId = this.nextBatchId++;

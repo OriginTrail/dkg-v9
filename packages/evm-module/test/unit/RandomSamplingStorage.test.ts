@@ -88,8 +88,6 @@ describe('@unit RandomSamplingStorage', function () {
   async function deployRandomSamplingFixture(): Promise<RandomStorageFixture> {
     await hre.deployments.fixture([
       'Token',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
       'KnowledgeCollectionStorage',
       'KnowledgeCollection',
       'RandomSamplingStorage',
@@ -516,7 +514,7 @@ describe('@unit RandomSamplingStorage', function () {
       expect(await RandomSamplingStorage.name()).to.equal(
         'RandomSamplingStorage',
       );
-      expect(await RandomSamplingStorage.version()).to.equal('1.0.0');
+      expect(await RandomSamplingStorage.version()).to.equal('3.0.0');
     });
 
     it('Should set the initial parameters correctly', async function () {
@@ -1178,9 +1176,13 @@ describe('@unit RandomSamplingStorage', function () {
     it('Should revert when accessing invalid index', async () => {
       const length =
         await RandomSamplingStorage.getProofingPeriodDurationsLength();
+      // Pin Solidity panic 0x32 (array out-of-bounds). Catching
+      // any-revert here would also accept a silent ACL misfire or a
+      // wrong-contract stub; panic code 0x32 specifically proves the
+      // bounds check itself fired.
       await expect(
         RandomSamplingStorage.getProofingPeriodDurationFromIndex(length),
-      ).to.be.reverted; // Array out of bounds
+      ).to.be.revertedWithPanic(0x32);
     });
   });
 

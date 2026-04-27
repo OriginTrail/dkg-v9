@@ -105,6 +105,22 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
+  it('registers a prompt builder that teaches WM identity selection', () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    const capability = api.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const sections = capability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined }) ?? [];
+
+    expect(sections.join('\n')).toContain('current_agent_address');
+    expect(sections.join('\n')).toContain('working-memory');
+    expect(sections.join('\n')).toContain('shared-working-memory');
+    expect(sections.join('\n')).toContain('verified-memory');
+    expect(sections.join('\n')).toContain('retry with alternate identity forms');
+    expect(sections.join('\n')).toContain('generate an invite code first');
+    expect(sections.join('\n')).toContain('allowlisting is not the full UI join flow');
+  });
+
   it('registers only the memory slot capability, no conventional memory tools (Codex B-retire)', () => {
     const api = makeApi();
     plugin.register(api);
@@ -140,6 +156,27 @@ describe('DkgMemoryPlugin.register', () => {
 
     expect(api.registerMemoryCapability).not.toHaveBeenCalled();
     expect(api.registerTool).not.toHaveBeenCalled();
+  });
+
+  it('invalidateRegistration() clears cached capability so reAssertCapability becomes a no-op (R12.2)', () => {
+    // Step 1: successful registration caches capability + api.
+    const api1 = makeApi();
+    plugin.register(api1);
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    // Step 2: another reAssertCapability call would re-stamp the cached
+    // capability — verify by counting the registerMemoryCapability calls.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+    // Step 3: invalidate — simulating slot ownership lost.
+    plugin.invalidateRegistration();
+
+    // Step 4: subsequent reAssertCapability MUST be a no-op. Without
+    // invalidation the cached api1+capability would be re-stamped
+    // and silently overwrite whatever provider currently owns the slot.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2); // unchanged
   });
 
   it('reads plugins.slots.memory from api.cfg when api.config is missing (Codex B58 gateway shim)', () => {

@@ -181,6 +181,8 @@ function formatChatContext(entries: ChatContextEntry[]): string {
   return [
     'Context for this chat turn:',
     'If "target_context_graph" is present below, treat it as authoritative for this turn unless the user explicitly overrides it in the same message.',
+    'If "current_agent_address" is present below, use it as the primary `agent_address` for `view: "working-memory"` reads.',
+    'Do not assume the peer ID is the right working-memory identity unless the tool result or graph naming proves it.',
     ...lines,
   ].join('\n');
 }
@@ -375,11 +377,6 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
-  private memoryReAssert: (() => void) | null = null;
-
-  setMemoryReAssert(fn: (() => void) | null): void {
-    this.memoryReAssert = fn;
-  }
   private readonly pendingTurnPersistence = new Map<string, {
     attempt: number;
     timer: ReturnType<typeof setTimeout> | null;
@@ -405,6 +402,16 @@ export class DkgChannelPlugin {
   private stopping = false;
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
+  /**
+   * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
+   * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
+   * once per `processInbound` / `processInboundStream` so the slot
+   * stays owned by this adapter even when another plugin's startup
+   * code overwrote `memoryPluginState.capability` after our
+   * registration ran. Mode-independent — fires for every UI dispatch
+   * regardless of `full` vs `setup-runtime`.
+   */
+  private preDispatchReAssert: (() => void) | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -421,6 +428,11 @@ export class DkgChannelPlugin {
       this.semanticEnrichmentWorker.bind(this.api, this.client);
     }
     return this.semanticEnrichmentWorker;
+  }
+
+  /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
+  setPreDispatchReAssert(cb: (() => void) | null): void {
+    this.preDispatchReAssert = cb;
   }
 
   /**
@@ -585,10 +597,20 @@ export class DkgChannelPlugin {
       );
     }
 
-    // Start the bridge server immediately so it's ready to receive
-    // inbound messages before any session exists.
-    this.start().catch((err) => {
-      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
+    // Always start the standalone bridge server. It's the transport the
+    // daemon's UI health probe and message dispatch trust (via the bridge
+    // auth token). The gateway-side `/api/dkg-channel/health` route we
+    // registered above is `auth: 'gateway'` and rejects the daemon's
+    // unauthenticated probe, so the bridge cannot be skipped.
+    //
+    // In OpenClaw versions where the gateway also binds the configured
+    // channel port (e.g. 2026.3.31 with channels.dkg-ui.port = 9201, see
+    // issue #272), our listen() throws EADDRINUSE on the configured port.
+    // start() handles that by falling back to an OS-allocated free port
+    // and the actual bound port surfaces via bridgePort + the daemon's
+    // transport.bridgeUrl, so the probe always finds the bridge.
+    this.start().catch((err: any) => {
+      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err?.message ?? err}`);
     });
   }
 
@@ -610,22 +632,38 @@ export class DkgChannelPlugin {
 
     const server = this.server;
     this.serverStart = new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => {
-        server.off('error', onError);
-        this.serverStart = null;
-        this.server = null;
-        reject(err);
+      const tryListen = (port: number, isFallback: boolean) => {
+        const onError = (err: any) => {
+          server.off('error', onError);
+          const isAddrInUse = err?.code === 'EADDRINUSE'
+            || /EADDRINUSE/i.test(String(err?.message ?? ''));
+          if (isAddrInUse && !isFallback) {
+            // Configured port (default 9201) is taken — typically because
+            // the OpenClaw gateway itself binds channels.dkg-ui.port in
+            // versions like 2026.3.31 (issue #272). Fall back to an
+            // OS-allocated free port so the bridge still comes up; the
+            // actual bound port surfaces via bridgePort + the daemon's
+            // transport.bridgeUrl, which is what the UI health probe and
+            // message dispatch use.
+            this.api?.logger.info?.(`[dkg-channel] Configured bridge port ${port} is in use; falling back to an OS-allocated free port (issue #272)`);
+            tryListen(0, true);
+            return;
+          }
+          this.serverStart = null;
+          this.server = null;
+          reject(err);
+        };
+        server.once('error', onError);
+        server.listen(port, '127.0.0.1', () => {
+          server.off('error', onError);
+          this.serverStart = null;
+          const address = server.address();
+          const boundPort = typeof address === 'object' && address ? address.port : port;
+          this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
+          resolve();
+        });
       };
-
-      server.once('error', onError);
-      server.listen(this.port, '127.0.0.1', () => {
-        server.off('error', onError);
-        this.serverStart = null;
-        const address = server.address();
-        const boundPort = typeof address === 'object' && address ? address.port : this.port;
-        this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
-        resolve();
-      });
+      tryListen(this.port, false);
     });
 
     await this.serverStart;
@@ -843,6 +881,10 @@ export class DkgChannelPlugin {
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
+    // Re-assert memory-slot ownership before this dispatch reaches the
+    // memory host. Cheap and runs in every registration mode, so the
+    // slot stays honest even when full-mode-only anchors don't fire.
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const runtime = this.runtime;
     const cfg = this.cfg;
@@ -862,8 +904,6 @@ export class DkgChannelPlugin {
 
     // Re-assert memory-slot capability before dispatch so our runtime
     // handles recall even if memory-core's dreaming sidecar overwrote it.
-    this.memoryReAssert?.();
-
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
@@ -1155,6 +1195,8 @@ export class DkgChannelPlugin {
     opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
+    // Mode-independent slot re-assert (mirrors `processInbound`).
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const log = this.api.logger;
     const runtime = this.runtime;
@@ -1172,9 +1214,6 @@ export class DkgChannelPlugin {
     if (opts?.contextEntries != null && contextEntries === undefined) {
       throw new Error('Invalid context entries');
     }
-
-    this.memoryReAssert?.();
-
     if (!runtime?.channel || !cfg) {
       const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
@@ -1922,7 +1961,15 @@ export class DkgChannelPlugin {
 
   get bridgePort(): number {
     const address = this.server?.address();
-    return typeof address === 'object' && address ? address.port : this.port;
+    if (typeof address === 'object' && address) {
+      return address.port;
+    }
+    // No standalone server is bound (either start() hasn't been called,
+    // it failed, or it was intentionally skipped because the gateway took
+    // ownership of the channel routes — see issue #272). Return 0 so
+    // callers like DkgNodePlugin.buildOpenClawTransport know not to
+    // publish a stale bridgeUrl pointing at a port nobody is listening on.
+    return 0;
   }
 
   get isListening(): boolean {

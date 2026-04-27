@@ -9,13 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { requestFaucetFunding } from './faucet.js';
-import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import { requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -52,6 +51,7 @@ import {
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
+import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -287,8 +287,16 @@ program
 
     let autoUpdate = existing.autoUpdate;
     if (enableAutoUpdate) {
-      const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
-      const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      // Effective upstream defaults — what the node would use if nothing were
+      // persisted in ~/.dkg/config.json. Network config beats project.json.
+      // We persist repo/branch only when they differ from these, so future
+      // changes to the shipped network or project config propagate on the
+      // next daemon run without requiring a config rewrite.
+      const proj = loadProjectConfig();
+      const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
+      const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
+      const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
+      const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
       const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
       const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
@@ -302,8 +310,8 @@ program
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
       autoUpdate = {
         enabled: true,
-        repo,
-        branch,
+        ...(repo && repo !== effectiveRepo ? { repo } : {}),
+        ...(branch && branch !== effectiveBranch ? { branch } : {}),
         allowPrerelease,
         sshKeyPath: sshKeyPath || undefined,
         checkIntervalMinutes: interval,
@@ -371,15 +379,18 @@ program
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
-    console.log(
-      `  autoUpdate: ${
-        config.autoUpdate?.enabled
-          ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
-            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}` +
-            `${config.autoUpdate.sshKeyPath ? ` (ssh key: ${config.autoUpdate.sshKeyPath})` : ''}`
-          : 'disabled'
-      }`,
-    );
+    {
+      const resolved = resolveAutoUpdateConfig(config, network);
+      console.log(
+        `  autoUpdate: ${
+          resolved
+            ? `${resolved.repo}@${resolved.branch}` +
+              `${resolved.allowPrerelease ? ' (pre-release allowed)' : ''}` +
+              `${resolved.sshKeyPath ? ` (ssh key: ${resolved.sshKeyPath})` : ''}`
+            : 'disabled'
+        }`,
+      );
+    }
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
@@ -549,12 +560,9 @@ program
       console.log(isTTY ? STARTUP_BANNER : '');
       console.log(`  Node:       ${config.name} (PID ${startedPid})`);
       console.log(`  Node UI:    ${cyan(`http://${hostDisplay}:${port}/ui`)}`);
-      console.log(`  GitHub:     ${cyan('https://github.com/OriginTrail/dkg-v9')}`);
+      console.log(`  GitHub:     ${cyan(loadProjectConfig().githubUrl)}`);
       console.log(`  Discord:    ${cyan('https://discord.com/invite/xCaY7hvNwD')}`);
       console.log(`  Logs:       ${logPath()}`);
-      console.log('');
-      console.log(`  ${yellow('This is an experimental testnet node. Things will break.')}`);
-      console.log(`  ${yellow('Not intended for production use.')}`);
       console.log('');
       return;
     }
@@ -642,6 +650,29 @@ program
         console.log(`  ${a.name.padEnd(nameW)}   ${short.padEnd(16)}   ${role.padEnd(5)}   ${a.framework ?? '—'}${self}`);
       }
       console.log(`\n  ${agents.length} agent(s) total`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('peer info <peer-id>')
+  .description('Inspect connection and sync capability for a specific peer')
+  .action(async (peerId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const info = await client.peerInfo(peerId);
+      console.log(`Peer:          ${info.peerId}`);
+      console.log(`Connected:     ${info.connected ? 'yes' : 'no'}`);
+      console.log(`Connections:   ${info.connectionCount}`);
+      console.log(`Sync Capable:  ${info.syncCapable ? 'yes' : 'no'}`);
+      if (info.transports.length > 0) console.log(`Transports:    ${info.transports.join(', ')}`);
+      if (info.directions.length > 0) console.log(`Directions:    ${info.directions.join(', ')}`);
+      if (info.remoteAddrs.length > 0) console.log(`Remote Addrs:  ${info.remoteAddrs.filter(Boolean).join(', ')}`);
+      if (info.protocols.length > 0) console.log(`Protocols:     ${info.protocols.join(', ')}`);
+      if (info.lastSeen) console.log(`Last Seen:     ${new Date(info.lastSeen).toISOString()}`);
+      if (info.latencyMs != null) console.log(`Latency:       ${info.latencyMs} ms`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -836,17 +867,31 @@ program
 
 program
   .command('endorse <ual>')
-  .description('Endorse a published Knowledge Asset')
+  .description('Endorse a published Knowledge Asset as the authenticated agent')
+  // A-12 review: the endorser is resolved from the bearer token, not
+  // from a `--agent` flag (the previous behaviour let any caller with
+  // node access forge endorsements under arbitrary addresses).
+  // `--agent` is kept as an optional sanity check: if it is supplied
+  // we assert it matches the token's agent before sending the
+  // request, so a user who typo's the agent gets a local error
+  // instead of a 403 round-trip. If the user wants to endorse as a
+  // specific agent other than the node's default, they must
+  // authenticate with that agent's token.
   .requiredOption('--context-graph <id>', 'Context Graph ID')
-  .requiredOption('--agent <address>', 'Agent address (endorser)')
+  .option('--agent <address>', 'Optional: assert the authenticated agent matches this address before sending')
   .action(async (ual: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.endorse({
+      const request: { contextGraphId: string; ual: string; agentAddress?: string } = {
         contextGraphId: opts.contextGraph,
         ual,
-        agentAddress: opts.agent,
-      });
+      };
+      if (typeof opts.agent === 'string' && opts.agent.length > 0) {
+        request.agentAddress = opts.agent;
+      }
+      const result = await client.endorse(
+        request as { contextGraphId: string; ual: string; agentAddress: string },
+      );
       console.log(`Endorsed ${ual} by ${result.endorserAddress}`);
     } catch (err) {
       console.error(`Endorse failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -861,6 +906,7 @@ program
   .description('Run a SPARQL query against a context graph (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
+  .option('--include-shared-memory', 'Include shared (unpublished) memory in the query — use for data written via `dkg index` / `dkg shared-memory write` before on-chain registration')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -875,7 +921,9 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, contextGraph);
+      const { result } = await client.query(sparql, contextGraph, {
+        includeSharedMemory: Boolean(opts.includeSharedMemory),
+      });
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
@@ -1059,40 +1107,74 @@ const syncCmd = program
   .command('sync')
   .description('Sync status helpers');
 
+type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number };
+
+function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
+  console.log(`Context Graph: ${status.contextGraphId}`);
+  console.log(`Job:           ${status.jobId}`);
+  console.log(`Status:        ${status.status}`);
+  console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+  console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
+  if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
+  if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
+  if (status.result) {
+    console.log(
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+    );
+    if (status.result.diagnostics) {
+      console.log(
+        `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
+      );
+      console.log(
+        `               durable bytes ${status.result.diagnostics.durable.bytesReceived}, resumed phases ${status.result.diagnostics.durable.resumedPhases}, empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
+      );
+      console.log(
+        `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, bytes ${status.result.diagnostics.sharedMemory.bytesReceived}, resumed phases ${status.result.diagnostics.sharedMemory.resumedPhases}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
+      );
+    }
+  }
+  if (status.error) {
+    console.log(`Error:         ${status.error}`);
+  }
+  if (
+    status.result &&
+    status.result.connectedPeers > 0 &&
+    status.result.syncCapablePeers === 0 &&
+    status.result.dataSynced === 0 &&
+    status.result.sharedMemorySynced === 0
+  ) {
+    console.log('Warning:       Connected peers were found, but none advertised the sync protocol.');
+  }
+}
+
+async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatusCommandOptions) {
+  const client = await ApiClient.connect();
+  const watch = !!opts.watch;
+  const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
+  const terminalStates = new Set(['done', 'failed', 'denied']);
+
+  do {
+    const status = await client.catchupStatus(contextGraph);
+    if (watch) {
+      console.clear();
+      console.log(`Watching catch-up status every ${intervalSeconds}s\n`);
+    }
+    printCatchupStatus(status);
+    if (!watch || terminalStates.has(status.status)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
+  } while (true);
+}
+
 syncCmd
   .command('catchup-status <context-graph>')
   .description('Show latest background catch-up status for a context graph')
-  .action(async (contextGraph: string) => {
+  .option('--watch', 'Poll until the catch-up job reaches a terminal state')
+  .option('--interval <seconds>', 'Polling interval for --watch', '2')
+  .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {
     try {
-      const client = await ApiClient.connect();
-      const status = await client.catchupStatus(contextGraph);
-
-      console.log(`Context Graph: ${status.contextGraphId}`);
-      console.log(`Job:           ${status.jobId}`);
-      console.log(`Status:        ${status.status}`);
-      console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
-      console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
-      if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
-      if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
-      if (status.result) {
-        console.log(
-          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
-        );
-        if (status.result.diagnostics) {
-          console.log(
-            `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
-          );
-          console.log(
-            `               durable empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
-          );
-          console.log(
-            `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
-          );
-        }
-      }
-      if (status.error) {
-        console.log(`Error:         ${status.error}`);
-      }
+      await runCatchupStatusCommand(contextGraph, opts);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1105,6 +1187,20 @@ const contextGraphCmd = program
   .command('context-graph')
   .alias('paranet')
   .description('Manage context graphs (knowledge graph partitions)');
+
+contextGraphCmd
+  .command('catchup-status <context-graph>')
+  .description('Show latest background catch-up status for a context graph')
+  .option('--watch', 'Poll until the catch-up job reaches a terminal state')
+  .option('--interval <seconds>', 'Polling interval for --watch', '2')
+  .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {
+    try {
+      await runCatchupStatusCommand(contextGraph, opts);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
 
 contextGraphCmd
   .command('create <id>')
@@ -1196,11 +1292,14 @@ contextGraphCmd
 contextGraphCmd
   .command('register <id>')
   .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
-  .option('--reveal', 'Reveal cleartext name and description on-chain')
+  .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.registerContextGraph(id, { revealOnChain: opts.reveal });
+      if (opts.reveal) {
+        console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
+      }
+      const result = await client.registerContextGraph(id);
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
@@ -1583,29 +1682,35 @@ const openclawCmd = program
 
 openclawCmd
   .command('setup')
-  .description('Set up the DKG OpenClaw adapter (runs npx setup script)')
-  .allowUnknownOption(true)
-  .action(async () => {
-    const { execFileSync } = await import('node:child_process');
-    // Forward args after "openclaw setup" to the adapter setup script.
-    const oclawIdx = process.argv.indexOf('openclaw');
-    const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
-    const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
+  .description('Set up DKG node + OpenClaw adapter (non-interactive, idempotent)')
+  .option('--workspace <dir>', 'Override OpenClaw workspace directory')
+  .option('--name <name>', 'Override agent name')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--no-verify', 'Skip post-setup verification')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .option('--dry-run', 'Preview changes without writing anything')
+  .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option('--fund', 'Fund wallets via testnet faucet (default)')
+  .action(async (opts, command) => {
+    // Dynamic import + process.exit plumbing stay here; the actual `runSetup`
+    // call lives in `openclawSetupAction` so it can be unit-tested without
+    // spawning the built CLI.
+    let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
-      // This is a thin convenience wrapper — the primary entry point is:
-      //   npx @origintrail-official/dkg-adapter-openclaw setup
-      // The adapter's own setup script warns if running from an ephemeral
-      // npx cache and advises users to install globally.
-      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
-        stdio: 'inherit',
-        shell: process.platform === 'win32',
-      });
+      ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));
     } catch (err: any) {
-      if (err.status) {
-        process.exit(err.status);
-      }
-      console.error('\nTo set up the OpenClaw adapter, run:');
-      console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+      console.error('\n[dkg openclaw setup] OpenClaw adapter is not available.');
+      console.error(`  Reason: ${err?.message ?? err}`);
+      console.error('  • In a monorepo dev checkout: run `pnpm build` at the repo root to build all workspaces.');
+      console.error('  • With a global install: reinstall with `npm install -g @origintrail-official/dkg`.\n');
+      process.exit(1);
+    }
+
+    const { openclawSetupAction } = await import('./openclaw-setup.js');
+    try {
+      await openclawSetupAction(opts, command, { runSetup });
+    } catch (err: any) {
+      console.error(`\n[setup] ERROR: ${err?.message ?? err}\n`);
       process.exit(1);
     }
   });
@@ -1860,6 +1965,7 @@ program
   .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
   .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
+  .option('--solidity-ast', 'Use Hardhat build-info ASTs for Solidity indexing (adds StateVariable/Event/Error/Modifier and a call-graph). Falls back to regex for packages without artifacts/build-info/.')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
   .action(async (directory: string | undefined, opts: ActionOpts) => {
@@ -1873,6 +1979,8 @@ program
       const { indexRepository } = await import('./indexer.js');
       const result = await indexRepository(repoRoot, {
         includeContent: Boolean(opts.includeContent),
+        solidityAst: Boolean(opts.solidityAst),
+        contextGraphId: targetContextGraph,
       });
 
       console.log(`\n  Packages:  ${result.packageCount}`);
@@ -2701,13 +2809,18 @@ program
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
     const net = await loadNetworkConfig();
-    const au = config.autoUpdate ?? net?.autoUpdate ?? {
-      enabled: true,
-      repo: 'OriginTrail/dkg-v9',
-      branch: 'main',
-      allowPrerelease: true,
-      checkIntervalMinutes: 30,
-    };
+    // Resolve field-by-field across local/network/project so defaults flow
+    // through even when the local config omits repo/branch.
+    const au = resolveAutoUpdateConfig(config, net) ?? (() => {
+      const proj = loadProjectConfig();
+      return {
+        enabled: true,
+        repo: proj.repo,
+        branch: proj.defaultBranch,
+        allowPrerelease: true,
+        checkIntervalMinutes: 30,
+      };
+    })();
     const standalone = isStandaloneInstall();
     const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 
@@ -2900,5 +3013,9 @@ program
     console.log(`Rolled back: current → slot ${target}`);
     console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
   });
+
+// ─── dkg integration ─────────────────────────────────────────────────
+
+registerIntegrationCommands(program);
 
 program.parse();

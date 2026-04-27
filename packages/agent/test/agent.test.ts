@@ -15,10 +15,10 @@ import {
   parseCclPolicy,
 } from '../src/index.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -31,6 +31,19 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
+
+class CapturingContextGraphChainAdapter extends MockChainAdapter {
+  createOnChainContextGraphCalls: CreateOnChainContextGraphParams[] = [];
+
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
+    this.createOnChainContextGraphCalls.push({
+      ...params,
+      participantIdentityIds: [...params.participantIdentityIds],
+      participantAgents: params.participantAgents ? [...params.participantAgents] : undefined,
+    });
+    return super.createOnChainContextGraph(params);
+  }
+}
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -163,8 +176,11 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
+    // A-12 migration: profile DIDs are the EVM-address form, not peer-id.
+    const addr = '0x' + '1'.repeat(40);
     const { quads, rootEntity } = buildAgentProfile({
       peerId: 'QmTest123',
+      agentAddress: addr,
       name: 'TestBot',
       description: 'A test agent',
       framework: 'OpenClaw',
@@ -179,12 +195,12 @@ describe('Profile Builder', () => {
       ],
     });
 
-    expect(rootEntity).toBe('did:dkg:agent:QmTest123');
+    expect(rootEntity).toBe(`did:dkg:agent:${addr}`);
     expect(quads.length).toBeGreaterThanOrEqual(8);
 
     const subjects = quads.map(q => q.subject);
-    expect(subjects).toContain('did:dkg:agent:QmTest123');
-    expect(subjects).toContain('did:dkg:agent:QmTest123/.well-known/genid/offering1');
+    expect(subjects).toContain(`did:dkg:agent:${addr}`);
+    expect(subjects).toContain(`did:dkg:agent:${addr}/.well-known/genid/offering1`);
 
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://schema.org/name');
@@ -278,6 +294,195 @@ describe('ProfileManager', () => {
     expect(result.kaManifest.length).toBeGreaterThan(0);
     expect(manager.profileKcId).toBe(result.kcId);
   });
+
+  it(
+    'A-12 upgrade: republishing after the DID form change drops the legacy ' +
+      'did:dkg:agent:<peerId> subject alongside the new address-form subject',
+    async () => {
+      // Codex review on PR #243: ProfileManager.publishProfile only
+      // deleted triples under the NEW rootEntity before publish, so an
+      // upgraded node that previously published
+      // `did:dkg:agent:<peerId>` would keep the old profile alongside
+      // the new `did:dkg:agent:0x...` profile. `findAgents` then
+      // returned the same node twice and the local data graph no
+      // longer matched the updated manifest. This test simulates the
+      // upgrade by publishing in legacy form first, then
+      // republishing in the new form, and asserting the legacy
+      // subject is gone.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+      const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const manager = new ProfileManager(publisher, store);
+
+      const peerId = 'QmLegacyUpgrade';
+      const addr = '0x' + 'ab'.repeat(20);
+
+      // Legacy publish (no agentAddress) → DID = did:dkg:agent:<peerId>
+      await manager.publishProfile({ peerId, name: 'Legacy', skills: [] });
+      const graph = 'did:dkg:context-graph:agents';
+      const legacyCount = await store.countQuads(graph);
+      expect(legacyCount).toBeGreaterThan(0);
+
+      const legacySubject = `did:dkg:agent:${peerId}`;
+      const newSubject = `did:dkg:agent:${addr}`;
+
+      // Sanity: legacy subject really was written.
+      const legacyRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(legacyRows.type).toBe('bindings');
+      if (legacyRows.type === 'bindings') {
+        expect(legacyRows.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Upgrade publish — same peerId, now with an agentAddress.
+      await manager.publishProfile({
+        peerId,
+        agentAddress: addr,
+        name: 'Upgraded',
+        skills: [],
+      });
+
+      // The legacy subject must no longer appear in the data graph.
+      const stillLegacy = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(stillLegacy.type).toBe('bindings');
+      if (stillLegacy.type === 'bindings') {
+        expect(
+          stillLegacy.bindings.length,
+          'legacy did:dkg:agent:<peerId> subject must be removed on A-12 upgrade',
+        ).toBe(0);
+      }
+
+      // The new subject is the sole profile root in the data graph.
+      const newRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${newSubject}> ?p ?o } }`,
+      );
+      expect(newRows.type).toBe('bindings');
+      if (newRows.type === 'bindings') {
+        expect(newRows.bindings.length).toBeGreaterThan(0);
+        const nameTriples = newRows.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"Upgraded"')).toBe(true);
+      }
+    },
+  );
+
+  it(
+    'A-12 wallet rotation + restart: peerId-scan reaches profiles from a prior wallet even with a fresh ProfileManager',
+    async () => {
+      // Codex review on PR #243: `lastRootEntity` is only in memory.
+      // If an operator publishes under wallet A, the daemon restarts,
+      // they reconfigure to wallet B, and publish again, the in-memory
+      // cleanup path sees only the new canonical address (B) and the
+      // peerId fallback — wallet A's profile would be orphaned.
+      //
+      // The mitigation is the SPARQL scan in
+      // `ProfileManager.publishProfile` that discovers every subject
+      // in the registry graph that claims this peerId. This test
+      // simulates the restart by constructing a fresh ProfileManager
+      // for the second publish, proving the scan — not
+      // `lastRootEntity` — is what cleans up wallet A.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+
+      const peerId = 'QmRotatedWallet';
+      const walletA = '0x' + 'aa'.repeat(20);
+      const walletB = '0x' + 'bb'.repeat(20);
+
+      // Publish under wallet A.
+      const publisher1 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerA = new ProfileManager(publisher1, store);
+      await managerA.publishProfile({
+        peerId,
+        agentAddress: walletA,
+        name: 'WalletA',
+        skills: [],
+      });
+
+      const graph = 'did:dkg:context-graph:agents';
+      const subjectA = `did:dkg:agent:${walletA}`;
+      const subjectB = `did:dkg:agent:${walletB}`;
+
+      // Sanity: wallet A's subject is present.
+      const afterA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(afterA.type).toBe('bindings');
+      if (afterA.type === 'bindings') {
+        expect(afterA.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Simulate a daemon restart + wallet rotation — brand new
+      // ProfileManager with NO lastRootEntity memory, but the same
+      // store + peerId + a NEW wallet.
+      const publisher2 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerB = new ProfileManager(publisher2, store);
+      await managerB.publishProfile({
+        peerId,
+        agentAddress: walletB,
+        name: 'WalletB',
+        skills: [],
+      });
+
+      // Wallet A's subject must be gone even though ProfileManager
+      // had no in-memory record of it.
+      const stillA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(stillA.type).toBe('bindings');
+      if (stillA.type === 'bindings') {
+        expect(
+          stillA.bindings.length,
+          'peerId-scan must remove wallet A profile across a ProfileManager restart',
+        ).toBe(0);
+      }
+
+      // Wallet B's subject is the sole remaining profile root for
+      // this peerId.
+      const afterB = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectB}> ?p ?o } }`,
+      );
+      expect(afterB.type).toBe('bindings');
+      if (afterB.type === 'bindings') {
+        expect(afterB.bindings.length).toBeGreaterThan(0);
+        const nameTriples = afterB.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"WalletB"')).toBe(true);
+      }
+    },
+  );
+
+  it(
+    'A-12 casing: checksum-case and lowercase agentAddress converge to the same DID subject',
+    () => {
+      const checksum = '0xAb5801a7D398351b8bE11C439e05C5B3259aec9B';
+      const lower = checksum.toLowerCase();
+      const profileChecksum = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: checksum,
+        name: 'Checksum',
+        skills: [],
+      });
+      const profileLower = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: lower,
+        name: 'Lower',
+        skills: [],
+      });
+      expect(profileChecksum.rootEntity).toBe(profileLower.rootEntity);
+      expect(profileChecksum.rootEntity).toBe(`did:dkg:agent:${lower}`);
+    },
+  );
 
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
@@ -921,6 +1126,10 @@ decisions: []
   });
 
   it('restricts CCL policy approval to the paranet owner', async () => {
+    // Shared store simulates two agent processes on the same node so `other`
+    // can see the CG metadata. After PR #200, ownership is wallet-scoped via
+    // `DKG_CURATOR`, so we pass an explicit `callerAgentAddress` on `other`'s
+    // request to prove non-owner wallets are rejected.
     const store = new OxigraphStore();
     const owner = await DKGAgent.create({
       name: 'OwnerBot',
@@ -932,6 +1141,7 @@ decisions: []
       store,
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
+    const otherAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
 
     await owner.start();
     await other.start();
@@ -948,7 +1158,7 @@ decisions: []
 `,
     });
 
-    await expect(other.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
+    await expect(other.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri, callerAgentAddress: otherAddr }))
       .rejects.toThrow(/Only the paranet owner can manage policies/);
 
     await expect(owner.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
@@ -959,6 +1169,9 @@ decisions: []
   });
 
   it('restricts CCL policy revocation to the paranet owner', async () => {
+    // See note on policy-approval test above: ownership is wallet-scoped via
+    // `DKG_CURATOR` after PR #200; `other` passes an explicit non-owner
+    // `callerAgentAddress` to prove the check rejects other wallets.
     const store = new OxigraphStore();
     const owner = await DKGAgent.create({
       name: 'OwnerRevokeBot',
@@ -970,6 +1183,7 @@ decisions: []
       store,
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
+    const otherAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
 
     await owner.start();
     await other.start();
@@ -987,7 +1201,7 @@ decisions: []
     });
     await owner.approveCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri });
 
-    await expect(other.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
+    await expect(other.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri, callerAgentAddress: otherAddr }))
       .rejects.toThrow(/Only the paranet owner can manage policies/);
 
     await expect(owner.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
@@ -997,48 +1211,217 @@ decisions: []
     await other.stop().catch(() => {});
   });
 
-  it('restricts temporary project ontology writes to the context graph creator', async () => {
+  // Regression coverage for PR #200's multi-agent access control. When a
+  // non-default local agent creates a CG (callerAgentAddress !=
+  // defaultAgentAddress), every owner-checked route must:
+  //   - accept the owning caller wallet,
+  //   - reject the node's default-agent token, and
+  //   - reject a sibling agent wallet on the same node.
+  // This exercises approve/revoke (CCL policy) and invite (peer allowlist);
+  // registerContextGraph is covered implicitly through `isCallerOrNodeOwner`
+  // sharing the same code path as invite via `assertCallerIsOwner`.
+  it('scopes CG management to the owning non-default agent across policy and invite paths', async () => {
     const store = new OxigraphStore();
-    const owner = await DKGAgent.create({
-      name: 'OntologyOwnerBot',
+    const node = await DKGAgent.create({
+      name: 'MultiAgentNode',
       store,
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
-    const other = await DKGAgent.create({
-      name: 'OntologyOtherBot',
-      store,
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    await node.start();
+
+    const nonDefaultAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const siblingAddr = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+    const invitePeerId = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
+
+    await node.createContextGraph({
+      id: 'ops-multi-agent',
+      name: 'Multi-Agent CG',
+      callerAgentAddress: nonDefaultAddr,
     });
 
-    await owner.start();
-    await other.start();
-    await owner.createContextGraph({ id: 'ops-ontology-owner', name: 'Ops Ontology Owner' });
+    const published = await node.publishCclPolicy({
+      paranetId: 'ops-multi-agent',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
 
-    const ontologyQuad = {
-      subject: 'https://example.org/ontology#Task',
-      predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
-      object: '"Task"',
-    };
+    // --- approveCclPolicy ---
+    await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+    await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: siblingAddr }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+    await expect(node.approveCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: nonDefaultAddr }))
+      .resolves.toBeTruthy();
 
-    await expect(other.writeContextGraphOntology('ops-ontology-owner', [ontologyQuad]))
-      .rejects.toThrow(/Only the context graph creator can manage the project ontology/);
+    // --- revokeCclPolicy ---
+    await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+    await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: siblingAddr }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+    await expect(node.revokeCclPolicy({ paranetId: 'ops-multi-agent', policyUri: published.policyUri, callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ status: 'revoked' });
 
-    await expect(owner.writeContextGraphOntology('ops-ontology-owner', [ontologyQuad]))
-      .resolves.toBe(1);
+    // --- inviteToContextGraph ---
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId))
+      .rejects.toThrow(/Only the context graph creator can manage peer invitations/);
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId, siblingAddr))
+      .rejects.toThrow(/Only the context graph creator can manage peer invitations/);
+    await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId, nonDefaultAddr))
+      .resolves.toBeUndefined();
 
-    const inserted = await store.query(
-      `SELECT ?label WHERE {
-        GRAPH <did:dkg:context-graph:ops-ontology-owner/_ontology> {
-          <https://example.org/ontology#Task> <http://www.w3.org/2000/01/rdf-schema#label> ?label
-        }
-      }`,
-    );
-    expect(inserted.type).toBe('bindings');
-    expect(inserted.bindings).toHaveLength(1);
-    expect(inserted.bindings[0]?.label).toBe('"Task"');
+    await node.stop().catch(() => {});
+  });
 
-    await owner.stop().catch(() => {});
-    await other.stop().catch(() => {});
+  it('maps local access policy to EVM publish policy and forwards participant agents on registration', async () => {
+    const chain = new CapturingContextGraphChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'RegistrationPolicyBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    const ownerAgent = ethers.getAddress(chain.signerAddress);
+    const allowedAgent = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const nonDefaultOwnerAgent = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+
+    await expect(agent.createContextGraph({
+      id: 'register-zero-participant-agent',
+      name: 'Zero Participant Agent',
+      accessPolicy: 1,
+      participantAgents: [ethers.ZeroAddress],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/zero address/);
+    await expect(agent.createContextGraph({
+      id: 'register-duplicate-participant-agent',
+      name: 'Duplicate Participant Agent',
+      accessPolicy: 1,
+      participantAgents: [allowedAgent, allowedAgent.toLowerCase()],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Duplicate Ethereum address/);
+    await expect(agent.createContextGraph({
+      id: 'register-open-participant-agent',
+      name: 'Open Participant Agent',
+      participantAgents: [allowedAgent],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Set accessPolicy: 1/);
+    await expect(agent.createContextGraph({
+      id: 'register-too-many-participant-agents',
+      name: 'Too Many Participant Agents',
+      accessPolicy: 1,
+      participantAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/participantAgents cannot exceed/);
+    await agent.createContextGraph({
+      id: 'register-non-default-curated-policy',
+      name: 'Non-default Curated Policy',
+      accessPolicy: 1,
+      callerAgentAddress: nonDefaultOwnerAgent,
+    });
+    await expect(agent.registerContextGraph('register-non-default-curated-policy', { callerAgentAddress: nonDefaultOwnerAgent }))
+      .rejects.toThrow(/Per-agent chain signers are not supported/);
+
+    await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
+    await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
+
+    await agent.createContextGraph({
+      id: 'register-curated-policy',
+      name: 'Curated Policy',
+      accessPolicy: 1,
+      participantAgents: [allowedAgent],
+      callerAgentAddress: ownerAgent,
+    });
+    await agent.registerContextGraph('register-curated-policy', { callerAgentAddress: ownerAgent });
+
+    await agent.createContextGraph({
+      id: 'register-agent-allowlist-policy',
+      name: 'Agent Allowlist Policy',
+      callerAgentAddress: ownerAgent,
+    });
+    await agent.inviteAgentToContextGraph('register-agent-allowlist-policy', allowedAgent, ownerAgent);
+    await agent.registerContextGraph('register-agent-allowlist-policy', { callerAgentAddress: ownerAgent });
+
+    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+      publishPolicy: 1,
+      participantAgents: [],
+    });
+    expect(chain.createOnChainContextGraphCalls[1]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
+    expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
+    expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toEqual([]);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('requires address-scoped curator authority for on-chain registration', async () => {
+    const store = new OxigraphStore();
+    const chain = new CapturingContextGraphChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'RegistrationOwnerBot',
+      store,
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    const nonDefaultAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const siblingAddr = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+
+    await agent.createContextGraph({
+      id: 'register-owner-agent',
+      name: 'Owner Agent',
+      callerAgentAddress: nonDefaultAddr,
+    });
+
+    await expect(agent.registerContextGraph('register-owner-agent'))
+      .rejects.toThrow(/Only the context graph curator can register/);
+    await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: siblingAddr }))
+      .rejects.toThrow(/Only the context graph curator can register/);
+    await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    await agent.createContextGraph({ id: 'register-legacy-peer-curator', name: 'Legacy Peer Curator' });
+    const legacyMetaGraph = contextGraphMetaUri('register-legacy-peer-curator');
+    const legacyUri = 'did:dkg:context-graph:register-legacy-peer-curator';
+    await store.deleteByPattern({
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+    });
+    await store.insert([{
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${agent.peerId}`,
+    }]);
+    await expect(agent.registerContextGraph('register-legacy-peer-curator', { callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    await agent.createContextGraph({ id: 'register-foreign-peer-only', name: 'Foreign Peer Only' });
+    const contextGraphUri = 'did:dkg:context-graph:register-foreign-peer-only';
+    await store.deleteByPattern({ graph: 'did:dkg:context-graph:register-foreign-peer-only/_meta', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+    await store.deleteByPattern({ graph: 'did:dkg:context-graph:ontology', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+    await store.insert([
+      {
+        graph: 'did:dkg:context-graph:ontology',
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_CREATOR,
+        object: 'did:dkg:agent:12D3KooWForeignCreatorPeer111111111111111111111111',
+      },
+    ]);
+
+    await expect(agent.registerContextGraph('register-foreign-peer-only'))
+      .rejects.toThrow(/has no address-scoped curator/);
+
+    await agent.stop().catch(() => {});
   });
 
   it('validates CCL policy content before publish', async () => {
@@ -1400,10 +1783,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('syncContextGraphFromConnectedPeers retries until sync protocol is visible', async () => {
+    // Real EVMChainAdapter against the shared Hardhat node — no blockchain
+    // mocks anywhere in this file. The chain is only touched at
+    // `agent.start()` (identity resolution); the sync behaviour under test
+    // is purely libp2p, and the libp2p spies below stub only peer-discovery
+    // surfaces that would otherwise need a full remote-agent harness.
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupProtocolRetry',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1473,11 +1861,44 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncOnConnectDiscoveryRefresh',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+
+    try {
+      await agent.start();
+      const remotePeer = agent.node.peerId.toString();
+      const seenCalls: string[][] = [];
+
+      (agent as any).getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+      (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
+        seenCalls.push([...(contextGraphIds ?? [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
+        return 0;
+      };
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        (agent as any).config.syncContextGraphs = ['new-private-cg'];
+        return 1;
+      };
+      (agent as any).syncSharedMemoryFromPeer = async () => 0;
+
+      await (agent as any).trySyncFromPeer(remotePeer);
+
+      expect(seenCalls.length).toBe(2);
+      expect(seenCalls[1]).toEqual(['new-private-cg']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reports no-protocol peers in catchup diagnostics', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoProtocolDiagnostics',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1507,7 +1928,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupPreferredPeer',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1554,7 +1975,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'PerContextGraphDeadline',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1591,7 +2012,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'MetaSyncedScopeOnly',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1625,7 +2046,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     const agent = await DKGAgent.create({
       name: 'MetaSyncedOntologyConfirmed',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     try {
@@ -1752,13 +2173,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
-    // `autoRegisterDefaultAgent` only runs when the chain adapter exposes
-    // `getOperationalPrivateKey`. MockChainAdapter doesn't, so on that
-    // adapter `localAgents` is empty and `getDefaultAgentAddress()` returns
-    // undefined — the test would fail at the `toBeDefined()` precondition
-    // before exercising `buildSyncRequest`. The adjacent "denies private
-    // sync requests" test uses the same real-chain pattern for the same
-    // reason.
+    // Real EVMChainAdapter — `autoRegisterDefaultAgent` calls
+    // `chain.getOperationalPrivateKey()` which only EVMChainAdapter
+    // exposes, so a real adapter is required to reach the assertion.
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthMissingKey',
@@ -1775,9 +2192,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       // Force `needsAuth = true` in buildSyncRequest — the precondition
       // check Viktor added (see dkg-agent.ts #4880) only fires on the
-      // authenticated-sync path. Without this stub, MockChainAdapter /
-      // a clean Hardhat both report the CG as non-private and the
-      // unsigned path succeeds.
+      // authenticated-sync path. Without this stub, a clean Hardhat
+      // reports the CG as non-private and the unsigned path succeeds.
       (agent as any).isPrivateContextGraph = async () => true;
       // Force the fallback signing path in buildSyncRequest — when the
       // chain identity is non-zero (EVMChainAdapter post-ensureProfile),
@@ -2102,6 +2518,63 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(result).toBe(true);
       expect(syncIdentityCalled).toBe(true);
       expect(ackIdentityCalled).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('authorizeSyncRequest denies when signer does not verify for claimed identityId', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'SyncIdentityMismatchTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+        participantIdentityIds: [108n],
+      });
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => ['108', wallet.address];
+      (chain as any).verifySyncIdentity = async () => false;
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-req',
+        requestId: `req-${Date.now()}`,
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '108',
+      };
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+      const signed = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
+      expect(result).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }

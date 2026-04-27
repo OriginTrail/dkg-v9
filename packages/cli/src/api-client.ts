@@ -56,6 +56,21 @@ export class ApiClient {
     return this.get('/api/agents');
   }
 
+  async peerInfo(peerId: string): Promise<{
+    peerId: string;
+    connected: boolean;
+    connectionCount: number;
+    transports: string[];
+    directions: string[];
+    remoteAddrs: Array<string | null>;
+    protocols: string[];
+    syncCapable: boolean;
+    lastSeen: number | null;
+    latencyMs: number | null;
+  }> {
+    return this.get(`/api/peer-info?peerId=${encodeURIComponent(peerId)}`);
+  }
+
   async skills(): Promise<{
     skills: Array<{
       agentName: string; skillType: string;
@@ -216,8 +231,45 @@ export class ApiClient {
     return this.post('/api/publisher/clear', { status });
   }
 
-  async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, contextGraphId });
+  /**
+   * Run SPARQL via the daemon. `opts` covers the full /api/query surface —
+   * memory-layer routing (`view`, `graphSuffix`, `verifiedGraph`,
+   * `subGraphName`, `includeSharedMemory`, `agentAddress`,
+   * `assertionName`), and P-13's `minTrust` (only meaningful on
+   * `view: "verified-memory"`; ignored elsewhere). `contextGraphId` stays
+   * in the 2nd positional slot for backwards compatibility.
+   */
+  async query(
+    sparql: string,
+    contextGraphId?: string,
+    opts?: {
+      graphSuffix?: string;
+      includeSharedMemory?: boolean;
+      view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+      agentAddress?: string;
+      assertionName?: string;
+      subGraphName?: string;
+      verifiedGraph?: string;
+      /**
+       * P-13: implementable tiers are `SelfAttested` (0) and `Endorsed`
+       * (1) only. `PartiallyVerified` / `ConsensusVerified` fail fast
+       * with a 400 at the daemon until Q-1 lands.
+       */
+      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
+    },
+  ): Promise<{ result: QueryResult }> {
+    return this.post('/api/query', {
+      sparql,
+      contextGraphId,
+      graphSuffix: opts?.graphSuffix,
+      includeSharedMemory: opts?.includeSharedMemory,
+      view: opts?.view,
+      agentAddress: opts?.agentAddress,
+      assertionName: opts?.assertionName,
+      subGraphName: opts?.subGraphName,
+      verifiedGraph: opts?.verifiedGraph,
+      minTrust: opts?.minTrust,
+    });
   }
 
   async queryRemote(peerId: string, request: {
@@ -252,6 +304,8 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -259,6 +313,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -270,6 +326,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -295,6 +353,8 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -302,6 +362,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -313,6 +375,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -342,6 +406,8 @@ export class ApiClient {
       peersTried: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      denied: boolean;
+      deniedPeers: number;
       diagnostics?: {
         noProtocolPeers: number;
         durable: {
@@ -349,6 +415,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
@@ -360,6 +428,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;
@@ -379,6 +449,7 @@ export class ApiClient {
     private?: boolean;
     accessPolicy?: number;
     allowedAgents?: string[];
+    participantAgents?: string[];
     participantIdentityIds?: Array<string | number | bigint>;
     requiredSignatures?: number;
   }, allowedPeers?: string[]): Promise<{
@@ -392,6 +463,7 @@ export class ApiClient {
       ...(allowedPeers?.length ? { allowedPeers } : {}),
       ...(options?.accessPolicy != null ? { accessPolicy: options.accessPolicy } : {}),
       ...(options?.allowedAgents?.length ? { allowedAgents: options.allowedAgents } : {}),
+      ...(options?.participantAgents?.length ? { participantAgents: options.participantAgents } : {}),
       ...(options?.private ? { private: true } : {}),
       ...(options?.participantIdentityIds?.length
         ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
@@ -400,12 +472,19 @@ export class ApiClient {
     });
   }
 
-  async registerContextGraph(id: string, opts?: { revealOnChain?: boolean; accessPolicy?: number }): Promise<{
+  async registerContextGraph(id: string, opts?: {
+    /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
+    revealOnChain?: boolean;
+    accessPolicy?: number;
+  }): Promise<{
     registered: string;
     onChainId: string;
     hint?: string;
   }> {
-    return this.post('/api/context-graph/register', { id, ...opts });
+    return this.post('/api/context-graph/register', {
+      id,
+      ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
+    });
   }
 
   /** @deprecated Use addAgent instead. */
@@ -552,7 +631,13 @@ export class ApiClient {
   async endorse(request: {
     contextGraphId: string;
     ual: string;
-    agentAddress: string;
+    /**
+     * Optional. If supplied it MUST match the address resolved from
+     * the bearer token; the daemon rejects any mismatch with 403.
+     * Prefer omitting and relying on the token — see A-12 review on
+     * /api/endorse for the provenance-forgery rationale.
+     */
+    agentAddress?: string;
   }): Promise<{ endorsed: boolean; endorserAddress: string }> {
     return this.post('/api/endorse', request);
   }
@@ -820,6 +905,10 @@ export class ApiClient {
   }
 }
 
+// NOTE: mirrored in `packages/adapter-openclaw/src/DkgNodePlugin.ts`
+// (`UPLOAD_CONTENT_TYPES` there). `adapter-openclaw` can't import this
+// directly (circular workspace dep), so update both tables together when
+// adding a new format until a shared upload module lives in `dkg-core`.
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.md': 'text/markdown',

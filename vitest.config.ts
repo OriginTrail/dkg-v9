@@ -10,6 +10,7 @@ export default defineConfig({
       'packages/publisher',
       'packages/agent',
       'packages/cli',
+      'packages/mcp-dkg',
       'packages/mcp-server',
       'packages/node-ui',
       'packages/network-sim',
@@ -20,7 +21,6 @@ export default defineConfig({
       'packages/adapter-elizaos',
       'packages/adapter-hermes',
       'packages/adapter-autoresearch',
-      'packages/origin-trail-game',
     ],
   },
 });

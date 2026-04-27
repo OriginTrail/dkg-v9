@@ -1328,7 +1328,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('does call channelPlugin.start() in bridge mode (fallback when gateway routes unavailable)', async () => {
+  it('channelPlugin.start() is called from DkgNodePlugin in bridge mode (fallback when gateway routes unavailable)', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => ({
       ok: true,
@@ -1358,11 +1358,12 @@ describe('DkgNodePlugin', () => {
       const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // The outer DkgNodePlugin.ts:602 call site fires once on the async
-      // connectLocalAgentIntegration → start() chain. F-A's call inside
-      // DkgChannelPlugin.register fired BEFORE the spy was installed and is
-      // therefore not counted here — that's the correct semantic for F-B's
-      // assertion.
+      // The outer DkgNodePlugin call site fires channelPlugin.start() once on
+      // the async connectLocalAgentIntegration → start() chain. The earlier
+      // call from inside DkgChannelPlugin.register() (which always fires
+      // post-pivot — start() owns the port-conflict fallback) ran BEFORE the
+      // spy was installed, so it does not appear in this count. This test
+      // asserts the DkgNodePlugin-side call site, not the in-channel one.
       expect(startSpy).toHaveBeenCalledTimes(1);
     } finally {
       await plugin?.stop();

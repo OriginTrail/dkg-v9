@@ -350,6 +350,54 @@ describe('DkgChannelPlugin', () => {
         await new Promise<void>((resolve) => blocker.close(() => resolve()));
       }
     });
+
+    // Symmetric to the env-A fallback test: when the configured port is FREE,
+    // start() must bind it directly with no fallback. Locks the env-B path
+    // (user environments where 9201 isn't held by anything) — without this,
+    // the suite proves env-A works but only infers env-B does.
+    it('binds the configured port directly when no conflict (no fallback)', async () => {
+      // Probe a free port: bind a temporary listener on port 0, capture the
+      // OS-assigned port, close the listener, then ask the plugin to use that
+      // port. There's a tiny TOCTOU window where another process could grab
+      // the port between close() and our plugin's listen(); on a CI/dev box
+      // this is negligible. If it ever flakes, the assertion below will catch
+      // it (bridgePort would not equal probedPort).
+      const probe = createServer(() => {});
+      const probedPort = await new Promise<number>((resolve, reject) => {
+        probe.once('error', reject);
+        probe.listen(0, '127.0.0.1', () => {
+          const addr = probe.address();
+          const port = typeof addr === 'object' && addr ? addr.port : 0;
+          probe.close((err) => {
+            if (err) reject(err);
+            else resolve(port);
+          });
+        });
+      });
+      expect(probedPort).toBeGreaterThan(0);
+
+      const directClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
+      const directPlugin = new DkgChannelPlugin({ enabled: true, port: probedPort }, directClient);
+      const infoCalls: unknown[][] = [];
+      // Attach a logger via register() — register() consumes api.logger; we
+      // don't need the full register flow here, only the start() path. Patch
+      // the plugin's logger access directly via api stub so start() emits
+      // any fallback log into our capture array.
+      const api = makeApi({ logger: { info: (...args: unknown[]) => infoCalls.push(args) } });
+      directPlugin.register(api);
+      // register() lazily kicks off start() in the post-pivot code; await
+      // it explicitly so we catch any port-binding outcome before asserting.
+      await directPlugin.start();
+
+      try {
+        expect(directPlugin.bridgePort).toBe(probedPort);
+        expect(
+          infoCalls.some((call) => String(call[0]).includes('falling back to an OS-allocated free port')),
+        ).toBe(false);
+      } finally {
+        await directPlugin.stop();
+      }
+    });
   });
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {

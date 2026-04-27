@@ -1378,8 +1378,10 @@ export async function runDaemonInner(
       const clientIp = req.socket.remoteAddress ?? 'unknown';
       if (!shouldBypassRateLimitForLoopbackTraffic(clientIp, reqUrl.pathname)
         && !rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
-        res.end(JSON.stringify({ error: 'Too many requests' }));
+        // Route through jsonResponse so the egress scrubber & sanitiser
+        // chain runs uniformly on every error response (PR #229 alert 47).
+        // 429 needs a Retry-After hint passed via the extraHeaders param.
+        jsonResponse(res, 429, { error: 'Too many requests' }, reqCorsOrigin, { 'Retry-After': '60' });
         return;
       }
 
@@ -1540,18 +1542,25 @@ export async function runDaemonInner(
         // into signed mode. Map to 401 with the same wire shape as the
         // pre-body signed-mode rejections in httpAuthGuard so clients see
         // a single consistent error surface.
+        //
+        // Route through jsonResponse so the egress scrubber & sanitiser
+        // run on this error path too (PR #229 alert 47). `err.reason` is
+        // an enum-like discriminant ('missing-fields' / 'bad-signature' /
+        // …) and never contains a stack trace, but routing every error
+        // sink through the central scrubber removes the
+        // local-bypass-of-the-sanitiser pattern that CodeQL flags.
         const status = err.reason === 'missing-fields' ? 400 : 401;
         const extraHeaders: Record<string, string> =
           status === 401
-            ? {
-                'WWW-Authenticate': 'Bearer realm="dkg-node"',
-              }
+            ? { 'WWW-Authenticate': 'Bearer realm="dkg-node"' }
             : {};
-        res.writeHead(status, {
-          'Content-Type': 'application/json',
-          ...extraHeaders,
-        });
-        res.end(JSON.stringify({ error: `Signed request rejected: ${err.reason}` }));
+        jsonResponse(
+          res,
+          status,
+          { error: `Signed request rejected: ${err.reason}` },
+          undefined,
+          extraHeaders,
+        );
       } else if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
       } else if (err instanceof SyntaxError) {

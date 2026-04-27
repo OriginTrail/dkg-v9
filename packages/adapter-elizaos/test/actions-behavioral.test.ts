@@ -654,14 +654,19 @@ describe('persistChatTurnImpl — rdfString escaping + dateTime literal', () => 
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
     const ts = publishes[0].quads.find((q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:msg:'))!;
-    // PR #229 CodeQL js/incomplete-hostname-regexp: the previous form
-    //   new RegExp(`\\^\\^<${XSD_DATETIME}>$`)
-    // interpolated the literal URL `http://www.w3.org/...` straight into a
-    // regex without escaping the `.` chars, so the pattern matched
-    // "wXwXorg" / "wAwAorg" / etc. The intent is a literal tail-match —
-    // build the regex from the escaped URL string.
-    const escaped = XSD_DATETIME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    expect(ts.object).toMatch(new RegExp(`\\^\\^<${escaped}>$`));
+    // PR #229 CodeQL js/incomplete-hostname-regexp (alert 54): the
+    // previous form `new RegExp(\`\\^\\^<${XSD_DATETIME}>$\`)`
+    // interpolated the literal URL `http://www.w3.org/...` straight
+    // into a regex without escaping the `.` chars, so the pattern would
+    // also match `wXwXorg` / `wAwAorg` / etc. The intent is a literal
+    // tail-match. CodeQL is a heuristic check that flags any URL-like
+    // string flowing into a regex sink, regardless of intermediate
+    // escaping (the heuristic doesn't model the escape function as a
+    // full sanitiser). Switch to plain `String.endsWith`, which has no
+    // regex semantics at all and fully closes the alert while making
+    // the test contract clearer at the same time.
+    expect(typeof ts.object).toBe('string');
+    expect((ts.object as string).endsWith(`^^<${XSD_DATETIME}>`)).toBe(true);
   });
 });
 

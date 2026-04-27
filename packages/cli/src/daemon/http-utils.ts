@@ -276,6 +276,7 @@ export function jsonResponse(
   status: number,
   data: unknown,
   corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
 ): void {
   const origin =
     corsOrigin !== undefined
@@ -301,6 +302,7 @@ export function jsonResponse(
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
+    ...(extraHeaders ?? {}),
   });
   res.end(body);
 }

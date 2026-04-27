@@ -50,7 +50,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let peersTried = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
-  let denied = false;
+  let deniedPeers = 0;
   let noProtocolPeers = 0;
 
   const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
@@ -81,17 +81,73 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     },
   };
 
-  for (const peerId of prepared.peerIds) {
-    const hasSync = await invoke<boolean>('waitForSyncProtocol', peerId);
+  // Run per-peer syncs in parallel. The sequential version here used to
+  // walk the peer set one at a time, which meant a curated-CG denial
+  // from a 10-peer pool took 10 × (syncDurable timeout + syncSharedMemory
+  // timeout) to report back — often minutes. The agent-side
+  // `syncContextGraphFromConnectedPeers` (InlineCatchupRunner) already
+  // uses `Promise.all`, but the daemon subscribe path goes through this
+  // Worker implementation, so Codex N18 pointed out the parallel fix
+  // never reached `/api/context-graph/subscribe`. Mirror the inline path
+  // here so both runners have the same latency characteristics.
+  const checked = await Promise.all(
+    prepared.peerIds.map(async (peerId) => ({
+      peerId,
+      hasSync: await invoke<boolean>('waitForSyncProtocol', peerId),
+    })),
+  );
+  const syncCapable: string[] = [];
+  for (const { peerId, hasSync } of checked) {
     if (!hasSync) {
       noProtocolPeers += 1;
       continue;
     }
+    syncCapable.push(peerId);
+  }
+  syncCapablePeers = syncCapable.length;
+  peersTried = syncCapable.length;
 
-    syncCapablePeers += 1;
-    peersTried += 1;
-
-    const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId);
+  // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we can
+  // from the other peers instead of failing the entire subscribe/catch-up immediately.
+  const emptyDurable = () => ({
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 1,
+    deniedPhases: 0,
+  });
+  const emptyShared = () => ({
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers: 1,
+    deniedPhases: 0,
+  });
+  const perPeerResults = await Promise.all(
+    syncCapable.map(async (peerId) => {
+      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
+      const shared = request.includeSharedMemory
+        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
+        : null;
+      return { durable, shared };
+    }),
+  );
+  for (const { durable, shared } of perPeerResults) {
+    let peerDenied = false;
     dataSynced += durable.insertedTriples;
     diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
     diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
@@ -104,10 +160,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
-    denied = denied || durable.deniedPhases > 0;
+    peerDenied = peerDenied || durable.deniedPhases > 0;
 
-    if (request.includeSharedMemory) {
-      const shared = await invoke<any>('syncSharedMemory', peerId, request.contextGraphId);
+    if (shared) {
       sharedMemorySynced += shared.insertedTriples;
       diagnostics.sharedMemory.fetchedMetaTriples += shared.fetchedMetaTriples;
       diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
@@ -118,12 +173,23 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
-      denied = denied || shared.deniedPhases > 0;
+      peerDenied = peerDenied || shared.deniedPhases > 0;
+    }
+
+    if (peerDenied) {
+      deniedPeers += 1;
     }
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;
   await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
+
+  const servedByPeer =
+    dataSynced > 0 ||
+    sharedMemorySynced > 0 ||
+    diagnostics.durable.insertedMetaTriples > 0 ||
+    diagnostics.sharedMemory.insertedMetaTriples > 0 ||
+    diagnostics.durable.metaOnlyResponses > 0;
 
   return {
     connectedPeers: prepared.connectedPeers,
@@ -131,7 +197,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried,
     dataSynced,
     sharedMemorySynced,
-    denied,
+    denied: deniedPeers > 0 && !servedByPeer,
+    deniedPeers,
     diagnostics,
   };
 }

@@ -1,11 +1,34 @@
 {
   "version": 1,
+  "_comment": "Two purposes: (1) agent-scope hooks enforce task-scoped writes (sessionStart/preToolUse/postToolUse/beforeShellExecution/afterShellExecution/stop). (2) DKG chat-capture hooks (sessionStart/sessionEnd/beforeSubmitPrompt/afterAgentResponse via packages/mcp-dkg/hooks/capture-chat.mjs) auto-promote each conversation turn to the chat sub-graph of the project pinned in .dkg/config.yaml. See agent-scope/README.md and packages/mcp-dkg/README.md.",
   "hooks": {
     "sessionStart": [
       {
         "command": ".cursor/hooks/session-start.mjs",
         "failClosed": false,
         "timeout": 5
+      },
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionStart",
+        "failClosed": false
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionEnd",
+        "failClosed": false
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt",
+        "failClosed": false
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse",
+        "failClosed": false
       }
     ],
     "preToolUse": [

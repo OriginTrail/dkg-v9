@@ -48,7 +48,6 @@ const DRY_RUN = args['dry-run'] === 'true';
 const OUT_FILE = args.out ?? null;
 
 const EXCLUDED_PACKAGES = new Set([
-  'origin-trail-game',
   'multi-agent-coding',
   'app-autoresearch',
 ]);
@@ -304,20 +303,20 @@ if (DRY_RUN) {
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
 
-await client.ensureProject({
+const { cgId } = await client.ensureProject({
   id: PROJECT_ID,
   name: PROJECT_NAME,
   description: PROJECT_DESC,
 });
-await client.ensureSubGraph(PROJECT_ID, SUBGRAPH);
+await client.ensureSubGraph(cgId, SUBGRAPH);
 
 await client.writeAssertion(
   {
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_NAME,
     subGraphName: SUBGRAPH,
     triples: sink.triples,
   },
   { label: 'code' },
 );
-console.log(`[code-graph] Done. Imported ${sink.size()} triples into ${PROJECT_ID}/${SUBGRAPH}/${ASSERTION_NAME}.`);
+console.log(`[code-graph] Done. Imported ${sink.size()} triples into ${cgId}/${SUBGRAPH}/${ASSERTION_NAME}.`);

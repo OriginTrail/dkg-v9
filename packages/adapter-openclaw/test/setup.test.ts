@@ -3,6 +3,24 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+
+// Mock the core module at the module boundary so every `runSetup` invocation
+// in this suite gets a controllable `requestFaucetFunding` spy. `vi.mock` is
+// hoisted by vitest, so the mock intercepts `setup.ts`'s top-level import
+// regardless of where this line appears. Other `@origintrail-official/dkg-core`
+// exports are passed through unchanged via `importActual` so existing tests
+// that rely on core semantics (transitive imports) stay intact.
+vi.mock('@origintrail-official/dkg-core', async () => {
+  const actual = await vi.importActual<typeof import('@origintrail-official/dkg-core')>(
+    '@origintrail-official/dkg-core',
+  );
+  return {
+    ...actual,
+    requestFaucetFunding: vi.fn(async () => ({ success: true, funded: ['0.01 ETH', '1000 TRAC'] })),
+  };
+});
+import { requestFaucetFunding } from '@origintrail-official/dkg-core';
+
 import {
   discoverWorkspace,
   discoverAgentName,
@@ -15,6 +33,10 @@ import {
   removeCanonicalNodeSkill,
   resolveWorkspaceDirFromConfig,
   openclawConfigPath,
+  loadNetworkConfig,
+  readWallets,
+  readWalletsWithRetry,
+  logManualFundingInstructions,
   runSetup,
   type AdapterEntryConfig,
 } from '../src/setup.js';
@@ -62,6 +84,24 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('discoverAgentName', () => {
+  // Point DKG_HOME at a fresh tmp dir per test so the persisted-name
+  // branch (C8) sees no ~/.dkg/config.json unless the test explicitly
+  // seeds one. Otherwise, a dev-machine `~/.dkg/config.json.name`
+  // would leak into these tests and break the fallback assertions.
+  let originalDkg: string | undefined;
+  let dkgHome: string;
+
+  beforeEach(() => {
+    originalDkg = process.env.DKG_HOME;
+    dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    process.env.DKG_HOME = dkgHome;
+  });
+
+  afterEach(() => {
+    process.env.DKG_HOME = originalDkg;
+  });
+
   it('returns override when provided', () => {
     expect(discoverAgentName('/nonexistent', 'my-agent')).toBe('my-agent');
   });
@@ -80,18 +120,83 @@ describe('discoverAgentName', () => {
     expect(discoverAgentName(ws)).toBe('Bob');
   });
 
-  it('falls back to generated name when IDENTITY.md has no Name field', () => {
+  it('falls back to generated name when IDENTITY.md has no Name field and no persisted config', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
     expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 
-  it('falls back to generated name when IDENTITY.md is missing', () => {
+  it('falls back to generated name when IDENTITY.md is missing and no persisted config', () => {
     const ws = join(testDir, 'my-workspace');
     mkdirSync(ws, { recursive: true });
     const name = discoverAgentName(ws);
     expect(name).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  // C8: persisted name stability. On re-runs where IDENTITY.md is absent
+  // (or has no Name: field), the faucet Idempotency-Key must stay stable
+  // across invocations to avoid duplicate requests. Honoring
+  // `~/.dkg/config.json.name` (written by a prior setup run via
+  // writeDkgConfig's first-wins semantics) achieves this without
+  // introducing a new source of truth.
+  it('returns the persisted name from ~/.dkg/config.json when IDENTITY.md is missing', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('returns the persisted name when IDENTITY.md has no Name: field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('prefers IDENTITY.md over persisted name when both are present', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('Alice');
+  });
+
+  it('prefers the override arg over both IDENTITY.md and persisted name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws, 'override-agent')).toBe('override-agent');
+  });
+
+  it('falls through to random when persisted config.json exists but lacks a name field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ apiPort: 9200 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json is unparseable', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), '{not-json');
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has a non-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 42 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has an empty-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: '   ' }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 });
 
@@ -524,6 +629,284 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.daemonUrl).toBe('http://127.0.0.1:9400');
   });
+
+  // PR A — tools.profile patch. Ensures plugin-registered `dkg_*` tools are
+  // visible to the agent by upgrading the common default `"coding"` profile
+  // (whose allowlist filters out plugin tools) to `"full"`, while respecting
+  // explicit restrictive profiles ("minimal", "messaging").
+  it('tools.profile: upgrades "coding" → "full"', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('full');
+  });
+
+  it('tools.profile: respects explicit "minimal" (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'minimal' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('minimal');
+  });
+
+  it('tools.profile: respects explicit "messaging" (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'messaging' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('messaging');
+  });
+
+  it('tools.profile: sets "full" when absent', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('full');
+  });
+
+  // PR A — channels.dkg-ui patch. Without at least one non-`enabled` key on
+  // the channel entry, OpenClaw's loader demotes the plugin to setup-runtime
+  // mode where `api.registerTool` is a noop. A port pin is the cheapest
+  // non-`enabled` key that satisfies `hasMeaningfulChannelConfigShallow`.
+  it('channels.dkg-ui: creates { enabled: true, port: 9201 } when missing', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+  });
+
+  it('channels.dkg-ui: adds port to degenerate { enabled: true }', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+  });
+
+  it('channels.dkg-ui: preserves existing user port (no change)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true, port: 9300 } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
+
+  it('is idempotent on tools.profile + channels.dkg-ui — byte-identical output on second run', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackupCount).toBe(firstBackupCount);
+  });
+
+  // PR #250 review comment 2 — keep top-level channels.dkg-ui.port in sync with
+  // the adapter entry's own config.channel.port so the plugin doesn't end up
+  // looking at two different ports in two different places.
+  it('channels.dkg-ui.port: derives from entryConfig.channel.port when provided', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9300 },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
+
+  // PR #250 review comment 6 — on re-runs, the adapter entry's existing port
+  // wins (first-wins) over the incoming default. The top-level channel must
+  // match the preserved entry port, not the incoming fallback 9201.
+  it('channels.dkg-ui.port: uses preserved entry.config.channel.port on re-merge even when incoming entryConfig has no port', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              daemonUrl: 'http://127.0.0.1:9200',
+              memory: { enabled: true },
+              channel: { enabled: true, port: 9300 },
+            },
+          },
+        },
+      },
+    }));
+
+    // Incoming entryConfig has no port — first-wins preserves the existing 9300
+    // on the adapter entry, and the top-level channel should inherit it.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
+
+  // PR #250 review comment 7 — after a first merge, the channel is strictly
+  // adapter-owned (byte-identical to mergedChannelsDkgUi). A re-run with a
+  // different port must refresh the top-level channel, not leave the stale
+  // port in place. The strict user-edit guard from comment 3 shouldn't
+  // prevent adapter-owned refresh.
+  it('re-merge refreshes channels.dkg-ui.port when the channel still matches last merge output', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // First merge with default entryConfig → creates { enabled: true, port: 9201 }.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate the user (or a later setup run) updating the adapter entry's
+    // channel port to 9300 directly on the entry config.
+    afterFirst.plugins.entries['adapter-openclaw'].config.channel.port = 9300;
+    writeFileSync(configPath, JSON.stringify(afterFirst, null, 2) + '\n');
+
+    // Re-merge with default entryConfig (no port) — first-wins preserves 9300
+    // on the entry, and the adapter-owned channel should refresh to match.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
+    expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+    // mergedChannelsDkgUi tracks the latest adapter output.
+    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+  });
+
+  it('re-merge idempotency: unchanged adapter-owned channel produces byte-identical JSON', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    // Re-run with identical state — the refresh branch must be a no-op.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackups).toBe(firstBackups);
+  });
+
+  // PR #250 review comment 9 — `mergedChannelsDkgUi` must refresh on EVERY
+  // channel write, not just the first-wins capture path. Re-creation or
+  // re-upgrade at a different port on a subsequent merge needs the snapshot
+  // to follow, otherwise unmerge's deep-equal ownership check fails and the
+  // adapter-owned channel is left behind on disconnect.
+  it('re-create after user deletion: mergedChannelsDkgUi tracks the NEW port, previousChannelsDkgUi stays first-wins', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // First merge at port 9201.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9201 },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toBeNull();
+    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate user deleting channels.dkg-ui. Also reset entry port so
+    // post-merge resolution picks 9300.
+    delete afterFirst.channels['dkg-ui'];
+    afterFirst.plugins.entries['adapter-openclaw'].config.channel.port = 9300;
+    writeFileSync(configPath, JSON.stringify(afterFirst, null, 2) + '\n');
+
+    // Re-merge: must re-create at 9300 and refresh mergedChannelsDkgUi.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+    // `previousChannelsDkgUi` stays first-wins (original absent → `null`).
+    expect(afterSecond.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toBeNull();
+    // `mergedChannelsDkgUi` tracks the LATEST output (9300, not stale 9201).
+    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+  });
+
+  it('re-upgrade degenerate channel: mergedChannelsDkgUi tracks the NEW port, previousChannelsDkgUi stays first-wins', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: degenerate channel so the first merge captures
+    // previousChannelsDkgUi = { enabled: true } (first-wins).
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9201 },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toEqual({ enabled: true });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate user stripping channel back to degenerate + bumping entry port.
+    afterFirst.channels['dkg-ui'] = { enabled: true };
+    afterFirst.plugins.entries['adapter-openclaw'].config.channel.port = 9300;
+    writeFileSync(configPath, JSON.stringify(afterFirst, null, 2) + '\n');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+    // first-wins preserves the original degenerate shape.
+    expect(afterSecond.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toEqual({ enabled: true });
+    // Latest-output snapshot follows the new port.
+    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -752,6 +1135,351 @@ describe('unmergeOpenClawConfig', () => {
     const result = unmergeOpenClawConfig(configPath);
 
     expect(result.previousMemorySlotOwner).toBeUndefined();
+  });
+
+  // PR #250 review comment 1 — round-trip restoration of tools.profile +
+  // channels.dkg-ui. Without these, a connect→disconnect cycle would leave
+  // openclaw.json permanently widened.
+  it('round-trip: absent tools.profile + absent channels.dkg-ui → merge → unmerge restores absent', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: both keys are now present.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: both keys are gone, and the channels container is also
+    // removed (not left as `channels: {}`) so the round-trip returns the
+    // config to its pre-merge shape.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools?.profile).toBeUndefined();
+    expect(afterUnmerge.channels).toBeUndefined();
+  });
+
+  it('round-trip: pre-existing sibling channel preserved when channels.dkg-ui is removed on unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { telegram: { enabled: true, botToken: 'abc' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: telegram still present, dkg-ui added.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels.telegram).toEqual({ enabled: true, botToken: 'abc' });
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: dkg-ui gone, telegram preserved, channels container retained.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels?.['dkg-ui']).toBeUndefined();
+    expect(afterUnmerge.channels?.telegram).toEqual({ enabled: true, botToken: 'abc' });
+  });
+
+  it('merge: respects user-disabled channel on adapter entry (does not silently re-enable)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // User has explicitly disabled the channel on the adapter entry.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: { channel: { enabled: false, port: 9201 } },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // Entry-level enabled=false is preserved by first-wins merge.
+    expect(afterMerge.plugins.entries['adapter-openclaw'].config.channel.enabled).toBe(false);
+    // Top-level channels.dkg-ui MUST honor the user's disable — we only add the
+    // `port` key here so OpenClaw's meaningful-config check still fires.
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: false, port: 9201 });
+  });
+
+  it('round-trip: "coding" profile + degenerate { enabled: true } channel → merge → unmerge restores prior values', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: profile upgraded, channel port added.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: both restored to pre-merge shape.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('coding');
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true });
+  });
+
+  it('round-trip: explicit "minimal" profile preserved through merge + unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'minimal' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // Merge leaves "minimal" alone — no capture, no mutation.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('minimal');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Unmerge still leaves "minimal" alone — nothing to restore, we never captured.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('minimal');
+  });
+
+  it('round-trip: user-customized channels.dkg-ui (non-enabled key) preserved through merge + unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true, port: 9999, customField: 'user-owned' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // Merge leaves the user channel alone — no capture, no mutation.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9999, customField: 'user-owned' });
+
+    unmergeOpenClawConfig(configPath);
+
+    // Unmerge still leaves it alone.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9999, customField: 'user-owned' });
+  });
+
+  // PR #250 review comment 3 — post-merge user edits must be preserved by
+  // unmerge. The ownership check is strict deep-equal against the exact shape
+  // merge wrote; any divergence means the user now owns the channel.
+  it('round-trip: user adds field to merge-created channel → unmerge preserves user edit', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: no channels.dkg-ui at all.
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate the user adding an auth block after merge.
+    const userEdited = {
+      ...afterMerge,
+      channels: {
+        ...afterMerge.channels,
+        'dkg-ui': { ...afterMerge.channels['dkg-ui'], auth: { token: 'xyz' } },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // User's edit survives — disconnect saw that the channel no longer matches
+    // what merge wrote, so it left the channel entirely alone.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({
+      enabled: true,
+      port: 9201,
+      auth: { token: 'xyz' },
+    });
+  });
+
+  it('round-trip: user changes port on merge-created channel → unmerge preserves user port', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // User changes the port.
+    const userEdited = {
+      ...afterMerge,
+      channels: { ...afterMerge.channels, 'dkg-ui': { enabled: true, port: 9500 } },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Port 9500 survives — it's not the shape merge wrote.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9500 });
+  });
+
+  it('round-trip: user edits degenerate-upgraded channel → unmerge preserves user edit', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: degenerate channel that merge upgrades by adding a port.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // User edits post-merge — changes port and adds a field.
+    const userEdited = {
+      ...afterMerge,
+      channels: {
+        ...afterMerge.channels,
+        'dkg-ui': { enabled: true, port: 9500, foo: 'bar' },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // The user's shape survives — disconnect did NOT restore the original
+    // `{ enabled: true }` because the current channel diverges from the merge
+    // output.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9500, foo: 'bar' });
+  });
+
+  // PR #250 review comment 8 — mergedToolsShape snapshot gates tools.profile
+  // revert on the full `tools` section being untouched. User edits anywhere
+  // under `tools` mean the whole section is user-owned; we leave it alone.
+  it('round-trip: user adds unrelated tools field post-merge → unmerge preserves profile', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+
+    // Simulate user adding an unrelated tools field — profile stays "full".
+    const userEdited = {
+      ...afterMerge,
+      tools: { ...afterMerge.tools, web: { enabled: false } },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Profile stays "full" — the tools section diverges from mergedToolsShape
+    // (it has a new `web` field), so we treat the whole section as user-owned.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('full');
+    expect(afterUnmerge.tools.web).toEqual({ enabled: false });
+  });
+
+  it('round-trip: unchanged tools section → unmerge reverts "coding" profile', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+
+    // No post-merge edits — tools matches mergedToolsShape → revert runs.
+    unmergeOpenClawConfig(configPath);
+
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('coding');
+  });
+
+  // PR #250 review comment 10 — mergedToolsShape must refresh ONLY when this
+  // merge pass actually mutated `config.tools`. Otherwise a re-merge that
+  // respects a later user choice (e.g. profile changed to "minimal") would
+  // overwrite the snapshot with the user's current shape, causing unmerge's
+  // deep-equal to match and silently revert `previousToolsProfile`.
+  it('re-merge after user switches to "minimal": mergedToolsShape stays at prior output, unmerge preserves "minimal"', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+    }));
+
+    // First merge: upgrades "coding" → "full" and captures mergedToolsShape.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.tools.profile).toBe('full');
+    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedToolsShape)
+      .toEqual({ alsoAllow: ['group:plugins'], profile: 'full' });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].previousToolsProfile).toBe('coding');
+
+    // User switches to "minimal" and adds a post-merge field.
+    afterFirst.tools = { profile: 'minimal', alsoAllow: ['group:plugins'], web: { enabled: false } };
+    writeFileSync(configPath, JSON.stringify(afterFirst, null, 2) + '\n');
+
+    // Re-merge: "minimal" is respected (no profile mutation), alsoAllow already
+    // present (no push). mutatedTools stays false, so the snapshot is NOT
+    // overwritten with the current user shape.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.tools.profile).toBe('minimal');
+    // Snapshot still reflects the FIRST merge's output, not the user's current shape.
+    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedToolsShape)
+      .toEqual({ alsoAllow: ['group:plugins'], profile: 'full' });
+
+    // Unmerge: current tools (`minimal`, with `web` field) ≠ snapshot (`full`)
+    // → deep-equal fails → profile revert is skipped → user's "minimal" survives.
+    unmergeOpenClawConfig(configPath);
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('minimal');
+    expect(afterUnmerge.tools.web).toEqual({ enabled: false });
+  });
+
+  it('first-merge no-op on settled tools: mergedToolsShape is NOT captured when nothing was mutated', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Config already has profile: "full" and alsoAllow includes "group:plugins".
+    // Merge has nothing to do under `config.tools` — should not capture a snapshot.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'full', alsoAllow: ['group:plugins'] },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.tools.profile).toBe('full');
+    // No mutation ⇒ no capture. previousToolsProfile also stays absent.
+    expect(config.plugins.entries['adapter-openclaw'].mergedToolsShape).toBeUndefined();
+    expect('previousToolsProfile' in config.plugins.entries['adapter-openclaw']).toBe(false);
+  });
+
+  it('re-merge idempotency on settled tools: snapshot once captured, not re-written on no-op re-merge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // First merge creates the settled state + captures the snapshot.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    // Second merge: tools is already settled — no mutation should occur.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    // Byte-identical output proves mergedToolsShape wasn't re-written with a
+    // (possibly differently-ordered) new structuredClone.
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackups).toBe(firstBackups);
   });
 });
 
@@ -2036,4 +2764,597 @@ describe('runSetup openclaw.json preflight (R6-2 + R8-2)', () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Preflight runs BEFORE daemon + faucet (C10 extraction)
+//
+// With the preflight moved to new Step 4 (between writeDkgConfig and
+// startDaemon), deterministic openclaw.json misconfigurations must throw
+// BEFORE the faucet gets called. This matters because faucet calls count
+// against the 3-calls-per-8h IP-level rate limit regardless of outcome
+// — so a user with a broken openclaw.json shouldn't burn a slot on a
+// setup that was always going to fail at merge.
+// ---------------------------------------------------------------------------
+
+describe('runSetup preflight runs before faucet (C10)', () => {
+  beforeEach(() => {
+    vi.mocked(requestFaucetFunding).mockReset();
+    vi.mocked(requestFaucetFunding).mockResolvedValue({
+      success: true,
+      funded: ['0.01 ETH', '1000 TRAC'],
+    });
+  });
+
+  it('does NOT call the faucet when openclaw.json is missing', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    // Pre-seed wallets.json so Step 6 would succeed if it ever ran.
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    // Intentionally no openclaw.json — preflight must throw before faucet.
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/openclaw\.json not found/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when openclaw.json is invalid JSON', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(join(openclawHome, 'openclaw.json'), '{ not valid json ,,,\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/not valid JSON/i);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when plugins.slots.contextEngine is wrong-slot-wired (R8-2)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: {},
+          slots: { contextEngine: 'adapter-openclaw' }, // misconfigured
+        },
+      }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/plugins\.slots\.contextEngine/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readWalletsWithRetry — retry accounting (C4a extraction)
+// ---------------------------------------------------------------------------
+
+describe('readWalletsWithRetry', () => {
+  it('exhausts exactly 5 retries when wallets never appear (6 reads, 5 sleeps)', async () => {
+    const readFn = vi.fn(() => [] as string[]);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual([]);
+    // 1 initial attempt + 5 retries = 6 reads. Locks the off-by-one bound.
+    expect(readFn).toHaveBeenCalledTimes(6);
+    expect(sleepFn).toHaveBeenCalledTimes(5);
+    // Each sleep is a 1s delay. Locks the intended wait semantics.
+    for (const call of sleepFn.mock.calls) {
+      expect(call[0]).toBe(1_000);
+    }
+  });
+
+  it('short-circuits when wallets appear on the 3rd attempt (3 reads, 2 sleeps)', async () => {
+    // Missing on attempts 1–2, present on attempt 3.
+    const readFn = vi.fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValue(['0xAAAA0000000000000000000000000000000000AA']);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual(['0xAAAA0000000000000000000000000000000000AA']);
+    expect(readFn).toHaveBeenCalledTimes(3);
+    expect(sleepFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns immediately without sleeping when wallets are available on first read', async () => {
+    const readFn = vi.fn(() => ['0xBBBB0000000000000000000000000000000000BB']);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual(['0xBBBB0000000000000000000000000000000000BB']);
+    expect(readFn).toHaveBeenCalledTimes(1);
+    expect(sleepFn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// logManualFundingInstructions — manual-curl fallback output
+// ---------------------------------------------------------------------------
+
+describe('logManualFundingInstructions', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('caps the curl body at the first 3 addresses matching the auto-path cap', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    // The curl body is built from JSON.stringify(fundable) — assert the
+    // cap by looking for the exact first-three array in the output and
+    // the absence of the 4th/5th addresses inside the curl line.
+    expect(logged).toContain(JSON.stringify(addrs.slice(0, 3)));
+    const curlLine = logSpy.mock.calls
+      .map(c => String(c[0]))
+      .find(line => line.includes('--data-raw'));
+    expect(curlLine).toBeDefined();
+    expect(curlLine).not.toContain(addrs[3]);
+    expect(curlLine).not.toContain(addrs[4]);
+  });
+
+  it('emits a follow-on note listing the omitted wallets when more than 3 are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toMatch(/faucet supports up to 3 wallets/i);
+    expect(logged).toContain('2 wallet');
+    expect(logged).toContain(addrs[3]);
+    expect(logged).toContain(addrs[4]);
+  });
+
+  it('does not emit the extras note when exactly 3 (or fewer) addresses are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toContain('To fund wallets manually');
+    expect(logged).not.toMatch(/up to 3 wallets per call/i);
+    expect(logged).not.toMatch(/remaining/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup Step 5 — faucet funding
+//
+// All tests in this block use `start: false, verify: false` to skip the
+// daemon-start and verify steps (which would spawn a real `dkg start`
+// subprocess). The faucet path still runs because `options.fund !== false`
+// defaults `true`. Wallets are pre-seeded in DKG_HOME so the retry loop is
+// not exercised here — retry accounting is covered by the
+// `readWalletsWithRetry` suite above.
+// ---------------------------------------------------------------------------
+
+describe('runSetup Step 5 — faucet funding', () => {
+  const SEEDED_WALLET = '0xAAAA0000000000000000000000000000000000AA';
+
+  function setupFaucetEnv() {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+    // Pre-seed wallets.json so readWallets() returns a wallet on the first
+    // attempt (bypasses the retry loop — that behavior is covered by the
+    // readWalletsWithRetry suite above).
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: SEEDED_WALLET, privateKey: '0xdeadbeef' }] }),
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    return {
+      dkgHome,
+      openclawHome,
+      workspace,
+      restore: () => {
+        process.env.DKG_HOME = originalDkg;
+        process.env.OPENCLAW_HOME = originalOpenclaw;
+      },
+    };
+  }
+
+  beforeEach(() => {
+    // Reset the mock between tests so assertions on call counts / args stay
+    // isolated. Default behavior restored each test so cases that don't care
+    // get a happy response.
+    vi.mocked(requestFaucetFunding).mockReset();
+    vi.mocked(requestFaucetFunding).mockResolvedValue({
+      success: true,
+      funded: ['0.01 ETH', '1000 TRAC'],
+    });
+  });
+
+  it('calls requestFaucetFunding with (url, mode, addresses, agentName) pulled from network.faucet.*', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Pre-seed an IDENTITY.md so the agentName argument is deterministic.
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\n- **Name**: test-agent\n');
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [url, mode, addresses, nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(url).toMatch(/^https?:\/\//);
+      expect(typeof mode).toBe('string');
+      expect(mode.length).toBeGreaterThan(0);
+      expect(addresses).toEqual([SEEDED_WALLET]);
+      expect(nodeName).toBe('test-agent');
+
+      // AC3 invariant (plugins.slots.memory === 'adapter-openclaw') must still
+      // assert AFTER the faucet step. This confirms the faucet step did not
+      // short-circuit Step 7 (merge).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('skips the faucet call when options.fund === false (--no-fund) and still lands the merge', async () => {
+    const env = setupFaucetEnv();
+    try {
+      await runSetup({ workspace: env.workspace, start: false, verify: false, fund: false });
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      // AC3 still holds — --no-fund does not block the rest of the pipeline.
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('skips the faucet call under dryRun:true (no faucet request made, no merge written)', async () => {
+    const env = setupFaucetEnv();
+    try {
+      await runSetup({ workspace: env.workspace, start: false, verify: false, dryRun: true });
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      // Dry-run does not merge either — openclaw.json remains unchanged
+      // (still the empty `plugins: {}` seeded in setupFaucetEnv).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins?.slots).toBeUndefined();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally and logs manual curl instructions when requestFaucetFunding returns a 429 failure', async () => {
+    vi.mocked(requestFaucetFunding).mockResolvedValueOnce({
+      success: false,
+      funded: [],
+      error: 'HTTP 429: rate limited',
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      // Manual-curl block is logged (`console.log` with the literal "curl -X POST").
+      const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(logged).toContain('To fund wallets manually');
+      expect(logged).toContain('curl -X POST');
+
+      // AC3 invariant holds — failure did not block Step 7 (merge).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      logSpy.mockRestore();
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding returns a 5xx failure', async () => {
+    vi.mocked(requestFaucetFunding).mockResolvedValueOnce({
+      success: false,
+      funded: [],
+      error: 'HTTP 503: service unavailable',
+    });
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding throws a network error', async () => {
+    vi.mocked(requestFaucetFunding).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(logged).toContain('To fund wallets manually');
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      logSpy.mockRestore();
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding throws an AbortError (timeout path)', async () => {
+    // `requestFaucetFunding` in core wraps fetch with AbortSignal.timeout(30_000).
+    // A triggered timeout surfaces as a DOMException with name "TimeoutError"
+    // (or AbortError on some runtimes). Cover both.
+    const timeoutErr = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    vi.mocked(requestFaucetFunding).mockRejectedValueOnce(timeoutErr);
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('warns and skips faucet when no wallets are available (readWallets returns empty after retries)', async () => {
+    // Remove the pre-seeded wallets.json so readWallets returns [].
+    const env = setupFaucetEnv();
+    rmSync(join(env.dkgHome, 'wallets.json'));
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      // With `start: false`, the retry loop is intentionally skipped (no
+      // point retrying when we didn't start the daemon this run). We still
+      // assert that runSetup did NOT call the faucet and that Step 7 (merge)
+      // still ran — i.e., faucet step is truly non-fatal.
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  // ---- C9: effective-name drift protection -----------------------------
+  //
+  // The faucet's callerId and Idempotency-Key are derived from the
+  // `agentName` argument. `writeDkgConfig` uses first-wins semantics on
+  // `name` (existing value wins unless --name was passed), so on re-runs
+  // the name the node actually persists can differ from whatever
+  // `discoverAgentName` returned in-memory this run (specifically when
+  // IDENTITY.md has changed between runs). runSetup must thread the
+  // post-writeDkgConfig effective name through to the faucet so the
+  // caller identity matches what's persisted on disk.
+
+  it('faucet receives the persisted config.json name when IDENTITY.md changes between re-runs', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Simulate "run 1 already happened": pre-seed ~/.dkg/config.json
+      // with an older persisted name.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-run1' }),
+      );
+      // "Run 2" has a different IDENTITY.md name — writeDkgConfig's
+      // first-wins keeps the persisted name, so the faucet MUST use
+      // "persisted-run1", not "changed-run2".
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: changed-run2\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-run1');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('faucet receives the discovered IDENTITY.md name on first run (no pre-existing config.json)', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No pre-existing config.json — writeDkgConfig will persist the
+      // discovered IDENTITY.md name, and the faucet should receive it.
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: first-run-name\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('first-run-name');
+      // Sanity: writeDkgConfig actually persisted the first-run name.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('first-run-name');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('explicit options.name override wins over both persisted and discovered names', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Persisted name from a prior run AND a conflicting IDENTITY.md —
+      // --name should beat both.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'stale-persisted' }),
+      );
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: stale-identity\n');
+
+      await runSetup({
+        workspace: env.workspace,
+        start: false,
+        verify: false,
+        name: 'explicit-override',
+      });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('explicit-override');
+      // writeDkgConfig's `nameExplicit` override path must have flipped
+      // the persisted file to the explicit value too — otherwise the
+      // on-disk and in-memory identities would disagree after this run.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('explicit-override');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('C8 regression guard: persisted name still wins over random fallback when IDENTITY.md is absent', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No IDENTITY.md, but a persisted name exists. Pre-C8 behavior was
+      // to roll a new random `openclaw-agent-XXXXX` each call; C8 made
+      // discoverAgentName honor the persisted value; C9 must not have
+      // regressed that.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-no-identity' }),
+      );
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-no-identity');
+    } finally {
+      env.restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// testnet.json drift invariant (decision #7 — positive assertion form)
+// ---------------------------------------------------------------------------
+
+describe('testnet.json faucet block invariant', () => {
+  it('testnet.json exposes the fields requestFaucetFunding consumes, with v10_base_sepolia mode', () => {
+    // Load via the same resolver runSetup uses at Step 3 — prevents a
+    // "test reads a different file than the runtime" drift class. If
+    // loadNetworkConfig's resolution changes (path, env var, package
+    // layout), this test updates with it automatically.
+    const cfg = loadNetworkConfig();
+
+    // toMatchObject asserts the two fields requestFaucetFunding
+    // (packages/core/src/faucet.ts) actually consumes — deletion or
+    // rename of `mode` or `url` still fails the test — while leaving
+    // the network config free to grow forward-compatibly with
+    // additional fields.
+    expect(cfg.faucet).toMatchObject({
+      mode: 'v10_base_sepolia',
+      url: expect.stringMatching(/^https?:\/\//),
+    });
+  });
 });

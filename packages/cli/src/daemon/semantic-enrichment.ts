@@ -46,6 +46,7 @@ import {
 import {
   getLocalAgentIntegration,
   getStoredLocalAgentIntegrations,
+  isSafeBridgeTokenWakeUrl,
   isPlainRecord,
   normalizeIntegrationId,
 } from './local-agents.js';
@@ -98,6 +99,7 @@ export async function notifyLocalAgentIntegrationWake(
   }
   if (wakeAuth === 'bridge-token') {
     if (!bridgeAuthToken?.trim()) return { status: 'failed', reason: 'missing_bridge_token' };
+    if (!isSafeBridgeTokenWakeUrl(wakeUrl)) return { status: 'skipped', reason: 'wake_unavailable' };
     headers['x-dkg-bridge-token'] = bridgeAuthToken.trim();
   }
 

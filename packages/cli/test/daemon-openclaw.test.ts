@@ -40,6 +40,7 @@ import {
   normalizeExplicitLocalAgentDisconnectBody,
   readSemanticTripleCountForEvent,
   buildSemanticAppendQuads,
+  buildFileSemanticEventPayload,
   semanticWorkerDidFromLeaseOwner,
   resolveChatTurnsAssertionAgentAddress,
   shouldBypassRateLimitForLoopbackTraffic,
@@ -376,6 +377,35 @@ describe('local agent semantic wake helper', () => {
         }),
       }),
     );
+  });
+
+  it('does not send bridge-token wake requests to non-loopback URLs', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'https://example.com/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('skips gateway wake auth mode because the daemon has no OpenClaw gateway credentials', async () => {
@@ -1183,6 +1213,24 @@ describe('best-effort semantic enqueue helper', () => {
       status: 'completed',
       semanticTripleCount: 7,
     });
+  });
+
+  it('omits file-import rootEntity from semantic payloads when extraction did not produce one', () => {
+    const payload = buildFileSemanticEventPayload({
+      contextGraphId: 'project-1',
+      assertionName: 'roadmap',
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/peer/roadmap',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+      sourceAgentAddress: 'did:dkg:agent:0xabc',
+      rootEntity: undefined,
+      fileHash: 'sha256:file-1',
+      mdIntermediateHash: 'sha256:md-1',
+      detectedContentType: 'text/markdown',
+    });
+
+    expect(payload.assertionUri).toBe('did:dkg:context-graph:project-1/assertion/peer/roadmap');
+    expect(payload.rootEntity).toBeUndefined();
+    expect(payload).not.toHaveProperty('rootEntity');
   });
 
   it('refreshes active chat-turn payloads before reusing an existing semantic event', () => {
@@ -2723,6 +2771,26 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.healthUrl).toBe('http://127.0.0.1:9301/health');
     expect(integration.transport.wakeUrl).toBe('http://127.0.0.1:9301/semantic-enrichment/wake');
     expect(integration.transport.wakeAuth).toBe('bridge-token');
+  });
+
+  it('drops custom non-loopback bridge-token wake metadata from integration updates', () => {
+    const config = makeConfig();
+
+    const integration = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        wakeUrl: 'https://example.com/semantic-enrichment/wake',
+        wakeAuth: 'bridge-token',
+      },
+      runtime: {
+        status: 'ready',
+        ready: true,
+      },
+    }, new Date('2026-04-13T10:55:00.000Z'));
+
+    expect(integration.transport.kind).toBe('openclaw-channel');
+    expect(integration.transport.wakeUrl).toBeUndefined();
+    expect(integration.transport.wakeAuth).toBeUndefined();
   });
 });
 

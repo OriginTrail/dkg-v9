@@ -1546,7 +1546,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           assertionUri,
           importStartedAt: startedAt,
           sourceAgentAddress: requestAgentAddress,
-          rootEntity: completedRecord.rootEntity ?? assertionUri,
+          rootEntity: completedRecord.rootEntity,
           fileHash: fileStoreEntry.keccak256,
           mdIntermediateHash,
           detectedContentType,

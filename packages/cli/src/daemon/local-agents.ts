@@ -127,11 +127,38 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
   if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
   if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
   if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
-  if (typeof input.wakeUrl === 'string' && input.wakeUrl.trim()) transport.wakeUrl = trimTrailingSlashes(input.wakeUrl.trim());
+  const wakeUrl = typeof input.wakeUrl === 'string' && input.wakeUrl.trim()
+    ? trimTrailingSlashes(input.wakeUrl.trim())
+    : undefined;
+  const requestedWakeAuth = input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none'
+    ? input.wakeAuth
+    : undefined;
   if (input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none') {
-    transport.wakeAuth = input.wakeAuth;
+    if (input.wakeAuth !== 'bridge-token' || !wakeUrl || isSafeBridgeTokenWakeUrl(wakeUrl)) {
+      transport.wakeAuth = input.wakeAuth;
+    }
+  }
+  if (
+    wakeUrl
+    && (requestedWakeAuth !== 'bridge-token' || isSafeBridgeTokenWakeUrl(wakeUrl))
+  ) {
+    transport.wakeUrl = wakeUrl;
   }
   return Object.keys(transport).length > 0 ? transport : undefined;
+}
+
+export function isSafeBridgeTokenWakeUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationCapabilities | undefined {

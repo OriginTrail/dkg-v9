@@ -18,6 +18,50 @@ describe('DkgNodePlugin', () => {
     expect(plugin).toBeDefined();
   });
 
+  it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
+    // Pre-fix: when memory slot was owned by a different plugin, the
+    // resolver bootstrap (`memoryResolverApi = api` + `refreshMemoryResolverState`)
+    // was inside the slot-registered branch and got skipped. The
+    // memory_search tool was still exposed but stuck in a permanent
+    // "backend not ready" response forever (no peer ID, no CG cache).
+    // Fix moves bootstrap OUT, runs whenever memory module is enabled.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const mockApi = {
+      config: { plugins: { slots: { memory: 'some-other-memory-plugin' } } },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) return { ok: true, status: 200, json: async () => ({ peerId: 'p-r102' }) } as Response;
+      if (url.includes('/api/context-graph/list')) return { ok: true, status: 200, json: async () => ({ contextGraphs: [] }) } as Response;
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+    try {
+      plugin.register(mockApi);
+      // Slot owned by another plugin → registerMemoryCapability never called.
+      expect(mockApi.registerMemoryCapability).not.toHaveBeenCalled();
+      // But resolver bootstrap MUST still happen so memory_search works
+      // against the daemon directly. Wait for the async refresh to settle.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect((plugin as any).memoryResolverApi).toBe(mockApi);
+      expect((plugin as any).nodePeerId).toBe('p-r102');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
   it('registers session_end hook and all exported tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];

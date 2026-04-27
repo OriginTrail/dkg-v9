@@ -460,10 +460,29 @@ export class DkgNodePlugin {
         this.memoryPlugin = new DkgMemoryPlugin(this.client, memoryConfig, this.memorySessionResolver);
       }
       const registered = this.memoryPlugin.register(api);
+
+      // Resolver state (peer ID, subscribed CG cache, api handle) is
+      // ALWAYS bootstrapped when memory is enabled — even when slot
+      // registration was skipped. The `memory_search` tool runs against
+      // the daemon directly and doesn't depend on slot ownership; without
+      // resolver state it would degrade into a permanent "backend not
+      // ready" response in workspaces where another plugin owns the
+      // slot. Bootstrapping here keeps the read path useful in that
+      // configuration.
+      this.memoryResolverApi = api;
+      void this.refreshMemoryResolverState(api);
+
+      const memoryPlugin = this.memoryPlugin;
       if (!registered) {
-        // Clear any stale re-assert callback from a previous registration
-        // so the channel plugin doesn't steal the slot back from the
-        // newly elected provider on subsequent turns.
+        // Slot is owned by a different plugin (or registration is
+        // intentionally disabled). Clear any stale pre-dispatch re-assert
+        // callback wired by a previous register() call — without this,
+        // `DkgChannelPlugin.processInbound*()` would keep calling our
+        // re-assert and steal the slot back from the new owner on every
+        // UI turn.
+        if (this.channelPlugin) {
+          this.channelPlugin.setPreDispatchReAssert(null);
+        }
         api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
         return;
       }
@@ -475,25 +494,9 @@ export class DkgNodePlugin {
       // never reach the W3 (`before_prompt_build`) or `memory_search`
       // anchors, so a different plugin reclaiming the slot mid-session
       // gets bounced back before our recall/persist runs.
-      const memoryPlugin = this.memoryPlugin;
       if (memoryPlugin && this.channelPlugin) {
         this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
       }
-
-      // Cache the API handle so `ensureNodePeerId` can log from the lazy
-      // re-probe call tree, which fires outside of any register() scope
-      // when a later resolver call asks for the default agent address.
-      // Codex Bug B9.
-      this.memoryResolverApi = api;
-
-      // Best-effort: populate node peer ID + subscribed context-graph cache
-      // for the memory resolver. Both are non-blocking; failures just leave
-      // the resolver with empty state (single-graph fallback on reads,
-      // empty availableContextGraphs on the write-path clarification). Only
-      // runs when memory is enabled so tool-only test setups that stub
-      // `globalThis.fetch` for unrelated assertions are not polluted by a
-      // surprise `/api/status` probe.
-      void this.refreshMemoryResolverState(api);
     }
   }
 
@@ -1691,7 +1694,11 @@ export class DkgNodePlugin {
       return this.error('memory_search unavailable: memory module is disabled in adapter config');
     }
     const query = typeof args.query === 'string' ? args.query.trim() : '';
-    if (!query) {
+    if (query.length < 2) {
+      // The internal SPARQL builder strips keywords shorter than 2 chars,
+      // so a 1-char query would silently return [] (looks like "no
+      // results found" to the agent). Reject explicitly with the same
+      // shape the tool contract documents.
       return this.error('"query" is required (non-empty string, ≥2 chars)');
     }
     const rawLimit = typeof args.limit === 'string' ? Number(args.limit) : args.limit;
@@ -2131,6 +2138,16 @@ export class DkgNodePlugin {
       'api.on=' + (hasOn ? 'function' : 'undefined') + ', api.registerHook=' + (hasRegisterHook ? 'function' : 'undefined') + ', ' +
       'globalThis-hook-map=' + (hasGlobalHookMap ? 'present' : 'absent'),
     );
+
+    // Only register probe handlers on the FIRST register() call. Multi-
+    // phase init (setup-runtime → full) re-enters this method, and the
+    // existing handlers still fire — re-registering would log every real
+    // hook dispatch N times where N = number of register() calls so far,
+    // breaking the `fire#` counter as a dispatch-count signal.
+    if (this.probeRegisterCallCount > 1) {
+      api.logger.debug?.('[dkg-probe] skipping handler registration on re-entry (call#=' + this.probeRegisterCallCount + ')');
+      return;
+    }
 
     // Helper to make a probe handler factory
     const makeProbeHandler = (eventName: string, via: string) => {

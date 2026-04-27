@@ -79,6 +79,16 @@ describe('memory_search tool', () => {
     expect((result as any).details?.error).toBeTruthy();
   });
 
+  it('rejects 1-char queries upfront instead of silently returning [] (R10.5)', async () => {
+    // The internal SPARQL builder strips keywords <2 chars, so a 1-char
+    // query falls through to the search and returns []. Pre-fix that
+    // looked like "no results found" to the agent. Now the tool rejects.
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const result = await tool.execute('t1-shortq', { query: 'x' });
+    const text = (result as any).content?.[0]?.text ?? '';
+    expect(text).toMatch(/≥2 chars|2 chars|required/i);
+  });
+
   it('handler is callable and returns a tool result when query is valid', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     // Patch the daemon client to avoid a real network call.

@@ -181,10 +181,79 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("collapses tool-using turn into one (user, final-reply) pair (R10.3)", async () => {
+    // Tool-using turn: [user, assistant(tool_call), tool, assistant(final_reply)].
+    // Without the intermediate-step skip, computeDelta would emit TWO pairs:
+    // (user, "") and ("", final_reply) — both wrong.
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "look up the weather" },
+        { role: "assistant", content: "", tool_calls: [{ id: "c1", name: "get_weather" }] } as any,
+        { role: "tool", content: "72°F sunny" } as any,
+        { role: "assistant", content: "It's 72°F and sunny." },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const [, persistedUser, persistedAssistant] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("look up the weather");
+    expect(persistedAssistant).toBe("It's 72°F and sunny.");
+  });
+
+  it("backfill of two identical-content pairs both persist (R10.4 pair-index discriminator)", async () => {
+    // Pre-fix: same-content pairs collided on the dedup key and only the
+    // first persisted. With pairIndex baked into the W4a turnId, both
+    // backfill pairs get distinct turnIds and both write.
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("W4a stamps content alias so a W4b message:sent for same content dedups (R10.4 cross-path)", async () => {
+    // First fire W4a; assert exactly one persist + that the content alias
+    // is present in the dedup map.
+    writer.onAgentEnd(
+      {
+        sessionId: "t",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+        ],
+      },
+      { channelId: "tg", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    // Now fire W4b with the same content. Cross-path dedup must skip.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hi" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hello", success: true },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1); // unchanged
+  });
+
   it("computes deterministic in-memory dedup turnId from content (16-hex)", async () => {
     // The deterministic turnId stays in-process for cross-path dedup.
-    // We assert behaviour by calling the same content twice within the
-    // 3s TTL window and verifying only one persist fires (dedup hit).
+    // After R10.4, every W4a persist stamps TWO map entries: a
+    // pair-index-tagged turnId (the unique W4a key) AND a content-only
+    // alias `content::<sha-16>` that W4b's `message:sent` path checks.
     const event: AgentEndContext = {
       sessionId: "session-1",
       messages: [
@@ -195,13 +264,13 @@ describe("ChatTurnWriter", () => {
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
-    // Inspect the underlying dedup-map key shape: `<sessionId>::<turnId>`.
-    // sessionId itself contains ':' separators (e.g. `openclaw:ch:::sk`),
-    // so split on the LAST '::' to extract the turnId suffix.
     const recent = (writer as any).recentTurnIds as Map<string, number>;
-    expect(recent.size).toBe(1);
-    const [key] = Array.from(recent.keys());
-    const turnId = key.slice(key.lastIndexOf("::") + 2);
+    expect(recent.size).toBe(2); // turnId + content alias
+    const keys = Array.from(recent.keys());
+    const aliasKey = keys.find((k) => k.includes("::content::"));
+    const turnIdKey = keys.find((k) => k !== aliasKey)!;
+    expect(aliasKey).toMatch(/::content::[0-9a-f]{16}$/);
+    const turnId = turnIdKey.slice(turnIdKey.lastIndexOf("::") + 2);
     expect(turnId).toMatch(/^[0-9a-f]{16}$/);
   });
 

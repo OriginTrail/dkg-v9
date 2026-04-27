@@ -12,6 +12,16 @@ interface Logger {
 export interface ChatTurnMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | Array<{ type: string; text?: string }>;
+  /**
+   * Optional list of tool invocations the model issued in this assistant
+   * step. Present on intermediate assistant messages that exist solely to
+   * call a tool (no user-visible reply text); absent on the final reply.
+   * Used by `computeDelta` to skip those intermediates so a tool-using
+   * turn is persisted as one (user, final-assistant-reply) pair, not
+   * one pair per intermediate assistant step.
+   */
+  toolCalls?: Array<unknown>;
+  tool_calls?: Array<unknown>; // openclaw camelCase variant
 }
 
 export interface AgentEndContext {
@@ -139,12 +149,26 @@ export class ChatTurnWriter {
       // point. Without sequencing, a failed middle pair could be skipped
       // when the tail succeeds.
       const job = this.trackPersistJob(sessionId, async () => {
-        for (const { user, assistant } of pairs) {
+        for (const { user, assistant, pairIndex } of pairs) {
           if (!user && !assistant) continue;
-          const turnId = this.deterministicTurnId(sessionId, user, assistant);
-          if (this.markTurnIdSeen(sessionId, turnId)) continue; // cross-path dedup
+          // W4a turnId mixes pair position into the hash so that two
+          // legitimate same-text exchanges within the same `agent_end`
+          // backfill (e.g. user said "hi" twice) get distinct turnIds
+          // and BOTH persist. Without `pairIndex`, the second one would
+          // hit the cross-path dedup map (stamped by the first) and be
+          // silently dropped.
+          const turnId = this.deterministicTurnId(sessionId, user, assistant, pairIndex);
+          // Also record a content-only fingerprint as an alias — this is
+          // what the W4b `message:sent` path checks (it has no pair
+          // index). The most-recent W4a write stamps the alias; a W4b
+          // fire within the dedup TTL for the same content will skip.
+          const contentAlias = this.contentAliasKey(sessionId, user, assistant);
+          if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
             await this.persistOne(sessionId, user, assistant, turnId);
+            // After successful persist, refresh the content alias so
+            // a same-cycle W4b fire dedups against the latest write.
+            this.markTurnIdSeen(sessionId, contentAlias);
           } catch (err) {
             // Release the reservation so a retry (next agent_end or the
             // paired internal hook) can re-attempt rather than silently
@@ -315,8 +339,13 @@ export class ChatTurnWriter {
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
       if (userText || assistantText) {
+        // W4b has no concept of pair index, so the cross-path dedup
+        // check uses the content-only alias that W4a stamps on every
+        // successful persist. If `agent_end` already wrote this turn
+        // within the TTL window, the alias is present and we skip.
+        const contentAlias = this.contentAliasKey(sessionId, userText, assistantText);
+        if (this.markTurnIdSeen(sessionId, contentAlias)) return; // already written via W4a
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
-        if (this.markTurnIdSeen(sessionId, turnId)) return; // already written via agent_end path
         // Route through the same tracked-job wrapper as onAgentEnd so the
         // reset gate sees this in-flight write and `Promise.allSettled`s
         // it. Without tracking, a `message:sent` write mid-compaction
@@ -325,7 +354,7 @@ export class ChatTurnWriter {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
           } catch (err) {
-            this.releaseTurnIdReservation(sessionId, turnId);
+            this.releaseTurnIdReservation(sessionId, contentAlias);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           }
         }).catch(() => {});
@@ -416,27 +445,42 @@ export class ChatTurnWriter {
   private computeDelta(
     messages: ChatTurnMessage[],
     savedUpTo: number,
-  ): Array<{ user: string; assistant: string }> {
-    const pairs: Array<{ user: string; assistant: string }> = [];
+  ): Array<{ user: string; assistant: string; pairIndex: number }> {
+    const pairs: Array<{ user: string; assistant: string; pairIndex: number }> = [];
     let currentUser = "";
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
         currentUser = this.extractText(msg.content);
       } else if (msg.role === "assistant") {
+        // Skip intermediate assistant messages that exist solely to call
+        // tools — they have empty/absent text content and a populated
+        // `toolCalls` / `tool_calls` array. A tool-using turn looks like
+        // [user, assistant(tool_call), tool, assistant(final_reply)];
+        // without this skip, computeDelta would emit two pairs (one
+        // empty-reply, one empty-user-final-reply), and W4b's later
+        // `message:sent` would fail to dedup because the content hashes
+        // diverge from the canonical (user, final-reply) pair.
+        const text = this.extractText(msg.content);
+        const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
+          : Array.isArray(msg.tool_calls) ? msg.tool_calls.length > 0
+          : false;
+        if (!text && hasToolCalls) {
+          // Intermediate tool-call step — do NOT count as a pair, do NOT
+          // advance pairIndex (the watermark counts user-visible turns).
+          continue;
+        }
         if (pairIndex > savedUpTo) {
-          // Only strip `<recalled-memory>` from the assistant side. User text
-          // is untouched — a user pasting XML/log content that happens to
-          // contain the tag would otherwise be silently corrupted, while
-          // only the assistant-side text can echo the system-injected block.
           pairs.push({
             user: currentUser,
-            assistant: this.stripRecalledMemory(this.extractText(msg.content)),
+            assistant: this.stripRecalledMemory(text),
+            pairIndex,
           });
         }
         pairIndex++;
         currentUser = "";
       }
+      // Skip `tool` and `system` messages — they don't form turns.
     }
     return pairs;
   }
@@ -466,8 +510,22 @@ export class ChatTurnWriter {
     return part.replace(/[\x00-\x1f\x7f]/g, "").substring(0, 64);
   }
 
-  private deterministicTurnId(sessionId: string, user: string, assistant: string): string {
-    const combined = `${sessionId}:${user}:${assistant}`;
+  /**
+   * Content-only dedup alias used by W4b (`message:sent`) which has no
+   * concept of pair index. Format: `<sessionId>::content::<sha-16>`.
+   * Stamped by every successful W4a persist so that an immediately-
+   * following W4b fire for the same content skips. Two legitimate same-
+   * text exchanges spaced more than `TURNID_TTL_MS` apart get a fresh
+   * alias each time and persist.
+   */
+  private contentAliasKey(sessionId: string, user: string, assistant: string): string {
+    const hash = createHash("sha256").update(`${user}:${assistant}`).digest("hex").slice(0, 16);
+    return `content::${hash}`;
+  }
+
+  private deterministicTurnId(sessionId: string, user: string, assistant: string, pairIndex?: number): string {
+    const indexPart = typeof pairIndex === "number" ? `:${pairIndex}` : "";
+    const combined = `${sessionId}:${user}:${assistant}${indexPart}`;
     return createHash("sha256").update(combined).digest("hex").slice(0, 16);
   }
 

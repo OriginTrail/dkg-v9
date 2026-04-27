@@ -388,15 +388,17 @@ export class ChatTurnWriter {
       // so we don't write a turn whose state was about to be wiped.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
+      const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Still consume the oldest pending inbound so the
       // next successful turn does not pair its reply with a stale inbound
       // from the aborted exchange.
-      const success = (ev as any)?.context?.success ?? (ev as any)?.success;
-      const queue = this.pendingUserMessages.get(conversationKey);
-      const userText = queue && queue.length > 0 ? queue.shift()! : "";
-      if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
-      if (success === false) return;
+      if (success === false) {
+        const failedQueue = this.pendingUserMessages.get(conversationKey);
+        if (failedQueue && failedQueue.length > 0) failedQueue.shift();
+        if (failedQueue && failedQueue.length === 0) this.pendingUserMessages.delete(conversationKey);
+        return;
+      }
       // Strip injected `<recalled-memory>` from assistant text — the model may
       // echo the auto-recall block, and if we persist the raw version here
       // while the W4a path persists the stripped version, the two turnIds
@@ -404,6 +406,16 @@ export class ChatTurnWriter {
       // legitimate pastes (XML, logs) containing the tag would otherwise be
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
+      // R20.1 — Compute `assistantText` BEFORE consuming the pending user.
+      // A `message:sent` with `success: true` but no textual content
+      // (channel ack, attachment-only send, status broadcast) must not
+      // eat the queued user message — otherwise the next REAL textual
+      // outbound for this conversation would have nothing to pair with
+      // and persist as an assistant-only turn.
+      if (!assistantText) return;
+      const queue = this.pendingUserMessages.get(conversationKey);
+      const userText = queue && queue.length > 0 ? queue.shift()! : "";
+      if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side:
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
@@ -439,12 +451,23 @@ export class ChatTurnWriter {
             // R18.2 — Track the W4b session count so a later `agent_end`
             // (typically after a `setup-runtime → full` upgrade) sees a
             // raised `savedUpTo` floor in `computeDelta` and doesn't
-            // re-persist turns W4b already wrote. Bump only on
-            // successful persist.
-            this.w4bSessionCounts.set(
-              sessionId,
-              (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
-            );
+            // re-persist turns W4b already wrote.
+            // R20.2 — Only count when the persist consumed BOTH a user
+            // message and assistant text — i.e. it represents a complete
+            // logical turn pair as `computeDelta` would emit. Counting
+            // every successful `message:sent` (chunked replies, channel
+            // broadcasts, multi-payload deliveries) advanced the count
+            // past `event.messages` and the next `agent_end` skipped
+            // real pairs as already persisted. The R20.1 fix above
+            // already returns early on empty `assistantText`; the
+            // additional `userText` check here filters chunk-2+ deliveries
+            // that ran out of pending users on chunk 1.
+            if (userText) {
+              this.w4bSessionCounts.set(
+                sessionId,
+                (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
+              );
+            }
           } catch (err) {
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure

@@ -334,6 +334,24 @@ export class HookSurface {
   }
 
   private installLegacy(event: string, handler: HookHandler, key: string): Unsubscribe | null {
+    // R20.3 — Honor `strategyOverride === 'api-on'`. The class contract
+    // (file header) documents that 'api-on' forces both 'typed' AND
+    // 'legacy' onto the `api.on` path; previously this branch ignored
+    // the override and always used `registerHook`, so the documented
+    // override was unreachable. When forced to api-on we fall back to
+    // the typed-install code path so behavior matches the docstring.
+    if (this.strategyOverride === 'api-on') {
+      if (typeof this.api.on !== 'function') {
+        const msg =
+          `[hook-surface] install FAILED: legacy hook ${event} forced to api.on by ` +
+          `strategyOverride='api-on', but api.on is ${typeof this.api.on}.`;
+        this.logger.warn?.(msg);
+        this.setStat(key, { installedVia: 'none', commitState: 'committed-by-timeout', installError: 'api.on not a function' });
+        return null;
+      }
+      return this.installTyped(event, handler, key);
+    }
+
     if (typeof this.api.registerHook !== 'function') {
       const msg = `api.registerHook is ${typeof this.api.registerHook}`;
       this.logger.warn?.(`[hook-surface] install FAILED: legacy hook ${event} requires api.registerHook: ${msg}`);

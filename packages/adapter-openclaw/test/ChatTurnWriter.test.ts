@@ -202,6 +202,77 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R20.1 — onMessageSent with success=true but empty content does NOT consume the pending user", async () => {
+    // Regression for R20.1: pre-fix, the dequeue happened before the
+    // `assistantText` check, so a `message:sent` carrying an empty
+    // content (channel ack, attachment-only send, status broadcast)
+    // would eat the user side and leave the next REAL textual reply
+    // with no pending user — persisted as an assistant-only turn.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real user question", messageId: "in-1" },
+    } as any);
+
+    // Empty-content success-true outbound (channel ack / attachment-only).
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "", success: true, messageId: "out-ack" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    // The pending user must still be in the queue.
+    const pending = (writer as any).pendingUserMessages;
+    expect(pending.size).toBeGreaterThan(0);
+
+    // The real reply now arrives — must pair with the original user.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("real user question");
+    expect(call[2]).toBe("real reply");
+  });
+
+  it("R20.2 — w4bSessionCounts only increments for persists that consumed a pending user (chunked-reply safety)", async () => {
+    // Regression for R20.2: pre-fix, every successful W4b persist
+    // bumped `w4bSessionCounts` by 1, including chunk-2+ deliveries
+    // that ran out of pending users on chunk 1 and persisted as
+    // assistant-only turns. The count then advanced past
+    // `event.messages` and the next `agent_end` skipped real pairs as
+    // already-W4b-persisted. The fix guards the increment on
+    // `userText` non-empty (i.e., this persist represents a complete
+    // logical turn pair).
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "q1", messageId: "in-1" },
+    } as any);
+    // Chunk 1: pairs with user, increments count.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk1", success: true, messageId: "out-1a" },
+    } as any);
+    await flushMicrotasks();
+    // Chunks 2+: queue is empty, persist as assistant-only — must NOT
+    // bump the count.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk2", success: true, messageId: "out-1b" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk3", success: true, messageId: "out-1c" },
+    } as any);
+    await flushMicrotasks();
+    const counts = (writer as any).w4bSessionCounts as Map<string, number>;
+    // Exactly ONE turn pair was consumed — count must reflect that,
+    // not the 3 raw `message:sent` fires.
+    const sessionId = "openclaw:tg:::sk";
+    expect(counts.get(sessionId)).toBe(1);
+  });
+
   it("R19.1 — computeDelta concatenates consecutive user messages before pairing with assistant reply", async () => {
     // Regression for R19.1: pre-fix, the parser used a single
     // `currentUser` slot that overwrote on each user message. So

@@ -11,6 +11,7 @@ import {
   dkgService,
   __resetPersistedUserTurnCacheForTests,
 } from '../src/index.js';
+import type { AssistantReplyChatTurnOptions } from '../src/service.js';
 
 describe('dkgPlugin', () => {
   it('has name and description', () => {
@@ -113,27 +114,37 @@ describe('dkgPlugin.hooks wiring', () => {
     // satisfies the typed surface. We don't actually invoke it here
     // because a real call would need a live DKGAgent; the test only
     // pins the SHAPE.
+    //
+    // r19-2 update: `userTurnPersisted` is now MANDATORY on the
+    // typed assistant-reply overload — explicit `false` routes
+    // through the safe full-envelope branch.
     const positive: Parameters<Hook> = [
       runtime,
       msg,
       undefined,
-      { mode: 'assistant-reply', userMessageId: 'u-1' },
+      { mode: 'assistant-reply', userMessageId: 'u-1', userTurnPersisted: false },
     ];
     expect(positive.length).toBe(4);
 
     // Negative path — `mode: 'assistant-reply'` without
-    // `userMessageId` MUST be a compile-time error against the
-    // typed overloads. If TypeScript ever stops rejecting this
-    // (regression to `Parameters<typeof onChatTurn>` or similar),
-    // the @ts-expect-error directive becomes unused and this test
-    // fails to compile.
-    // @ts-expect-error - assistant-reply without userMessageId is rejected
-    const negative: Parameters<Hook> = [
-      runtime,
-      msg,
-      undefined,
-      { mode: 'assistant-reply' },
-    ];
+    // `userMessageId` (and `userTurnPersisted`) MUST be a
+    // compile-time error against the typed overloads. If TypeScript
+    // ever stops rejecting this (regression to
+    // `Parameters<typeof onChatTurn>` or similar, OR the catch-all
+    // overload creeping back in), the @ts-expect-error directive
+    // becomes unused and this test fails to compile.
+    //
+    // r30-8 update: `Parameters<Hook>` resolves to the LAST overload
+    // signature, which is the assistant-reply one. We narrow the
+    // 4th element's type to `AssistantReplyChatTurnOptions` so the
+    // `@ts-expect-error` lands on a single, predictable line — the
+    // literal that's missing the mandatory `userMessageId` and
+    // `userTurnPersisted` fields.
+    // @ts-expect-error r30-8: assistant-reply literal missing
+    // userMessageId AND userTurnPersisted is rejected by the strict
+    // overload (no catch-all to fall through to anymore).
+    const badOpts: AssistantReplyChatTurnOptions = { mode: 'assistant-reply' };
+    const negative: Parameters<Hook> = [runtime, msg, undefined, badOpts];
     expect(Array.isArray(negative)).toBe(true);
   });
 });
@@ -481,8 +492,8 @@ describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', 
 
       // Both runtimes fall through to headless because nothing was
       // ever recorded.
-      expect(spy.mock.calls[1][3].userTurnPersisted).toBe(false);
-      expect(spy.mock.calls[2][3].userTurnPersisted).toBe(false);
+      expect((spy.mock.calls[1][3] as { userTurnPersisted: boolean }).userTurnPersisted).toBe(false);
+      expect((spy.mock.calls[2][3] as { userTurnPersisted: boolean }).userTurnPersisted).toBe(false);
     } finally {
       spy.mockRestore();
     }

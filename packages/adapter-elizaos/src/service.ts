@@ -100,13 +100,35 @@ export interface UserTurnChatTurnOptions extends ChatTurnPersistOptions {
  *       `options.mode === 'assistant-reply'` AND
  *       `options.userMessageId` (the parent user-turn id) required.
  *
- * Without the split, downstream TS callers could legally pass a
- * `Memory` without `id` on the user-turn path and only discover the
- * violation via a runtime exception. Callers that still want the
- * loose-old-shape can pass through `Record<string, unknown>` options
- * via the catch-all overload, which still routes into the runtime
- * guard in `persistChatTurnImpl` — but the two typed overloads
- * above cover every documented call site in the adapter.
+ * PR #229 bot review (r30-8 — service.ts:128): pre-r30-8 a third
+ * catch-all overload accepted `options?: Record<string, unknown>`
+ * for "legacy compat". Because TypeScript matches overloads in
+ * declaration order, an object literal like
+ * `{ mode: 'assistant-reply' }` would (a) fail the strict
+ * assistant-reply overload (missing `userMessageId` /
+ * `userTurnPersisted`), then (b) fall through to the catch-all and
+ * compile cleanly — defeating the entire compile-time enforcement
+ * the typed overloads were added to provide. The runtime guard in
+ * `persistChatTurnImpl` still threw, but only after the type check
+ * had already let the bad call through.
+ *
+ * r30-8 fix: the catch-all is REMOVED from the public surface.
+ * Downstream TypeScript callers that need to pass a dynamically-
+ * shaped options bag (e.g. plugin authors composing options from
+ * external config) must either:
+ *   (a) narrow their options to `UserTurnChatTurnOptions` /
+ *       `AssistantReplyChatTurnOptions` before the call, OR
+ *   (b) cast `dkgService as any` — the runtime guard inside
+ *       `persistChatTurnImpl` provides defence-in-depth and will
+ *       still reject malformed payloads loudly.
+ *
+ * The internal plugin wiring in `src/index.ts` was the legitimate
+ * consumer of the old catch-all. It now uses {@link _dkgServiceLoose}
+ * (a deliberately underscore-prefixed internal handle) which retains
+ * the wide `Record<string, unknown>` signature for genuine adapter-
+ * level dispatch. External code that imports `_dkgServiceLoose`
+ * voids any forward-compat guarantees and gets the same defence-in-
+ * depth runtime guard treatment as `as any` callers.
  */
 export interface DKGService extends Service {
   persistChatTurn(
@@ -121,16 +143,6 @@ export interface DKGService extends Service {
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
   ): Promise<ChatTurnPersistResult>;
-  // Catch-all: preserved for legacy callers that went through
-  // `dkgService as any` (and for the internal plugin wiring in
-  // `src/index.ts` which must stay agnostic of the caller's mode).
-  // New downstream code SHOULD use one of the typed overloads above.
-  persistChatTurn(
-    runtime: IAgentRuntime,
-    message: Memory,
-    state?: State,
-    options?: Record<string, unknown>,
-  ): Promise<ChatTurnPersistResult>;
 
   onChatTurn(
     runtime: IAgentRuntime,
@@ -144,24 +156,19 @@ export interface DKGService extends Service {
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
   ): Promise<ChatTurnPersistResult>;
-  // Catch-all (same rationale as persistChatTurn above).
-  onChatTurn(
-    runtime: IAgentRuntime,
-    message: Memory,
-    state?: State,
-    options?: Record<string, unknown>,
-  ): Promise<ChatTurnPersistResult>;
 }
 
-// Intermediate "loose" shape used by the implementation. TypeScript
-// can't validate an object literal against a multi-overload method
-// directly (the catch-all `Record<string, unknown>` options bag
-// widens `AssistantReplyChatTurnOptions`'s indexed signature, which
-// makes the strict-overload check fail). We build the loose object
-// first, then assert it conforms to the public `DKGService` shape —
-// the overload contract is still visible and enforced for every
-// downstream caller, which is what r18-2 asks for.
-interface DKGServiceImpl extends Service {
+/**
+ * Internal-only "loose" handle for adapter plugin wiring (see
+ * {@link _dkgServiceLoose}). This is the runtime impl shape — wide
+ * `Record<string, unknown>` options bag — and it is NOT part of the
+ * public `DKGService` API. Exporting it makes adapter-internal
+ * routing in `src/index.ts` type-check without exposing the unsafe
+ * catch-all to downstream consumers (PR #229 bot review r30-8).
+ *
+ * @internal
+ */
+export interface DKGServiceLoose extends Service {
   persistChatTurn(
     runtime: IAgentRuntime,
     message: Memory,
@@ -175,6 +182,13 @@ interface DKGServiceImpl extends Service {
     options?: Record<string, unknown>,
   ): Promise<ChatTurnPersistResult>;
 }
+
+// The runtime object literal validates against the loose impl shape;
+// the public `DKGService` cast at the bottom of this file narrows
+// the surface seen by downstream callers. PR #229 bot review (r30-8)
+// removed the catch-all from `DKGService` itself — the loose shape
+// now lives only on the internal-only `DKGServiceLoose` handle.
+type DKGServiceImpl = DKGServiceLoose;
 
 const dkgServiceImpl: DKGServiceImpl = {
   name: 'dkg-node',
@@ -253,3 +267,26 @@ const dkgServiceImpl: DKGServiceImpl = {
 // defence-in-depth for callers that bypass the TS types (e.g. the
 // plugin wiring in `src/index.ts`).
 export const dkgService: DKGService = dkgServiceImpl as unknown as DKGService;
+
+/**
+ * Internal-only handle for adapter plugin wiring (`src/index.ts`).
+ *
+ * PR #229 bot review (r30-8 — service.ts:128): the public
+ * `DKGService` no longer carries the wide
+ * `options?: Record<string, unknown>` catch-all overload, because
+ * that catch-all silently accepted `{ mode: 'assistant-reply' }`
+ * literals and let downstream TS callers smuggle the strict
+ * `AssistantReplyChatTurnOptions` contract past the compile-time
+ * check. The catch-all still exists at runtime — it has to, because
+ * the adapter plugin wires up generic `(runtime, message, state,
+ * options) => …` hook handlers whose `options` shape is determined
+ * by the framework rather than the adapter — but it now lives
+ * exclusively on this internal handle. External code that imports
+ * `_dkgServiceLoose` voids the typed contract on purpose; the
+ * runtime guards in `persistChatTurnImpl` remain the single source
+ * of truth for malformed payloads regardless of how the call was
+ * routed.
+ *
+ * @internal
+ */
+export const _dkgServiceLoose: DKGServiceLoose = dkgServiceImpl;

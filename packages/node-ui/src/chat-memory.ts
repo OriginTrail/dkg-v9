@@ -1008,18 +1008,51 @@ export class ChatMemoryManager {
       };
     }
 
-    const turnUri = `${CHAT_NS}turn:${turnId}`;
+    // PR #229 bot review (r30-8 — adapter-elizaos/src/actions.ts:965).
+    // The adapter's writer emits two URI shapes for the canonical
+    // `dkg:ChatTurn` envelope:
+    //
+    //   1. `${CHAT_NS}turn:${turnKey}` — normal user-first turn (the
+    //      `onChatTurn → onAssistantReply` chain or the local
+    //      `chat-memory.ts` writer at line 517 above);
+    //   2. `${CHAT_NS}headless-turn:${turnKey}` — assistant-only
+    //      headless turn (assistant-reply hook fires without a
+    //      matching user-turn, e.g. the prior `onChatTurn` write
+    //      failed, the hook was disabled, or a reconnect replayed
+    //      only the reply). The writer routes these onto a distinct
+    //      URI so a stub `dkg:hasUserMessage` doesn't collide with
+    //      a real one already stamped on the canonical turn.
+    //
+    // Pre-r30-8 this reader hard-coded `${CHAT_NS}turn:${turnId}` and
+    // therefore could not find headless-turn quads at all — every
+    // assistant-only turn round-tripped as `turn_not_found` even
+    // though its triples lived in the WM. We now resolve the actual
+    // turn URI by joining on the `dkg:turnId` literal inside the
+    // session, which matches BOTH URI shapes uniformly. The writer
+    // contract still uses `${CHAT_NS}turn:` for the cache-friendly
+    // delta path (CONSTRUCT subjectSet below), but the lookup itself
+    // is now URI-agnostic.
+    const currentTurnIdSparqlLiteral = JSON.stringify(turnId);
     const currentTurnResult = await this.tools.query(
-      `SELECT ?tid ?ts WHERE {
-        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
+      `SELECT ?turn ?ts WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${currentTurnIdSparqlLiteral} .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
       } LIMIT 1`,
       this.wmReadOpts(),
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
+    const resolvedTurnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
+    const turnUri = resolvedTurnUri && isSafeIri(resolvedTurnUri)
+      ? resolvedTurnUri
+      : `${CHAT_NS}turn:${turnId}`;
+    // The literal turn id from the WM equals the input `turnId` when
+    // we found a binding (we joined on it explicitly); otherwise we
+    // fall through to the same `turn_not_found` branch the old code
+    // produced. Preserving the variable shape keeps the downstream
+    // code path identical.
+    const currentTurnId = resolvedTurnUri ? turnId : '';
     const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {

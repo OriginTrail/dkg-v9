@@ -29,11 +29,12 @@
  * flagged.
  */
 import { describe, expect, it } from 'vitest';
-import { dkgService } from '../src/service.js';
+import { _dkgServiceLoose, dkgService } from '../src/service.js';
 import type {
   AssistantReplyChatTurnOptions,
   ChatTurnPersistResult,
   DKGService,
+  DKGServiceLoose,
   UserTurnChatTurnOptions,
 } from '../src/service.js';
 import type { IAgentRuntime, Memory, PersistableMemory, State } from '../src/types.js';
@@ -196,23 +197,151 @@ describe('r18-2: DKGService overload contract', () => {
     expect(typeof persistChatTurn).toBe('function');
   });
 
-  it('the catch-all overload still accepts legacy `Record<string, unknown>` options for backwards compat', async () => {
-    // The catch-all overload (the third signature) is intentionally
-    // preserved so that existing plugin wiring in `src/index.ts` —
-    // which routes through a generic options bag — still type-checks.
-    // New callers SHOULD prefer the narrow overloads above.
-    const runtime = makeRuntime();
-    const userMsg = makePersistableMemory();
-    const legacyOpts: Record<string, unknown> = {
-      mode: 'user-turn',
-      contextGraphId: 'agent-context',
-    };
+  // PR #229 bot review (r30-8 — service.ts:128).
+  //
+  // Pre-r30-8 the public `DKGService` interface carried a third
+  // catch-all overload `options?: Record<string, unknown>` "for
+  // backwards compat with the plugin wiring". That catch-all
+  // silently accepted `{ mode: 'assistant-reply' }` literals — i.e.
+  // a caller could write `dkgService.persistChatTurn(runtime, msg,
+  // undefined, { mode: 'assistant-reply' })` and the compiler would
+  // route it onto the catch-all path even though the strict typed
+  // overload (Overload 2) rejected it for missing `userMessageId` /
+  // `userTurnPersisted`. The runtime guard in `persistChatTurnImpl`
+  // would still throw, but only AFTER the type check had let the
+  // bad call through — defeating the entire point of the typed
+  // overloads r18-2 and r19-2 introduced.
+  //
+  // r30-8 fix: the catch-all is REMOVED from the public `DKGService`
+  // surface (it now lives on the internal-only `DKGServiceLoose`
+  // handle that the adapter plugin in `src/index.ts` consumes). The
+  // public surface exposes ONLY the strict typed overloads, so the
+  // smuggling pattern above no longer compiles. These tests pin
+  // both halves: the public-surface rejection AND the internal
+  // escape hatch's continued functionality.
+  describe('r30-8: public catch-all overload removed', () => {
+    it('public `DKGService` REJECTS `{ mode: "assistant-reply" }` smuggled via Record<string, unknown>', () => {
+      const runtime = makeRuntime();
+      // Plain `Memory` (no stable id) is the realistic shape for an
+      // assistant-reply caller — the assistant-side message often has
+      // no `id` until the runtime stamps one. Pre-r30-8 the caller
+      // could mask the missing id requirement by routing onto the
+      // catch-all overload. Post-r30-8 the call must fail to compile.
+      const assistantMsg: Memory = makePlainMemoryWithoutId();
 
-    // This is the escape hatch. It still compiles, still routes
-    // through `persistChatTurnImpl`, and the runtime guards in that
-    // function handle any contract violations.
-    await expect(
-      dkgService.persistChatTurn(runtime, userMsg, undefined, legacyOpts),
-    ).rejects.toThrow(/DKG node not started/);
+      // This is the smuggling pattern that pre-r30-8 compiled cleanly:
+      // the caller declares `legacyOpts` as `Record<string, unknown>`
+      // and TypeScript routes it onto the catch-all overload, bypassing
+      // the strict assistant-reply overload's `userMessageId` /
+      // `userTurnPersisted` requirement.
+      const legacyOpts: Record<string, unknown> = {
+        mode: 'assistant-reply',
+        // Deliberately missing userMessageId AND userTurnPersisted —
+        // the bug the typed overloads were meant to catch at compile
+        // time. The runtime guard in `persistChatTurnImpl` still
+        // catches this, but the point of the typed overloads is to
+        // catch it FIRST, in the editor.
+      };
+
+      // @ts-expect-error r30-8: post-fix, no overload of the public
+      // `DKGService.persistChatTurn` accepts a plain `Memory` AND a
+      // generic `Record<string, unknown>` options bag. Overload 1
+      // (user-turn) rejects `Memory` (id is `string | undefined`,
+      // not `string`); Overload 2 (assistant-reply) rejects
+      // `Record<string, unknown>` because `mode: unknown` cannot
+      // satisfy the literal `mode: 'assistant-reply'` and the
+      // mandatory `userMessageId` / `userTurnPersisted` fields are
+      // missing. With the catch-all gone, both overloads fail and
+      // the call fails to compile. If TS stops flagging this line,
+      // the catch-all has crept back onto the public surface and
+      // the smuggling regression is back.
+      const smuggled = dkgService.persistChatTurn(runtime, assistantMsg, undefined, legacyOpts);
+      // Swallow the rejection so vitest doesn't report it as an
+      // "unhandled error" — the runtime behaviour isn't what we're
+      // testing here, the COMPILE-TIME rejection above is.
+      void (smuggled as Promise<unknown>).catch(() => {});
+      expect(typeof (smuggled as Promise<unknown>)).toBe('object');
+    });
+
+    it('public `DKGService` REJECTS the literal `{ mode: "assistant-reply" }` even without the Record<> cast', () => {
+      // The exact bot-flagged smuggling shape: a literal object that
+      // claims `mode: 'assistant-reply'` but omits the rest of the
+      // contract. Pre-r30-8 this compiled because the catch-all
+      // accepted it; post-r30-8 only the strict overload matches
+      // (and rejects).
+      // @ts-expect-error r30-8: literal `{ mode: 'assistant-reply' }`
+      // no longer compiles against any public `DKGService` overload.
+      // The strict assistant-reply overload requires `userMessageId`
+      // AND `userTurnPersisted`; nothing else can absorb this shape.
+      const badAssistantReplyOpts: AssistantReplyChatTurnOptions = { mode: 'assistant-reply' };
+      expect(badAssistantReplyOpts).toBeDefined();
+    });
+
+    it('the internal `_dkgServiceLoose` handle DOES still accept the wide `Record<string, unknown>` shape', async () => {
+      // The catch-all has to exist SOMEWHERE at runtime, because the
+      // adapter plugin in `src/index.ts` legitimately wires up
+      // generic `(runtime, message, state, options) => …` hook
+      // handlers whose `options` shape is determined by the
+      // ElizaOS framework, not by the adapter. The compromise is:
+      // the wide signature is preserved on the internal-only
+      // `DKGServiceLoose` interface, and external code that imports
+      // `_dkgServiceLoose` voids the typed contract on purpose.
+      const runtime = makeRuntime();
+      const msg: Memory = makePlainMemoryWithoutId();
+      const looseOpts: Record<string, unknown> = {
+        mode: 'assistant-reply',
+        userMessageId: 'msg-r30-8-user-parent',
+        userTurnPersisted: false,
+      };
+
+      // The escape-hatch path: still compiles, still routes through
+      // `persistChatTurnImpl`, and the runtime guards there are now
+      // the single source of truth for malformed payloads.
+      await expect(
+        _dkgServiceLoose.persistChatTurn(runtime, msg, undefined, looseOpts),
+      ).rejects.toThrow(/DKG node not started/);
+
+      // Also lock the type-level shape: `DKGServiceLoose` retains
+      // the wide options bag.
+      const loose: DKGServiceLoose = _dkgServiceLoose;
+      expect(typeof loose.persistChatTurn).toBe('function');
+      expect(typeof loose.onChatTurn).toBe('function');
+    });
+
+    it('`DKGService` is NOT structurally assignable from `DKGServiceLoose`', () => {
+      // The whole point of removing the catch-all was that
+      // `DKGServiceLoose` (with the wide options bag) is no longer
+      // assignable to `DKGService` — the strict overloads must reject
+      // any caller that passes `Record<string, unknown>`. If a future
+      // refactor re-adds the catch-all, this assignment will start
+      // compiling and the test will silently turn into a positive
+      // control rather than the negative one it's pinned as.
+      const loose: DKGServiceLoose = _dkgServiceLoose;
+      // @ts-expect-error r30-8: DKGServiceLoose is intentionally NOT
+      // assignable to DKGService. The narrow public interface rejects
+      // the wide `Record<string, unknown>` options bag.
+      const narrow: DKGService = loose;
+      expect(narrow).toBeDefined();
+    });
+
+    it('the user-turn-shaped legacy options bag still routes correctly when narrowed', async () => {
+      // r30-8 isn't a "no legacy options ever" change — callers can
+      // still pass dynamically-shaped options as long as they NARROW
+      // them to the typed overloads first. This test pins that the
+      // safe pattern (cast/narrow before the call) still works
+      // end-to-end.
+      const runtime = makeRuntime();
+      const userMsg = makePersistableMemory();
+      const dynamicOpts: Record<string, unknown> = {
+        mode: 'user-turn',
+        contextGraphId: 'agent-context',
+      };
+      // The caller's responsibility post-r30-8 — narrow before the
+      // call site, not after.
+      const narrowed = dynamicOpts as UserTurnChatTurnOptions;
+      await expect(
+        dkgService.persistChatTurn(runtime, userMsg, undefined, narrowed),
+      ).rejects.toThrow(/DKG node not started/);
+    });
   });
 });

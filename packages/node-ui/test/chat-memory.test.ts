@@ -637,7 +637,7 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [
           {
-            tid: '"t2"',
+            turn: 'urn:dkg:chat:turn:t2',
             ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
           },
         ],
@@ -703,7 +703,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -730,7 +730,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -757,7 +757,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -775,6 +775,120 @@ describe('ChatMemoryManager', () => {
     expect(delta.reason).toBe('watermark_mismatch');
     expect(delta.triples).toHaveLength(0);
     expect(mockQuery.calls).toHaveLength(6);
+  });
+
+  // PR #229 r30-8 review (chat-memory.ts:1011) — assistant-only "headless"
+  // turns are stamped under `urn:dkg:chat:headless-turn:<id>` by the writer,
+  // not `urn:dkg:chat:turn:<id>`. Pre-fix, the reader hard-coded the
+  // `turn:` prefix and could never resolve the headless URI by id, so every
+  // headless turn round-tripped as `turn_not_found`. The fix joins on
+  // `dkg:turnId` literal so BOTH URI shapes resolve uniformly.
+  it('getSessionGraphDelta resolves headless-turn URIs by joining on dkg:turnId literal', async () => {
+    // Same query order as the happy path (8 queries), but the third query
+    // returns the *headless-turn* URI shape instead of `turn:`.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+      },
+      {
+        bindings: [
+          {
+            // CRITICAL: this is the URI shape that pre-r30-8 broke. The
+            // writer stamps the canonical envelope under
+            // `urn:dkg:chat:headless-turn:<id>` for assistant-only turns;
+            // the reader must resolve to that URI when looking up by id.
+            turn: 'urn:dkg:chat:headless-turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [{ previousTurnId: '"t1"' }],
+      },
+      {
+        bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+      },
+      {
+        bindings: [
+          {
+            user: 'urn:dkg:chat:msg:user-2',
+            assistant: 'urn:dkg:chat:msg:assistant-2',
+          },
+        ],
+      },
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:msg:user-2' },
+          { s: 'urn:dkg:chat:msg:assistant-2' },
+        ],
+      },
+      {
+        quads: [
+          {
+            subject: 'urn:dkg:chat:headless-turn:t2',
+            predicate: 'http://dkg.io/ontology/turnId',
+            object: '"t2"',
+          },
+        ],
+      },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+    // The key assertion: the headless-turn URI was resolved successfully,
+    // so we get a `delta` mode (not `full_refresh_required: turn_not_found`).
+    expect(delta.mode).toBe('delta');
+    expect(delta.turnId).toBe('t2');
+    expect(delta.watermark.previousTurnId).toBe('t1');
+    expect(delta.watermark.latestTurnId).toBe('t2');
+    // And the construct subjectSet drove the final query: it should have
+    // been wired with the *headless* turn URI, not a synthesised `turn:` one.
+    const constructQueryArgs = mockQuery.calls[mockQuery.calls.length - 1] as unknown[];
+    const constructQuery = String(constructQueryArgs[0] ?? '');
+    expect(constructQuery).toContain('urn:dkg:chat:headless-turn:t2');
+    // Inverse: it should NOT have fallen back to the synthesised `turn:` URI
+    // for this id (which is what pre-r30-8 code would have done).
+    expect(constructQuery).not.toContain('<urn:dkg:chat:turn:t2>');
+  });
+
+  // Negative complement to the above: if the WM has NEITHER a `turn:`
+  // nor a `headless-turn:` URI for the requested id, we still get the
+  // pre-existing `turn_not_found` full-refresh signal. This pins that
+  // the r30-8 fix didn't accidentally swallow real misses.
+  it('getSessionGraphDelta returns turn_not_found when neither turn: nor headless-turn: exists', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+      },
+      // The lookup-by-turnId query returns no match (neither URI shape
+      // exists for `t-missing`).
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't-missing', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('full_refresh_required');
+    expect(delta.reason).toBe('turn_not_found');
+    expect(delta.triples).toHaveLength(0);
+    // We made it to the latest-turn lookup before bailing (4 queries, not 3),
+    // because the latest-turn watermark is still useful to the caller.
+    expect(mockQuery.calls).toHaveLength(4);
   });
 });
 

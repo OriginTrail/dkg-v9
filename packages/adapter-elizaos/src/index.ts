@@ -17,6 +17,15 @@
 import type { Plugin, IAgentRuntime, Memory, PersistableMemory, State } from './types.js';
 import {
   dkgService,
+  // PR #229 bot review (r30-8): the public `DKGService` no longer
+  // carries the catch-all `Record<string, unknown>` options overload
+  // — that was the smuggling path for `{ mode: 'assistant-reply' }`
+  // literals past the strict typed contract. Adapter plugin wiring
+  // (which legitimately needs the wide options bag because hook
+  // handler shapes come from the framework, not the adapter) uses
+  // `_dkgServiceLoose` for internal dispatch. External imports of
+  // `_dkgServiceLoose` are explicitly out of contract.
+  _dkgServiceLoose,
   type ChatTurnPersistResult,
   type UserTurnChatTurnOptions,
   type AssistantReplyChatTurnOptions,
@@ -259,9 +268,9 @@ export function __resetPersistedUserTurnCacheForTests(): void {
  * fire both hooks no longer corrupt the turn.
  */
 async function onAssistantReplyHandler(
-  runtime: Parameters<typeof dkgService.onChatTurn>[0],
-  message: Parameters<typeof dkgService.onChatTurn>[1],
-  state?: Parameters<typeof dkgService.onChatTurn>[2],
+  runtime: Parameters<typeof _dkgServiceLoose.onChatTurn>[0],
+  message: Parameters<typeof _dkgServiceLoose.onChatTurn>[1],
+  state?: Parameters<typeof _dkgServiceLoose.onChatTurn>[2],
   options: Record<string, unknown> = {},
 ) {
   // ElizaOS conventions: when an assistant reply fires, the matching
@@ -323,7 +332,12 @@ async function onAssistantReplyHandler(
       dest.assertionName,
     );
   }
-  return dkgService.persistChatTurn(runtime, message, state, opts);
+  // r30-8: route through the internal-only loose handle. The public
+  // `dkgService.persistChatTurn` no longer accepts a generic
+  // `Record<string, unknown>` options bag (the catch-all overload
+  // was the smuggling path the bot called out). The runtime guards
+  // inside `persistChatTurnImpl` still validate this payload shape.
+  return _dkgServiceLoose.persistChatTurn(runtime, message, state, opts);
 }
 
 /**
@@ -335,12 +349,14 @@ async function onAssistantReplyHandler(
  * envelope that never got written.
  */
 async function onChatTurnHandler(
-  runtime: Parameters<typeof dkgService.onChatTurn>[0],
-  message: Parameters<typeof dkgService.onChatTurn>[1],
-  state?: Parameters<typeof dkgService.onChatTurn>[2],
-  options?: Parameters<typeof dkgService.onChatTurn>[3],
+  runtime: Parameters<typeof _dkgServiceLoose.onChatTurn>[0],
+  message: Parameters<typeof _dkgServiceLoose.onChatTurn>[1],
+  state?: Parameters<typeof _dkgServiceLoose.onChatTurn>[2],
+  options?: Parameters<typeof _dkgServiceLoose.onChatTurn>[3],
 ) {
-  const result = await dkgService.persistChatTurn(runtime, message, state, options);
+  // r30-8: route through the loose internal handle (see comment in
+  // `onAssistantReplyHandler`).
+  const result = await _dkgServiceLoose.persistChatTurn(runtime, message, state, options);
   // PR #229 bot review (r3147347... — adapter-elizaos/src/index.ts:353).
   // Pre-fix this wrapper recorded the user-turn cache entry
   // UNCONDITIONALLY using `(message as any)?.id` as the cache key.
@@ -399,10 +415,21 @@ async function onChatTurnHandler(
 // compiler keeps the user-turn / assistant-reply split visible to
 // callers of `dkgPlugin.hooks.onChatTurn` /
 // `dkgPlugin.hooks.onAssistantReply` /
-// `dkgPlugin.chatPersistenceHook`. The catch-all signature is
-// preserved last so the existing internal wiring
-// (`dkgService as any` callers, dynamic options shapes) still type-
-// checks.
+// `dkgPlugin.chatPersistenceHook`.
+//
+// PR #229 bot review (r30-8 — service.ts:128): the third "catch-all"
+// overload was REMOVED from the public hook contract for the same
+// reason it was removed from `DKGService`: `options?:
+// Record<string, unknown>` silently accepted
+// `{ mode: 'assistant-reply' }` literals and let downstream
+// callers smuggle the strict `AssistantReplyChatTurnOptions`
+// contract past the compile-time check. External hook callers must
+// now use one of the typed overloads; the runtime guard inside
+// `persistChatTurnImpl` keeps catching malformed payloads from
+// `as any` callers as defence-in-depth. The plugin's own internal
+// wiring uses `_dkgServiceLoose` (see import at top of file) to keep
+// the dynamic-options bag pathway alive without leaking it into the
+// public hook surface.
 export interface DkgChatTurnHook {
   (
     runtime: IAgentRuntime,
@@ -415,12 +442,6 @@ export interface DkgChatTurnHook {
     message: Memory,
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
-  ): Promise<ChatTurnPersistResult>;
-  (
-    runtime: IAgentRuntime,
-    message: Memory,
-    state?: State,
-    options?: Record<string, unknown>,
   ): Promise<ChatTurnPersistResult>;
 }
 

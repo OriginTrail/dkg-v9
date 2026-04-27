@@ -20,6 +20,14 @@
 import { describe, it, expect, assertType, expectTypeOf } from 'vitest';
 import type { Memory, PersistableMemory } from '../src/index.js';
 import { dkgService } from '../src/index.js';
+// PR #229 bot review (r30-8): the public `dkgService` interface no
+// longer has the `Record<string, unknown>` catch-all overload, so
+// the "fire a malformed call to exercise the runtime guard" pattern
+// has to go through the internal `_dkgServiceLoose` handle. The
+// type-level rejection of the public surface is pinned by
+// `dkg-service-overloads.test.ts`; this file pins the RUNTIME guard
+// (which `_dkgServiceLoose` still routes through unchanged).
+import { _dkgServiceLoose } from '../src/service.js';
 
 describe('r16-4 — PersistableMemory type narrows Memory to require id', () => {
   it('PersistableMemory is assignable to Memory (widening is safe)', () => {
@@ -99,8 +107,12 @@ describe('r16-4 — runtime guard in persistChatTurnImpl still throws on missing
     // `/DKG node not started|missing stable message identifier/`
     // regex accepts either so this test is stable across agent
     // lifecycle states in CI.
+    // r30-8: route through the loose internal handle to deliberately
+    // bypass the typed public overloads. The runtime guard is the
+    // contract under test here; `dkg-service-overloads.test.ts`
+    // covers the public-surface compile-time rejection separately.
     await expect(
-      dkgService.persistChatTurn(runtime, message, {}, { mode: 'user-turn' }),
+      _dkgServiceLoose.persistChatTurn(runtime, message, {}, { mode: 'user-turn' }),
     ).rejects.toThrow(/DKG node not started|missing stable message identifier/);
   });
 });

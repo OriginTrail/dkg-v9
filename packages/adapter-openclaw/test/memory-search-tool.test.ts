@@ -84,10 +84,38 @@ describe('memory_search tool', () => {
     // Patch the daemon client to avoid a real network call.
     const client = (plugin as any).client;
     client.query = vi.fn().mockResolvedValue({ results: { bindings: [] } });
+    // Stub the resolver so the not-ready guard passes.
+    (plugin as any).memorySessionResolver.getDefaultAgentAddress = () => '12D3KooWReady';
 
     const result = await tool.execute('t2', { query: 'project milestones' });
     expect(result).toBeDefined();
     expect(typeof result).toBe('object');
+  });
+
+  it('returns "not ready" error when the resolver has no peer ID yet (R7.6)', async () => {
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    // Force resolver to surface no peer ID (neither session-bound nor default).
+    (plugin as any).memorySessionResolver.getSession = () => undefined;
+    (plugin as any).memorySessionResolver.getDefaultAgentAddress = () => undefined;
+
+    const result = await tool.execute('t-not-ready', { query: 'tatooine' });
+    const text = (result as any).content?.[0]?.text ?? '';
+    // Tool should return the structured "not ready" error, NOT an empty hits list.
+    expect(text).toMatch(/not ready/i);
+    expect(text).toMatch(/peer ID/i);
+  });
+
+  it('re-asserts memory-slot capability before running the search (R7.5 mode-independent anchor)', async () => {
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockResolvedValue({ results: { bindings: [] } });
+    (plugin as any).memorySessionResolver.getDefaultAgentAddress = () => '12D3KooWReady';
+    // Spy on reAssertCapability — must be called exactly once per tool invocation.
+    const spy = vi.fn();
+    (plugin as any).memoryPlugin.reAssertCapability = spy;
+
+    await tool.execute('t-reassert', { query: 'anything' });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 

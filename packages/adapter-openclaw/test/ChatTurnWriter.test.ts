@@ -247,6 +247,62 @@ describe("ChatTurnWriter", () => {
     expect(() => writer.onBeforeReset({}, {})).not.toThrow();
   });
 
+  it("resetSessionState awaits in-flight persists before wiping watermark (R7.4)", async () => {
+    // Slow client — first call resolves only after we've issued the reset,
+    // so the post-completion saveWatermark would otherwise race past it.
+    let releasePersist: (() => void) | null = null;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { releasePersist = resolve; }),
+    );
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Persist is still in flight at this point — confirm.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    // Fire compaction; it MUST wait for the in-flight persist before
+    // wiping watermark/dedup state. We assert by releasing the persist
+    // AFTER kicking off the reset and checking the reset hasn't completed.
+    let resetDone = false;
+    const resetPromise = (writer as any)
+      .resetSessionState("openclaw:ch:::sk")
+      .then(() => { resetDone = true; });
+    await flushMicrotasks();
+    // Reset must NOT have completed yet — the persist is still hanging.
+    expect(resetDone).toBe(false);
+
+    // Release the persist; reset can now proceed.
+    releasePersist!();
+    await resetPromise;
+    expect(resetDone).toBe(true);
+  });
+
+  it("reads message text from canonical event.context.content envelope (R7.3)", async () => {
+    // Canonical InternalHookEvent shape from openclaw — text lives on
+    // event.context.content, NOT event.text.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hello from canonical envelope" },
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "reply via canonical envelope", success: true },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const [, persistedUser, persistedAssistant] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("hello from canonical envelope");
+    expect(persistedAssistant).toBe("reply via canonical envelope");
+  });
+
   it("warns when onMessageReceived has no sessionKey", () => {
     writer.onMessageReceived({
       sessionKey: undefined as unknown as string,

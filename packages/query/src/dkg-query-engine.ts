@@ -528,35 +528,55 @@ function findWhereBraceStart(sparql: string): number {
   // can all contain stray `{` chars that the regex would
   // misinterpret as block openers.
   //
-  // PR #229 bot review (r3147347820 follow-up — comment id 3148... on
-  // dkg-query-engine.ts:540). The pre-fix scanner treated EVERY `<`
-  // as the start of an IRI and skipped to the next `>`. That broke
-  // perfectly legitimate SPARQL like
-  //   `SELECT ?n { ?s ?p ?n . FILTER(?n < 10) }`
-  // because `<` here is a less-than comparison and the matching `>`
-  // either lives much further down (consuming real `{`/`}` along the
-  // way) or never appears at all (`findWhereBraceStart` returns -1
-  // and graph wrapping / trust rewriting silently no-ops). SPARQL's
-  // IRIREF grammar (`'<' ([^<>"{}|^`\]-[#x00-#x20])* '>'`) is
-  // distinguishable from a comparison operator by two cheap checks:
-  //   1. comparison operators begin with `<`, `<=`, or `<<` and are
-  //      followed by whitespace / a digit / a `?`/`$` variable / `(`
-  //      — never by an IRI scheme character;
-  //   2. an IRIREF body cannot contain whitespace, `<`, `"`, `{`,
-  //      `}`, `|`, `\`, `^`, or `` ` ``. If we see any of those
-  //      before a `>`, this is not an IRI.
-  // We classify by peeking the next char (rejecting `=` and ASCII
-  // whitespace as obvious comparison forms) and then doing a
-  // bounded forward scan; if no `>` appears before a disallowed
-  // character we treat the `<` as a comparison operator and advance
-  // by one byte instead of swallowing the rest of the query.
+  // PR #229 bot review (r3147347820 follow-up + r30 follow-up —
+  // dkg-query-engine.ts:559). The classifier rejects obvious
+  // comparison shapes after `<` and falls back to a forward scan
+  // that confirms a balanced IRIREF body. The r30 cut only rejected
+  // `=`, `<`, and whitespace — a pure forward scan from `<` in
+  // compact comparison syntax like
+  //   `FILTER(?n<10&&?m>5)`
+  // walks `1`, `0`, `&`, `&`, `?`, `m` (none of which are
+  // IRIREF-forbidden per the SPARQL grammar
+  // `[^<>"{}|^`\]-[#x00-#x20]`) and lands on `>`, mis-classifying
+  // the entire `<10&&?m>` as an IRI. The forward scan therefore
+  // CANNOT be trusted alone for compact `<` operators that operate
+  // on numerics / variables / sub-expressions whose body bytes are
+  // all IRIREF-legal.
+  //
+  // r30+ resolution: combine an EXPLICIT next-byte allow-list of
+  // characters that can validly start a real-world SPARQL IRIREF
+  // (ALPHA for absolute IRIs `http:` / `urn:` / `did:` / `file:` /
+  // `_blank-node:`, `#` for fragment-only relatives, `_` for the
+  // legacy blank-node-as-IRI shape, `/` for path-only relatives,
+  // and `.` for path-relative IRIs) with the existing
+  // forbidden-byte forward scan. Anything else after `<` is treated
+  // as a comparison and we advance by ONE byte. This bails fast on
+  // every `<digit`, `<?var`, `<$var`, `<(...)`, `<"lit"`, `<-1`,
+  // `<+1`, `<&`, `<|`, `<!`, `<*`, `<=`, `<<` shape — i.e. the
+  // full set of SPARQL operator contexts in which `<` is overloaded
+  // as less-than.
+  //
+  // Note: this is INTENTIONALLY stricter than the SPARQL grammar
+  // (which technically allows `<10>` as an IRIREF). Real-world
+  // SPARQL queries don't write bare-digit IRIs; falling out of the
+  // IRI branch here just means we treat `<` as a comparison and
+  // advance one byte, which is the safe behaviour for the brace
+  // scan we actually care about.
+  const isIriStartFirstByte = (c: string): boolean => {
+    // ASCII letter? (covers every absolute IRI scheme — `http:`,
+    // `urn:`, `did:`, `file:`, `mailto:`, `tag:`, `data:`, …).
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    // `#fragment` (SPARQL allows fragment-only relative IRIREFs
+    // when the base IRI is set by the query environment), `_blah`
+    // (legacy blank-node-as-IRI), `/path` (path-only relative),
+    // `.something` (path-relative). Everything else is a comparison
+    // operator context.
+    return c === '#' || c === '_' || c === '/' || c === '.';
+  };
   const isIriStart = (idx: number): boolean => {
     const next = sparql[idx + 1];
     if (next === undefined) return false;
-    // `<=` / `< ` / `<\n` / `<\t` / `<<` are unambiguously
-    // comparison operators in SPARQL — IRIREFs may not contain `=`,
-    // `<`, or whitespace inside.
-    if (next === '=' || next === '<' || /\s/.test(next)) return false;
+    if (!isIriStartFirstByte(next)) return false;
     for (let j = idx + 1; j < n; j++) {
       const c = sparql[j];
       if (c === '>') return true;

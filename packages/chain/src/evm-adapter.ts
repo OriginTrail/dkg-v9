@@ -1799,11 +1799,48 @@ export class EVMChainAdapter implements ChainAdapter {
     // `require(false)` because the staking-conviction tests look at
     // the outer `eth_estimateGas`). Approve `StakingV10` directly so
     // its `transferFrom` succeeds.
+    // PR #229 bot review (r3147347... — evm-adapter.ts:1809).
+    // Pre-fix: `resolveContract('StakingV10')` failure silently set
+    // `stakingV10 = undefined`, which made the allowance update
+    // condition `amount > 0n && stakingV10` false. The adapter
+    // then proceeded straight to `nft.createConviction(amount)`,
+    // which under the hood calls
+    //   StakingV10.token.transferFrom(staker, stakingStorage, amount)
+    // — i.e. requires the StakingV10 contract address to hold an
+    // ERC-20 allowance. With StakingV10 unresolved AND amount > 0
+    // we have neither a spender to grant allowance to nor any way
+    // for the inner `transferFrom` to succeed; the call always
+    // reverts with an opaque `ERC20InsufficientAllowance`
+    // (surfaced as a `require(false)`-style chain revert several
+    // call frames deep) instead of a clear adapter-level error.
+    //
+    // Fail fast: a missing/misconfigured StakingV10 deployment is
+    // an environment problem, not a transient runtime condition,
+    // so refusing to call `createConviction` is safe — there is no
+    // legitimate code path where `amount > 0` should call into
+    // `DKGStakingConvictionNFT` without `StakingV10` available as
+    // the spender. `amount === 0n` (rare but legal — pure lock
+    // refresh) keeps working because no allowance is needed.
     let stakingV10: Contract | undefined;
+    let stakingV10ResolveErr: unknown;
     try {
       stakingV10 = await this.resolveContract('StakingV10');
-    } catch {
+    } catch (err) {
+      stakingV10ResolveErr = err;
       stakingV10 = undefined;
+    }
+
+    if (amount > 0n && !stakingV10) {
+      const cause = stakingV10ResolveErr instanceof Error
+        ? stakingV10ResolveErr.message
+        : String(stakingV10ResolveErr ?? 'contract not found');
+      throw new Error(
+        `stakeWithLock: cannot stake ${amount} TRAC (>0) — StakingV10 contract is unavailable ` +
+        `(${cause}). Without StakingV10 the inner token.transferFrom in ` +
+        `DKGStakingConvictionNFT.createConviction has no spender to draw from and the ` +
+        `transaction would revert with ERC20InsufficientAllowance several frames deep. ` +
+        `Deploy / configure StakingV10 before calling stakeWithLock with a positive amount.`,
+      );
     }
 
     if (this.contracts.token && amount > 0n && stakingV10) {

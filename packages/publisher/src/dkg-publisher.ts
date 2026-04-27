@@ -885,6 +885,40 @@ export class DKGPublisher implements Publisher {
     const res = await this.store.query(select);
     const rows = res.type === 'bindings' ? res.bindings : [];
     if (rows.length === 0) return null;
+
+    // PR #229 bot review (r3147347... — dkg-publisher.ts:888).
+    // Two or more tentative KCs in the SAME context graph can share
+    // the SAME merkleRoot when callers retry/republish identical
+    // content (deterministic merkle root → identical hex). Pre-fix
+    // we promoted `rows[0]` unconditionally, which on WAL recovery
+    // would mark an arbitrary KC as confirmed AND drop the WAL
+    // entry — silently severing the in-memory <> on-chain link for
+    // every other UAL still tentatively waiting on the SAME root.
+    //
+    // The chain `Confirmed` event by itself cannot disambiguate
+    // which UAL it refers to (the on-chain payload addresses the
+    // batch by merkleRoot, not by UAL), so the safe action is to
+    // refuse the promotion, retain the WAL entry, and let the
+    // operator (or a follow-up gossip-driven `confirmPublish`
+    // carrying the explicit UAL) reconcile. Bailing keeps the WAL
+    // file authoritative; a later real `confirmPublish` flips the
+    // right tentative quad and clears the journal.
+    if (rows.length > 1) {
+      const ambiguousUals = rows
+        .map((r) => r['ual'])
+        .filter((u): u is string => Boolean(u))
+        .map((u) => (u.startsWith('<') && u.endsWith('>') ? u.slice(1, -1) : u))
+        .slice(0, 8); // cap log spam — full set is in the store
+      this.log.warn(
+        opCtx,
+        `WAL_RECOVERY_PROMOTE_AMBIGUOUS merkleRoot=${merkleRootHex} ` +
+          `cg=${contextGraphId} candidates=${rows.length} ` +
+          `firstUals=${ambiguousUals.join(',')} — refusing to promote, ` +
+          `WAL entry retained for explicit confirmPublish reconciliation`,
+      );
+      return null;
+    }
+
     const rawUal = rows[0]['ual'];
     if (!rawUal) return null;
     // Oxigraph returns bound IRIs as `<...>`; strip the angle brackets.

@@ -418,6 +418,108 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     expect(payload.endKAId).toBe('10');
   });
 
+  // ---------------------------------------------------------------------------
+  // PR #229 bot review (r3147347... — dkg-publisher.ts:888).
+  // The PRIVATE helper `promoteTentativeKcByMerkleRoot` (called from the
+  // recovery path) used to take `rows[0]` unconditionally. When two
+  // tentative KCs in the SAME context graph share the SAME merkleRoot
+  // (common on retries / republishes of identical content because the
+  // merkle root is content-deterministic), it would mark whichever KC
+  // came back first as `confirmed` and silently sever the link for the
+  // other tentative UAL. The chain `Confirmed` event itself addresses
+  // the batch only by merkleRoot, not by UAL, so the only safe action
+  // is to refuse the promotion and log — letting an explicit follow-up
+  // `confirmPublish` (which carries the UAL) reconcile the right one.
+  // ---------------------------------------------------------------------------
+  it('r30-2: promoteTentativeKcByMerkleRoot REFUSES to promote when multiple tentative KCs share the same merkleRoot in the same CG', async () => {
+    // Real OxigraphStore so the SPARQL SELECT actually runs.
+    const realStore = new OxigraphStore();
+    const cg = 'cg-ambiguous-promote';
+    const metaGraph = `did:dkg:context-graph:${cg}/_meta`;
+    const root = '0x' + 'be'.repeat(32);
+    const ualA = 'did:dkg:test/0xaa/1';
+    const ualB = 'did:dkg:test/0xbb/2';
+
+    // Two tentative KC quads with IDENTICAL merkleRoot in the
+    // SAME context graph's _meta.
+    await realStore.insert([
+      { subject: ualA, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${root}"`, graph: metaGraph },
+      { subject: ualA, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+      { subject: ualB, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${root}"`, graph: metaGraph },
+      { subject: ualB, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+    ]);
+
+    const publisher = new DKGPublisher({
+      store: realStore,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus: new EventEmitter() as unknown as EventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: undefined,
+    });
+
+    // Drive the private helper directly so the test pins the exact
+    // call the WAL recovery path makes. A minimal opCtx shape is
+    // sufficient — the helper only uses it for log routing.
+    const opCtx = { traceId: 'trace-promote-ambiguous', operation: 'walRecover' } as any;
+    const promoted: string | null = await (publisher as any).promoteTentativeKcByMerkleRoot(
+      cg,
+      root,
+      opCtx,
+    );
+    expect(promoted, 'must NOT promote any of the ambiguous tentative KCs').toBeNull();
+
+    // Crucially, BOTH tentative quads must STILL be tentative in the
+    // store — neither one was flipped to confirmed.
+    const askA = await realStore.query(
+      `ASK { GRAPH <${metaGraph}> { <${ualA}> <http://dkg.io/ontology/status> "tentative" } }`,
+    );
+    const askB = await realStore.query(
+      `ASK { GRAPH <${metaGraph}> { <${ualB}> <http://dkg.io/ontology/status> "tentative" } }`,
+    );
+    expect(askA.type === 'boolean' && askA.value).toBe(true);
+    expect(askB.type === 'boolean' && askB.value).toBe(true);
+
+    // And NEITHER one was prematurely flipped to confirmed.
+    const askNoneConfirmed = await realStore.query(
+      `ASK { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(askNoneConfirmed.type === 'boolean' && askNoneConfirmed.value).toBe(false);
+  });
+
+  it('r30-2: promoteTentativeKcByMerkleRoot still promotes the unique tentative KC (regression guard for the single-row path)', async () => {
+    const realStore = new OxigraphStore();
+    const cg = 'cg-unique-promote';
+    const metaGraph = `did:dkg:context-graph:${cg}/_meta`;
+    const root = '0x' + 'ce'.repeat(32);
+    const ual = 'did:dkg:test/0xcc/1';
+
+    await realStore.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${root}"`, graph: metaGraph },
+      { subject: ual, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+    ]);
+
+    const publisher = new DKGPublisher({
+      store: realStore,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus: new EventEmitter() as unknown as EventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: undefined,
+    });
+
+    const opCtx = { traceId: 'trace-promote-unique', operation: 'walRecover' } as any;
+    const promoted: string | null = await (publisher as any).promoteTentativeKcByMerkleRoot(
+      cg,
+      root,
+      opCtx,
+    );
+    expect(promoted).toBe(ual);
+
+    const askConfirmed = await realStore.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(askConfirmed.type === 'boolean' && askConfirmed.value).toBe(true);
+  });
+
   it('r26-4: a single WAL match STILL recovers normally when another collision belongs to a DIFFERENT publisher (cross-publisher collision is the legacy path)', async () => {
     const merkleRoot = '0x' + 'cd'.repeat(32);
     const mine = makeEntry({

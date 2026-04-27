@@ -1805,6 +1805,34 @@ describe('local agent integration registry helpers', () => {
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 
+  it('does not persist a gateway wake URL from UI health patches because daemon wake auth is bridge-only', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            gatewayUrl: 'http://gateway.local:3030',
+          },
+        },
+      },
+    });
+    const probeHealth = async () => ({ ok: true as const, target: 'gateway' });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'openclaw', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      { probeHealth },
+    );
+
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.transport.gatewayUrl).toBe('http://gateway.local:3030');
+    expect(result.integration.transport.wakeUrl).toBeUndefined();
+    expect(result.integration.transport.wakeAuth).toBeUndefined();
+    expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
   it('does not treat a stored wake-only OpenClaw transport as a chat-ready bridge fast path', async () => {
     const config = makeConfig({
       localAgentIntegrations: {

@@ -219,8 +219,6 @@ export function transportPatchFromOpenClawTarget(
     kind: 'openclaw-channel',
     gatewayUrl,
     ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
-    wakeUrl: `${gatewayUrl}/api/dkg-channel/semantic-enrichment/wake`,
-    wakeAuth: 'gateway',
   };
 }
 

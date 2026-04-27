@@ -145,19 +145,27 @@ const RDFS_RANGE = 'http://www.w3.org/2000/01/rdf-schema#range';
 const OWL_CLASS = 'http://www.w3.org/2002/07/owl#Class';
 const OWL_OBJECT_PROPERTY = 'http://www.w3.org/2002/07/owl#ObjectProperty';
 const OWL_DATATYPE_PROPERTY = 'http://www.w3.org/2002/07/owl#DatatypeProperty';
+const SCHEMA_HTTP_BASE = 'http://schema.org/';
 const SCHEMA_NAME = 'https://schema.org/name';
+const SCHEMA_NAME_HTTP = 'http://schema.org/name';
 const SCHEMA_DESCRIPTION = 'https://schema.org/description';
+const SCHEMA_DESCRIPTION_HTTP = 'http://schema.org/description';
 const SCHEMA_DOMAIN_INCLUDES = 'https://schema.org/domainIncludes';
+const SCHEMA_DOMAIN_INCLUDES_HTTP = 'http://schema.org/domainIncludes';
 const SCHEMA_RANGE_INCLUDES = 'https://schema.org/rangeIncludes';
+const SCHEMA_RANGE_INCLUDES_HTTP = 'http://schema.org/rangeIncludes';
+const SCHEMA_TEXT = 'https://schema.org/text';
+const SCHEMA_TEXT_HTTP = 'http://schema.org/text';
 const SKOS_PREF_LABEL = 'http://www.w3.org/2004/02/skos/core#prefLabel';
 const SKOS_DEFINITION = 'http://www.w3.org/2004/02/skos/core#definition';
 
 const CLASS_TYPE_IRIS = new Set([RDFS_CLASS, OWL_CLASS]);
 const PROPERTY_TYPE_IRIS = new Set([RDF_PROPERTY, OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY]);
-const LABEL_PREDICATES = new Set([RDFS_LABEL, SCHEMA_NAME, SKOS_PREF_LABEL]);
-const DESCRIPTION_PREDICATES = new Set([RDFS_COMMENT, SCHEMA_DESCRIPTION, SKOS_DEFINITION]);
-const DOMAIN_PREDICATES = new Set([RDFS_DOMAIN, SCHEMA_DOMAIN_INCLUDES]);
-const RANGE_PREDICATES = new Set([RDFS_RANGE, SCHEMA_RANGE_INCLUDES]);
+const LABEL_PREDICATES = new Set([RDFS_LABEL, SCHEMA_NAME, SCHEMA_NAME_HTTP, SKOS_PREF_LABEL]);
+const DESCRIPTION_PREDICATES = new Set([RDFS_COMMENT, SCHEMA_DESCRIPTION, SCHEMA_DESCRIPTION_HTTP, SKOS_DEFINITION]);
+const DOMAIN_PREDICATES = new Set([RDFS_DOMAIN, SCHEMA_DOMAIN_INCLUDES, SCHEMA_DOMAIN_INCLUDES_HTTP]);
+const RANGE_PREDICATES = new Set([RDFS_RANGE, SCHEMA_RANGE_INCLUDES, SCHEMA_RANGE_INCLUDES_HTTP]);
+const ONTOLOGY_TEXT_PREDICATES = new Set([SCHEMA_TEXT, SCHEMA_TEXT_HTTP]);
 const STANDARD_ONTOLOGY_NAMESPACES = [
   'https://schema.org/',
   'http://schema.org/',
@@ -209,9 +217,173 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function readBindingValue(value: unknown): string {
-  if (typeof value === 'string') return value.replace(/[<>]/g, '').trim();
-  if (isRecord(value) && typeof value.value === 'string') return value.value.replace(/[<>]/g, '').trim();
+  const stripWrappedIri = (raw: string) => {
+    const trimmed = raw.trim();
+    return trimmed.startsWith('<') && trimmed.endsWith('>')
+      ? trimmed.slice(1, -1).trim()
+      : trimmed;
+  };
+  if (typeof value === 'string') return stripWrappedIri(value);
+  if (isRecord(value) && typeof value.value === 'string') {
+    const bindingType = typeof value.type === 'string' ? value.type : '';
+    if (bindingType === 'literal' || 'datatype' in value || 'xml:lang' in value) {
+      return value.value.trim();
+    }
+    return stripWrappedIri(value.value);
+  }
   return '';
+}
+
+function unescapeTurtleLiteral(value: string): string {
+  return value
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+function stripTurtleComments(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => {
+      let inAngle = false;
+      let quote: '"' | "'" | null = null;
+      let tripleQuote = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const char = line[i];
+        const nextTwo = line.slice(i, i + 3);
+        if (quote) {
+          if (char === '\\') {
+            i += 1;
+            continue;
+          }
+          if (tripleQuote && nextTwo === `${quote}${quote}${quote}`) {
+            i += 2;
+            quote = null;
+            tripleQuote = false;
+            continue;
+          }
+          if (!tripleQuote && char === quote) {
+            quote = null;
+          }
+          continue;
+        }
+        if (inAngle) {
+          if (char === '>') inAngle = false;
+          continue;
+        }
+        if (char === '<') {
+          inAngle = true;
+          continue;
+        }
+        if (char === '"' || char === "'") {
+          quote = char;
+          tripleQuote = nextTwo === `${char}${char}${char}`;
+          if (tripleQuote) i += 2;
+          continue;
+        }
+        if (char === '#') return line.slice(0, i);
+      }
+      return line;
+    })
+    .join('\n');
+}
+
+function splitTurtleTopLevel(value: string, delimiter: ';' | ',' | '.'): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let inAngle = false;
+  let quote: '"' | "'" | null = null;
+  let tripleQuote = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    const nextTwo = value.slice(i, i + 3);
+    if (quote) {
+      if (char === '\\') {
+        i += 1;
+        continue;
+      }
+      if (tripleQuote && nextTwo === `${quote}${quote}${quote}`) {
+        i += 2;
+        quote = null;
+        tripleQuote = false;
+        continue;
+      }
+      if (!tripleQuote && char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (inAngle) {
+      if (char === '>') inAngle = false;
+      continue;
+    }
+    if (char === '<') {
+      inAngle = true;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      tripleQuote = nextTwo === `${char}${char}${char}`;
+      if (tripleQuote) i += 2;
+      continue;
+    }
+    if (char === delimiter) {
+      const part = value.slice(start, i).trim();
+      if (part) parts.push(part);
+      start = i + 1;
+    }
+  }
+  const tail = value.slice(start).trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
+function readFirstTurtleToken(value: string): { token: string; rest: string } | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('<')) {
+    const end = trimmed.indexOf('>');
+    if (end < 0) return null;
+    return { token: trimmed.slice(0, end + 1), rest: trimmed.slice(end + 1).trim() };
+  }
+  const match = trimmed.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  return match ? { token: match[1], rest: (match[2] ?? '').trim() } : null;
+}
+
+function expandTurtleTerm(token: string, prefixes: Map<string, string>): string | undefined {
+  const trimmed = token.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    const iri = trimmed.slice(1, -1).trim();
+    return isSafeIri(iri) ? iri : undefined;
+  }
+  if (trimmed === 'a') return RDF_TYPE;
+  const prefixed = trimmed.match(/^([A-Za-z][\w-]*|):(.+)$/);
+  if (prefixed && prefixes.has(prefixed[1])) {
+    const namespace = prefixes.get(prefixed[1]);
+    const iri = `${namespace}${prefixed[2]}`;
+    return isSafeIri(iri) ? iri : undefined;
+  }
+  return isSafeIri(trimmed) ? trimmed : undefined;
+}
+
+function parseTurtleObject(token: string, prefixes: Map<string, string>): { value: string; isIri: boolean } | null {
+  const trimmed = token.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('"""')) {
+    const end = trimmed.indexOf('"""', 3);
+    if (end < 0) return null;
+    return { value: unescapeTurtleLiteral(trimmed.slice(3, end)), isIri: false };
+  }
+  if (trimmed.startsWith('"')) {
+    const match = trimmed.match(/^"((?:\\.|[^"\\])*)"/s);
+    if (!match) return null;
+    return { value: unescapeTurtleLiteral(match[1]), isIri: false };
+  }
+  const iri = expandTurtleTerm(trimmed, prefixes);
+  return iri ? { value: iri, isIri: true } : null;
 }
 
 function normalizeSearchText(value: string): string {
@@ -1100,7 +1272,8 @@ export class SemanticEnrichmentWorker {
       return { source: 'schema_org' };
     }
 
-    const triples = await this.queryOntologyTriples(contextGraphId, graphUri).catch(() => []);
+    const queriedTriples = await this.queryOntologyTriples(contextGraphId, graphUri).catch(() => []);
+    const triples = this.expandEmbeddedOntologyTextTriples(queriedTriples);
     const summary = this.buildProjectOntologySummary(triples, sourceText);
     if (!summary) {
       return { source: 'schema_org' };
@@ -1114,10 +1287,19 @@ export class SemanticEnrichmentWorker {
   }
 
   private async queryOntologyTriples(contextGraphId: string, graphUri: string): Promise<OntologyTriple[]> {
+    const legacyProjectOntologyGraphPrefix = `did:dkg:context-graph:${contextGraphId}/meta/assertion/`;
+    const legacyProjectOntologyGraphSuffix = '/project-ontology';
     const sparql = `
       SELECT ?s ?p ?o WHERE {
-        GRAPH <${graphUri}> {
+        GRAPH ?g {
           ?s ?p ?o .
+          FILTER(
+            ?g = <${graphUri}>
+            || (
+              STRSTARTS(STR(?g), ${JSON.stringify(legacyProjectOntologyGraphPrefix)})
+              && STRENDS(STR(?g), ${JSON.stringify(legacyProjectOntologyGraphSuffix)})
+            )
+          )
           FILTER(
             (?p = <${RDF_TYPE}> && ?o IN (
               <${RDFS_CLASS}>,
@@ -1134,9 +1316,15 @@ export class SemanticEnrichmentWorker {
               <${RDFS_DOMAIN}>,
               <${RDFS_RANGE}>,
               <${SCHEMA_NAME}>,
+              <${SCHEMA_NAME_HTTP}>,
               <${SCHEMA_DESCRIPTION}>,
+              <${SCHEMA_DESCRIPTION_HTTP}>,
               <${SCHEMA_DOMAIN_INCLUDES}>,
+              <${SCHEMA_DOMAIN_INCLUDES_HTTP}>,
               <${SCHEMA_RANGE_INCLUDES}>,
+              <${SCHEMA_RANGE_INCLUDES_HTTP}>,
+              <${SCHEMA_TEXT}>,
+              <${SCHEMA_TEXT_HTTP}>,
               <${SKOS_PREF_LABEL}>,
               <${SKOS_DEFINITION}>
             )
@@ -1167,6 +1355,71 @@ export class SemanticEnrichmentWorker {
           : null;
       })
       .filter((triple): triple is OntologyTriple => !!triple);
+  }
+
+  private expandEmbeddedOntologyTextTriples(triples: OntologyTriple[]): OntologyTriple[] {
+    const expanded: OntologyTriple[] = [];
+    for (const triple of triples) {
+      if (ONTOLOGY_TEXT_PREDICATES.has(triple.predicate) && !triple.objectIsIri) {
+        expanded.push(...this.extractOntologyTriplesFromTurtleText(triple.object));
+        continue;
+      }
+      expanded.push(triple);
+    }
+    return expanded;
+  }
+
+  private extractOntologyTriplesFromTurtleText(turtle: string): OntologyTriple[] {
+    const prefixes = new Map<string, string>([
+      ['', ''],
+      ['rdf', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'],
+      ['rdfs', 'http://www.w3.org/2000/01/rdf-schema#'],
+      ['owl', 'http://www.w3.org/2002/07/owl#'],
+      ['skos', 'http://www.w3.org/2004/02/skos/core#'],
+      ['schema', SCHEMA_HTTP_BASE],
+      ['xsd', 'http://www.w3.org/2001/XMLSchema#'],
+      ['dcterms', 'http://purl.org/dc/terms/'],
+      ['prov', 'http://www.w3.org/ns/prov#'],
+    ]);
+    const withoutComments = stripTurtleComments(turtle);
+    const withoutPrefixes = withoutComments.replace(
+      /@prefix\s+([A-Za-z][\w-]*|):\s*<([^>]+)>\s*\./g,
+      (_match, prefix: string, iri: string) => {
+        prefixes.set(prefix, iri);
+        return '';
+      },
+    );
+    const parsed: OntologyTriple[] = [];
+    for (const statement of splitTurtleTopLevel(withoutPrefixes, '.')) {
+      if (parsed.length >= MAX_ONTOLOGY_QUERY_TRIPLES) break;
+      const predicateSections = splitTurtleTopLevel(statement, ';');
+      const first = predicateSections.shift();
+      if (!first) continue;
+      const subjectToken = readFirstTurtleToken(first);
+      if (!subjectToken) continue;
+      const subject = expandTurtleTerm(subjectToken.token, prefixes);
+      if (!subject) continue;
+      const sections = [subjectToken.rest, ...predicateSections].map((item) => item.trim()).filter(Boolean);
+      for (const section of sections) {
+        if (parsed.length >= MAX_ONTOLOGY_QUERY_TRIPLES) break;
+        const predicateToken = readFirstTurtleToken(section);
+        if (!predicateToken) continue;
+        const predicate = expandTurtleTerm(predicateToken.token, prefixes);
+        if (!predicate) continue;
+        for (const objectToken of splitTurtleTopLevel(predicateToken.rest, ',')) {
+          if (parsed.length >= MAX_ONTOLOGY_QUERY_TRIPLES) break;
+          const object = parseTurtleObject(objectToken, prefixes);
+          if (!object) continue;
+          parsed.push({
+            subject,
+            predicate,
+            object: object.value,
+            objectIsIri: object.isIri,
+          });
+        }
+      }
+    }
+    return parsed;
   }
 
   private buildProjectOntologySummary(

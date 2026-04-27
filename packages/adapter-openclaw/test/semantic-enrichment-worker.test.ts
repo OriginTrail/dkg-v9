@@ -1831,13 +1831,93 @@ describe('SemanticEnrichmentWorker', () => {
     });
     await worker.flush();
 
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('GRAPH <did:dkg:context-graph:project-3/_ontology>'),
-    );
+    expect(query.mock.calls[0]?.[0]).toContain('did:dkg:context-graph:project-3/_ontology');
     expect(run.mock.calls[0]?.[0]?.message).toContain('Untrusted ontology data:');
     expect(run.mock.calls[0]?.[0]?.message).toContain('Source: project_ontology');
     expect(run.mock.calls[0]?.[0]?.message).not.toContain('Ontology ref override:');
     expect(run.mock.calls[0]?.[0]?.message).not.toContain('Event ontologyRef override hint');
+  });
+
+  it('uses legacy project-ontology assertion schema:text when canonical ontology triples are not installed yet', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-legacy-ontology',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'legacy-project',
+            assertionName: 'research-note',
+            assertionUri: 'did:dkg:context-graph:legacy-project/assertion/peer/research-note',
+            importStartedAt: '2026-04-15T12:30:00.000Z',
+            fileHash: 'keccak256:file-legacy-ontology',
+            detectedContentType: 'text/markdown',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const query = vi.fn().mockResolvedValue({
+      result: {
+        bindings: [
+          {
+            s: { value: 'urn:dkg:project:legacy-project:ontology' },
+            p: { value: 'http://schema.org/text' },
+            o: {
+              type: 'literal',
+              value: [
+                '@prefix owl: <http://www.w3.org/2002/07/owl#> .',
+                '@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .',
+                '@prefix : <http://dkg.io/ontology/book-research/> .',
+                ':Hypothesis a owl:Class ;',
+                '  rdfs:label "Hypothesis" ;',
+                '  rdfs:comment "A claim under investigation." .',
+              ].join('\n'),
+            },
+          },
+        ],
+      },
+    });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-legacy-ontology' });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText: vi.fn().mockResolvedValue('# Research\n\nThis note evaluates a Hypothesis.'),
+        query,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-legacy-ontology',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    const sparql = query.mock.calls[0]?.[0] ?? '';
+    expect(sparql).toContain('GRAPH ?g');
+    expect(sparql).toContain('did:dkg:context-graph:legacy-project/_ontology');
+    expect(sparql).toContain('did:dkg:context-graph:legacy-project/meta/assertion/');
+    expect(sparql).toContain('/project-ontology');
+    const prompt = run.mock.calls[0]?.[0]?.message ?? '';
+    expect(prompt).toContain('Source: project_ontology');
+    expect(prompt).toContain('<http://dkg.io/ontology/book-research/Hypothesis>');
+    expect(prompt).toContain('A claim under investigation.');
   });
 
   it('normalizes multiline ontologyRef override hints onto one safe prompt line', async () => {

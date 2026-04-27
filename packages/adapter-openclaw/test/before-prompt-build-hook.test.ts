@@ -12,12 +12,16 @@ import { DkgMemorySearchManager } from '../src/DkgMemoryPlugin';
 import type { OpenClawPluginApi } from '../src/types';
 
 function mkApi(): OpenClawPluginApi {
+  // Slot election + capability sink — without these, DkgMemoryPlugin.register()
+  // returns false and the new R14.2 isRegistered() gate in
+  // handleBeforePromptBuild trips before the recall path runs.
   return {
     registerTool: vi.fn(),
     registerHook: vi.fn(),
     on: vi.fn(),
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
-    config: {},
+    config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+    registerMemoryCapability: vi.fn(),
     registrationMode: 'full' as const,
   } as unknown as OpenClawPluginApi;
 }

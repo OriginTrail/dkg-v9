@@ -412,22 +412,104 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     const recent = (writer as any).recentTurnIds as Map<string, number>;
-    // After R12.6 symmetric dedup, a single W4a persist stamps THREE
-    // map entries:
+    // After R13.1, a single W4a persist stamps exactly TWO map
+    // entries — the writer never reserves a key it does not own:
     //   1. The pair-indexed turnId (the W4a write key)
-    //   2. The W4a-origin key (`w4a-content::<sha>`) so future W4b fires
-    //      dedup against this write
-    //   3. The W4b-origin reservation from the last-pair check (used
-    //      to detect a W4b that may have already written)
-    expect(recent.size).toBe(3);
+    //   2. The W4a-origin key (`w4a-content::<sha>`) so future W4b
+    //      fires dedup against this write
+    // The cross-path peek of `w4b-content::<sha>` is a non-mutating
+    // presence check (R13.1) and must NOT add a third entry.
+    expect(recent.size).toBe(2);
     const keys = Array.from(recent.keys());
     const w4aKey = keys.find((k) => k.includes("::w4a-content::"));
-    const w4bKey = keys.find((k) => k.includes("::w4b-content::"));
-    const turnIdKey = keys.find((k) => k !== w4aKey && k !== w4bKey)!;
+    const turnIdKey = keys.find((k) => k !== w4aKey)!;
     expect(w4aKey).toMatch(/::w4a-content::[0-9a-f]{16}$/);
-    expect(w4bKey).toMatch(/::w4b-content::[0-9a-f]{16}$/);
+    // Negative assertion — peek must not have stamped a w4b-origin.
+    expect(keys.some((k) => k.includes("::w4b-content::"))).toBe(false);
     const turnId = turnIdKey.slice(turnIdKey.lastIndexOf("::") + 2);
     expect(turnId).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("R13.1 — two legitimate same-content turns within the TTL persist (no false dedup)", async () => {
+    // Regression for R13.1: when both paths write the same logical
+    // content (W4a and W4b), the cross-path check must NOT mutate the
+    // opposite path's origin key. Otherwise a SECOND legitimate same-
+    // content turn — arriving while the first is still inside the TTL
+    // window — would be silently dropped.
+    //
+    // Scenario: W4a emits two consecutive same-content turns (different
+    // pair indices). The first stamps `w4a-origin`; the second's
+    // last-pair check on `w4b-origin` must be a non-mutating peek so
+    // both succeed.
+    const ev1: AgentEndContext = {
+      sessionId: "s",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    };
+    writer.onAgentEnd(ev1, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const ev2: AgentEndContext = {
+      sessionId: "s",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    };
+    writer.onAgentEnd(ev2, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Second same-content turn at a higher pair index must persist.
+    // Pre-R13.1, the W4a→W4a self-stamp via the last-pair guard would
+    // collide on the shared content hash and skip this write.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("R14.1 — W4a advances the watermark when the last-pair peek hits W4b's reservation", async () => {
+    // R14.1 regression: when W4b has already persisted a turn via
+    // `message:sent` and the cross-path peek tells W4a to skip it, the
+    // watermark must STILL advance to that pair's index. Without this,
+    // a later `agent_end` (after the 3s TTL has expired and the W4b
+    // reservation has been swept) would re-pair the same turn as
+    // unsaved backfill and write a duplicate to the daemon.
+    const sessionId = "openclaw:tg:::sk";
+    const dkw = writer as any;
+    // Simulate W4b having just persisted "ping/pong" by stamping the
+    // w4b-origin key directly in the dedup map. This is what
+    // `onMessageSent` does after a successful persist.
+    dkw.markTurnIdSeen(sessionId, dkw.w4bOriginKey("ping", "pong"));
+
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // W4a must NOT have written — W4b owns this turn (cross-path peek).
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    // The bumpWatermark scheduled a debounced commit. Watermark in the
+    // pending debounce slot must already reflect the persisted pair.
+    const pending = dkw.debounceTimers.get(sessionId);
+    expect(pending?.pendingIndex).toBe(0);
+    // Commit the watermark to disk-backed cache so the next onAgentEnd
+    // reads it via loadWatermark (mirrors the production debounce flush).
+    writer.flushSync();
+    expect(dkw.loadWatermark(sessionId)).toBe(0);
+
+    // Simulate TTL sweep — the W4b reservation has expired and would no
+    // longer trigger the cross-path peek. The watermark is the second
+    // line of defense and must independently prevent replay.
+    dkw.recentTurnIds.clear();
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
   });
 
   it("derives sessionId from context", async () => {

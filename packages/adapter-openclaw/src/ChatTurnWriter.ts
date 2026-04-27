@@ -168,9 +168,22 @@ export class ChatTurnWriter {
           // never seen by W4b), so they skip the W4b-origin check —
           // otherwise same-content backfill pairs would falsely dedup
           // against each other via the shared content hash.
+          //
+          // PEEK (non-mutating) — never stamp w4b-origin from W4a's
+          // path. Stamping would let two legitimate same-content turns
+          // within the TTL window collide on the W4a→W4a self-stamp
+          // (R13.1).
           if (i === lastIdx) {
             const w4bOrigin = this.w4bOriginKey(user, assistant);
-            if (this.markTurnIdSeen(sessionId, w4bOrigin)) continue; // W4b wrote it
+            if (this.peekTurnIdSeen(sessionId, w4bOrigin)) {
+              // W4b already persisted this pair via `message:sent`. The
+              // pair is logically saved, so advance the watermark to its
+              // index — without this, a later `agent_end` (after the 3s
+              // dedup TTL has expired) would re-pair the same pair as
+              // unsaved backfill and write a duplicate (R14.1).
+              this.bumpWatermark(sessionId, pairIndex);
+              continue;
+            }
           }
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
@@ -178,15 +191,10 @@ export class ChatTurnWriter {
             // Stamp W4a-origin so a same-cycle W4b fire dedups.
             this.markTurnIdSeen(sessionId, this.w4aOriginKey(user, assistant));
           } catch (err) {
-            // Release reservations so a retry (next agent_end or the
-            // paired internal hook) can re-attempt. The last-pair w4b
-            // origin reservation MUST also be released — without it,
-            // the next agent_end's last pair would falsely dedup
-            // against the stale reservation and silently skip the turn.
+            // Release the turnId reservation so a retry can re-attempt.
+            // No w4b-origin release needed — W4a's last-pair check is
+            // now a non-mutating peek (R13.1), so W4a never reserved it.
             this.releaseTurnIdReservation(sessionId, turnId);
-            if (i === lastIdx) {
-              this.releaseTurnIdReservation(sessionId, this.w4bOriginKey(user, assistant));
-            }
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
             return; // leave watermark at last successful pair
           }
@@ -354,15 +362,18 @@ export class ChatTurnWriter {
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
       if (userText || assistantText) {
-        // Cross-path dedup, W4b side: check the W4a-origin key — if
-        // `agent_end` already wrote this turn within the TTL window,
-        // skip. Then reserve the W4b-origin key (atomic mark) so a
-        // later `agent_end` whose LAST pair has the same content sees
-        // it and skips. Symmetric across paths regardless of order.
+        // Cross-path dedup, W4b side:
+        //   PEEK w4a-origin — non-mutating; if W4a already wrote this
+        //   turn within the TTL window, skip. Stamping the key here
+        //   would let two legitimate same-content W4b turns within
+        //   the TTL collide on the W4b→W4b self-stamp (R13.1).
+        //   Then reserve W4b's OWN origin key so a later W4a's
+        //   last-pair peek sees it. The W4b-origin key is the only
+        //   one W4b is authorized to set.
         const w4aOrigin = this.w4aOriginKey(userText, assistantText);
-        if (this.markTurnIdSeen(sessionId, w4aOrigin)) return; // W4a already wrote
+        if (this.peekTurnIdSeen(sessionId, w4aOrigin)) return; // W4a already wrote
         const w4bOrigin = this.w4bOriginKey(userText, assistantText);
-        this.markTurnIdSeen(sessionId, w4bOrigin); // reserve for W4a's last-pair check
+        if (this.markTurnIdSeen(sessionId, w4bOrigin)) return; // another W4b path is in flight
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         // Route through the same tracked-job wrapper as onAgentEnd so the
         // reset gate sees this in-flight write and `Promise.allSettled`s
@@ -416,6 +427,30 @@ export class ChatTurnWriter {
     if (this.recentTurnIds.has(key)) return true;
     this.recentTurnIds.set(key, now);
     return false;
+  }
+
+  /**
+   * Non-mutating presence check. Returns `true` if the key is currently
+   * reserved within the TTL window; `false` otherwise. Does NOT stamp.
+   *
+   * Use for OPPOSITE-path guards (W4a peeking w4b-origin, W4b peeking
+   * w4a-origin). The set-on-miss behavior of `markTurnIdSeen` is wrong
+   * for the opposite-path check because the peeker would falsely
+   * reserve a key it has no business owning, then dedup against itself
+   * on the next legitimate same-content turn within the TTL.
+   *
+   * Evicts the entry opportunistically if it's expired so the read is
+   * accurate rather than stale.
+   */
+  private peekTurnIdSeen(sessionId: string, turnId: string): boolean {
+    const key = this.dedupKey(sessionId, turnId);
+    const ts = this.recentTurnIds.get(key);
+    if (ts === undefined) return false;
+    if (Date.now() - ts > ChatTurnWriter.TURNID_TTL_MS) {
+      this.recentTurnIds.delete(key);
+      return false;
+    }
+    return true;
   }
 
   /** Release a turnId reservation on persist failure so retries can proceed. */
@@ -537,8 +572,27 @@ export class ChatTurnWriter {
     return out.trim();
   }
 
+  /**
+   * Strip control chars and bound length without dropping the
+   * distinguishing suffix. R13.2 — naive `substring(0, 64)` collapsed
+   * distinct long `channelId` / `accountId` / `conversationId` /
+   * `sessionKey` values that shared a long prefix into one composed
+   * key, merging unrelated conversations' watermarks. Keep a readable
+   * prefix; append a stable hash suffix so distinct overlong values
+   * always produce distinct outputs.
+   */
+  private static readonly SANITIZE_MAX_LEN = 96;
+  private static readonly SANITIZE_HASH_LEN = 16;
   private sanitize(part: string): string {
-    return part.replace(/[\x00-\x1f\x7f]/g, "").substring(0, 64);
+    const cleaned = part.replace(/[\x00-\x1f\x7f]/g, "");
+    if (cleaned.length <= ChatTurnWriter.SANITIZE_MAX_LEN) return cleaned;
+    const tag = createHash("sha256")
+      .update(cleaned)
+      .digest("hex")
+      .substring(0, ChatTurnWriter.SANITIZE_HASH_LEN);
+    const prefixLen =
+      ChatTurnWriter.SANITIZE_MAX_LEN - ChatTurnWriter.SANITIZE_HASH_LEN - 1;
+    return `${cleaned.substring(0, prefixLen)}~${tag}`;
   }
 
   /**
@@ -684,6 +738,20 @@ export class ChatTurnWriter {
     return this.cachedWatermarks.get(sessionId) ?? -1;
   }
 
+  /**
+   * Advance the per-session watermark to `pairIndex` if (and only if) it
+   * is greater than the current pending or persisted index. Centralizes
+   * the "MAX of current and pairIndex" guard so the cross-path-skip path
+   * (R14.1) and `persistOne` use identical advancement semantics.
+   */
+  private bumpWatermark(sessionId: string, pairIndex: number): void {
+    const pending = this.debounceTimers.get(sessionId);
+    const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
+    if (pairIndex > currentIndex) {
+      this.saveWatermark(sessionId, pairIndex);
+    }
+  }
+
   private saveWatermark(sessionId: string, index: number): void {
     const existing = this.debounceTimers.get(sessionId);
     if (existing) clearTimeout(existing.timer);
@@ -725,11 +793,7 @@ export class ChatTurnWriter {
         //     `computeDelta`, which scans `messages[]`. W4b operates on
         //     ad-hoc internal-hook events that have no pair semantics.
         if (typeof opts?.pairIndex === "number") {
-          const pending = this.debounceTimers.get(sessionId);
-          const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
-          if (opts.pairIndex > currentIndex) {
-            this.saveWatermark(sessionId, opts.pairIndex);
-          }
+          this.bumpWatermark(sessionId, opts.pairIndex);
         }
         this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
         return;

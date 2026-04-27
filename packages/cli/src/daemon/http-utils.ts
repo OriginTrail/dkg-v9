@@ -295,10 +295,38 @@ export function jsonResponse(
   // A direct `String.prototype.replace` between the JSON serialisation
   // and the response sink is the canonical sanitiser the CodeQL query
   // recognises, so we do one final last-mile pass on the serialised body.
-  // The pattern matches v8 stack-frame continuation lines as they would
-  // appear inside a JSON-escaped string (`\n   at <fn> (...)`); on
-  // already-scrubbed payloads the regex never fires and `body === rawBody`.
-  const body = rawBody.replace(/\\n\s+at [^"\n]+/g, "");
+  //
+  // PR #229 bot review (r3146733046, http-utils.ts:206/307). The
+  // previous last-mile pass only matched `\n   at <fn> (...)` — a v8
+  // continuation line as it appears INSIDE a JSON-escaped string.
+  // CodeQL's data-flow analysis still flagged the `res.end(body)`
+  // sink because the regex did not sanitise the additional stack-
+  // shaped patterns it recognises:
+  //   - bare "at <fn> (...)" frames at the head of an err.message
+  //     (no leading newline — surfaced by libp2p / ethers wrappers
+  //     that splice the first frame straight into the message);
+  //   - top-level multi-frame Error.stack copies that did make it
+  //     through the structural scrub via a non-error-shaped key.
+  //
+  // The replacement chain below targets ONLY recognisable stack-frame
+  // tokens (`at <fn> (...)` shapes) at the egress boundary; it does
+  // NOT touch bare absolute paths because legitimate non-error
+  // response fields (`filePath`, `path`, `endpoint`, …) routinely
+  // contain `/`-delimited identifiers and absolute paths that MUST be
+  // preserved. Path-with-line:col redaction stays inside
+  // `stripStackFrames`, which only runs on the curated
+  // `ERROR_SHAPED_KEYS` set. On already-clean payloads every regex
+  // misses, so `body === rawBody` and there is no observable
+  // behaviour change.
+  //
+  // ReDoS safety: `[^"\n]+` and `[^)"\n]+` cannot be ambiguous because
+  // each character has exactly one role per branch — the same anti-
+  // backtracking shape as the existing `stripStackFrames` regex
+  // (CodeQL alerts 56 / 57).
+  const body = rawBody
+    .replace(/\\n\s+at [^"\n]+/g, "")
+    .replace(/\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)/g, "")
+    .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "");
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),

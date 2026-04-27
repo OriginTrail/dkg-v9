@@ -507,42 +507,71 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             // consumers that need real KAS-space IDs must continue to read
             // from V9 publishes. The canonical, topic-unique V10 event is the
             // one emitted above from KAV10 itself.
-            uint64 startKAId = uint64(kcId);
+            // PR #229 bot review (r3146974254, KnowledgeAssetsV10.sol:510).
+            // The shim projects V10 values into LEGACY widths
+            // (kcId/startKAId/endKAId → uint64, byteSize → uint64,
+            // knowledgeAssetsAmount → uint32). Once a real V10 publish
+            // exceeds any of those widths a naked downcast would silently
+            // wrap/truncate and indexers consuming the legacy event would
+            // see the wrong KA range / count / size — a quiet data-
+            // integrity bug. We refuse to emit the legacy shim when ANY
+            // value overflows. The canonical V10 `KnowledgeBatchCreated`
+            // emitted above already carries the full-precision payload,
+            // so dropping the projection is the strictly safer outcome
+            // (matches the "best-effort" contract already documented for
+            // the try/catch fallback below).
+            //
+            // For the (extremely common) in-range case we still emit the
+            // shim through the same try/catch as before so a pre-upgrade
+            // KAS without `emitV10KnowledgeBatchCreated` doesn't revert
+            // the V10 publish.
             uint256 endKAIdRaw = kcId + p.knowledgeAssetsAmount - 1;
-            uint64 endKAId = endKAIdRaw > type(uint64).max ? type(uint64).max : uint64(endKAIdRaw);
-            // PR #229 bot review round 9 (KAV10:512): during a rolling
-            // upgrade the Hub-registered `KnowledgeAssetsStorage` slot may
-            // still point at a legacy V8/V9 KAS that predates
-            // `emitV10KnowledgeBatchCreated`. A direct call would hit an
-            // unknown selector and revert the WHOLE V10 publish, not just
-            // the legacy audit emit. The audit emit is documented as
-            // best-effort (the canonical V10 event is already emitted by
-            // this contract above), so wrap the call in `try/catch` — on
-            // any failure (missing selector, out-of-gas on child, Guardian
-            // reject) we silently drop the legacy shim emit and let the
-            // V10 event carry the payload. `catch` matches every Solidity
-            // revert family (string, panic, custom, bubbled OOG from the
-            // callee up to 1/64 remaining gas).
-            try knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
-                kcId,
-                msg.sender,
-                p.merkleRoot,
-                uint64(p.byteSize),
-                uint32(p.knowledgeAssetsAmount),
-                startKAId,
-                endKAId,
-                currentEpoch,
-                currentEpoch + p.epochs,
-                p.tokenAmount,
-                p.isImmutable
-            ) {
-                // success: V8/V9 legacy consumers see the V10 audit projection
-            } catch {
-                // pre-upgrade KAS or transient child-call failure; the
-                // canonical V10 `KnowledgeBatchCreated` event above is
-                // unaffected, so skip silently (matches the "best-effort"
-                // contract documented in the comment block above).
+            bool legacyShimSafe =
+                kcId <= type(uint64).max
+                && endKAIdRaw <= type(uint64).max
+                && uint256(p.byteSize) <= type(uint64).max
+                && p.knowledgeAssetsAmount <= type(uint32).max;
+            if (legacyShimSafe) {
+                uint64 startKAId = uint64(kcId);
+                uint64 endKAId = uint64(endKAIdRaw);
+                // PR #229 bot review round 9 (KAV10:512): during a rolling
+                // upgrade the Hub-registered `KnowledgeAssetsStorage` slot may
+                // still point at a legacy V8/V9 KAS that predates
+                // `emitV10KnowledgeBatchCreated`. A direct call would hit an
+                // unknown selector and revert the WHOLE V10 publish, not just
+                // the legacy audit emit. The audit emit is documented as
+                // best-effort (the canonical V10 event is already emitted by
+                // this contract above), so wrap the call in `try/catch` — on
+                // any failure (missing selector, out-of-gas on child, Guardian
+                // reject) we silently drop the legacy shim emit and let the
+                // V10 event carry the payload. `catch` matches every Solidity
+                // revert family (string, panic, custom, bubbled OOG from the
+                // callee up to 1/64 remaining gas).
+                try knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
+                    kcId,
+                    msg.sender,
+                    p.merkleRoot,
+                    uint64(p.byteSize),
+                    uint32(p.knowledgeAssetsAmount),
+                    startKAId,
+                    endKAId,
+                    currentEpoch,
+                    currentEpoch + p.epochs,
+                    p.tokenAmount,
+                    p.isImmutable
+                ) {
+                    // success: V8/V9 legacy consumers see the V10 audit projection
+                } catch {
+                    // pre-upgrade KAS or transient child-call failure; the
+                    // canonical V10 `KnowledgeBatchCreated` event above is
+                    // unaffected, so skip silently (matches the "best-effort"
+                    // contract documented in the comment block above).
+                }
             }
+            // (legacyShimSafe == false) → values exceed legacy event
+            // widths; skip the projection entirely so no truncated
+            // record reaches indexers. Operators relying on the legacy
+            // shim must reconcile via the canonical V10 event.
         }
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---

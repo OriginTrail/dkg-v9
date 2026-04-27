@@ -137,15 +137,34 @@ export class OxigraphStore implements TripleStore {
   }
 
   private hydrateSync(filePath: string): void {
+    // PR #229 bot review (r3146902138, oxigraph.ts:157). Track whether
+    // the primary N-Quads dump was actually hydrated before deciding
+    // whether to read the sidecar. Pre-fix the sidecar was loaded
+    // unconditionally — if the dump file was missing, empty, or
+    // corrupt the silent `catch` would leave the store with no quads
+    // while `originalNumericDatatype` was still populated from the
+    // sidecar. The first new `insert()` whose subject reused a
+    // sidecar key would then "restore" the new literal to the OLD
+    // datatype that is no longer represented in the store, silently
+    // corrupting downstream reads.
+    let dumpLoaded = false;
     try {
       if (!existsSync(filePath)) return;
       const data = readFileSync(filePath, 'utf-8') as string;
       if (data.trim()) {
         this.store.load(data, { format: 'application/n-quads' });
+        dumpLoaded = true;
+      } else {
+        // Empty dump file — treat as a fresh store. Don't pull stale
+        // datatype metadata in alongside it.
+        return;
       }
     } catch {
-      // File missing or corrupt — start empty.
+      // File missing or corrupt — start empty AND skip the sidecar
+      // (see above). Returning here is the new fail-closed behaviour.
+      return;
     }
+    if (!dumpLoaded) return;
     // Bot review (PR #229 M-follow-up): `originalNumericDatatype` used
     // to only be populated by live `insert()` calls, so after a process
     // restart every `oxigraph-persistent` store lost all numeric-subtype

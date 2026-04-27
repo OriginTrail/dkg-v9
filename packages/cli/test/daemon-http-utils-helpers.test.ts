@@ -328,5 +328,69 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       });
       expect(body).toEqual({ ok: true, msg: 'all systems nominal' });
     });
+
+    // PR #229 bot review (r3146733046, http-utils.ts:206/307). The
+    // CodeQL js/stack-trace-exposure alert remained against
+    // `res.end(body)` because the prior egress regex only matched the
+    // JSON-escaped continuation form `\n   at <fn>`. CodeQL's taint
+    // analysis still saw err.message strings flowing into the sink
+    // when the message embedded a stack-shaped substring without the
+    // leading newline. The expanded last-mile scrub strips three
+    // additional shapes the structural scrub may miss when the
+    // payload is buried in a non-error-shaped field. These
+    // assertions pin those shapes so a regression to the narrower
+    // pattern would be caught.
+    it('strips a parenthesised `at <fn> (...)` frame embedded in a non-error key', () => {
+      // `arbitrary` is NOT in ERROR_SHAPED_KEYS, so the structural scrub
+      // does NOT touch it. The egress chain MUST still strip the frame
+      // shape (`at <fn> (...)`) so the path inside leaks no filesystem
+      // layout. The egress chain only neutralises stack-frame TOKENS,
+      // not bare paths — see the `preserves legitimate paths` test
+      // above for the negative side of that contract.
+      const errMsg =
+        "first frame at handler (/Users/runner/work/dkg/dkg/packages/foo/src/bar.ts:42:7) trailing";
+      const { body } = captureJsonResponse(500, {
+        ok: false,
+        payload: { arbitrary: errMsg },
+      });
+      expect(body.payload.arbitrary).not.toMatch(/bar\.ts/);
+      expect(body.payload.arbitrary).not.toMatch(/:42:7/);
+      expect(body.payload.arbitrary).not.toMatch(/\/Users\/runner/);
+      expect(body.payload.arbitrary).toContain('first frame');
+      expect(body.payload.arbitrary).toContain('trailing');
+    });
+
+    it('strips an unparenthesised `at <path>:line:col` frame in a non-error key', () => {
+      // The most common Node.js inline frame shape — `at handler:42:7`
+      // without surrounding parens — must be neutralised by the egress
+      // chain because the structural scrub does not run on
+      // non-error-shaped keys.
+      const errMsg = 'failure at handler:42:7 happened';
+      const { body } = captureJsonResponse(500, {
+        ok: false,
+        payload: { context: errMsg },
+      });
+      expect(body.payload.context).not.toMatch(/at handler:\d+:\d+/);
+      expect(body.payload.context).toContain('failure');
+      expect(body.payload.context).toContain('happened');
+    });
+
+    it('preserves legitimate `.json` / `.txt` paths in non-error fields', () => {
+      // The egress chain MUST NOT mangle bare absolute paths that
+      // legitimately appear in non-error response shapes — they are
+      // not stack-trace tokens. `stripStackFrames` only redacts paths
+      // INSIDE error-shaped keys; everything else has to round-trip
+      // unchanged or the daemon's `filePath` / `path` / `endpoint`
+      // contracts break for callers.
+      const { body } = captureJsonResponse(200, {
+        ok: true,
+        filePath: '/var/data/dkg/foo.json',
+        path: '/var/data/dkg/manifest.txt',
+        endpoint: 'http://localhost:7777/api/query',
+      });
+      expect(body.filePath).toBe('/var/data/dkg/foo.json');
+      expect(body.path).toBe('/var/data/dkg/manifest.txt');
+      expect(body.endpoint).toBe('http://localhost:7777/api/query');
+    });
   });
 });

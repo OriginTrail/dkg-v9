@@ -27,7 +27,7 @@
  *          insert → query → re-insert → query without loss.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -125,6 +125,102 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
       expect(byS['urn:num:a']).toBe(`"9223372036854775807"^^<${LONG}>`);
       expect(byS['urn:num:b']).toBe(`"123456"^^<${INT}>`);
       expect(byS['urn:num:c']).toBe(`"777"^^<${SHORT}>`);
+      await s2.close();
+    } finally {
+      cleanup();
+    }
+  });
+
+  // PR #229 bot review (r3146902138, oxigraph.ts:157). Pre-fix the
+  // numeric-datatype sidecar was hydrated unconditionally — even when
+  // the primary N-Quads dump was missing, empty, or corrupt. That left
+  // stale subtype metadata in `originalNumericDatatype` while the store
+  // was empty, so the first new `insert()` whose subject reused a
+  // sidecar key would silently "restore" the new literal to the OLD
+  // datatype that no longer existed in the store. The fix gates sidecar
+  // hydration on a successful dump load. Regression test:
+  //   1. Persist a real (subtype + sidecar) pair.
+  //   2. Delete the dump, leaving only the sidecar.
+  //   3. Insert a NEW literal at the same subject/predicate with the
+  //      DEFAULT canonical xsd:integer encoding.
+  //   4. Read it back. The literal MUST come back as
+  //      `"…"^^<xsd:integer>`, NOT silently re-typed to the stale
+  //      `xsd:long` from the surviving sidecar.
+  it('PR #229 bugbot: sidecar is NOT hydrated when the primary dump is missing (no stale subtype leak)', async () => {
+    try {
+      const LONG = 'http://www.w3.org/2001/XMLSchema#long';
+      const INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+      const g = 'urn:dkg:subtype:graph';
+
+      const s1 = new OxigraphStore(persistPath);
+      await s1.insert([
+        { subject: 'urn:reuse', predicate: 'http://ex.org/v', object: `"42"^^<${LONG}>`, graph: g },
+      ]);
+      await s1.close();
+
+      // Sanity: the sidecar exists alongside the dump.
+      expect(existsSync(persistPath)).toBe(true);
+      expect(existsSync(`${persistPath}.numeric-datatypes.json`)).toBe(true);
+
+      // Simulate a partial restore: delete the primary dump but
+      // leave the sidecar behind.
+      unlinkSync(persistPath);
+      expect(existsSync(persistPath)).toBe(false);
+      expect(existsSync(`${persistPath}.numeric-datatypes.json`)).toBe(true);
+
+      // Reopen — store starts empty, sidecar must NOT be hydrated.
+      const s2 = new OxigraphStore(persistPath);
+      // Insert a fresh literal at the same subject/predicate using
+      // the canonical xsd:integer datatype. If the stale sidecar
+      // had been hydrated, the store would re-tag this literal as
+      // xsd:long when reading it back.
+      await s2.insert([
+        { subject: 'urn:reuse', predicate: 'http://ex.org/v', object: `"99"^^<${INTEGER}>`, graph: g },
+      ]);
+
+      const r = await s2.query(
+        `SELECT ?o WHERE { GRAPH <${g}> { <urn:reuse> <http://ex.org/v> ?o } }`,
+      );
+      expect(r.type).toBe('bindings');
+      if (r.type !== 'bindings') return;
+      expect(r.bindings).toHaveLength(1);
+      // No stale xsd:long ressurection — the new literal keeps its
+      // canonical xsd:integer typing.
+      expect(r.bindings[0]['o']).toBe(`"99"^^<${INTEGER}>`);
+      await s2.close();
+    } finally {
+      cleanup();
+    }
+  });
+
+  // Companion regression: an EMPTY primary dump must also skip the
+  // sidecar (treats empty-but-present the same as missing).
+  it('PR #229 bugbot: sidecar is NOT hydrated when the primary dump is present-but-empty', async () => {
+    try {
+      const LONG = 'http://www.w3.org/2001/XMLSchema#long';
+      const INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+      const g = 'urn:dkg:subtype:graph';
+
+      const s1 = new OxigraphStore(persistPath);
+      await s1.insert([
+        { subject: 'urn:reuse2', predicate: 'http://ex.org/v', object: `"7"^^<${LONG}>`, graph: g },
+      ]);
+      await s1.close();
+
+      // Truncate the dump to an empty file (the sidecar persists).
+      writeFileSync(persistPath, '');
+
+      const s2 = new OxigraphStore(persistPath);
+      await s2.insert([
+        { subject: 'urn:reuse2', predicate: 'http://ex.org/v', object: `"55"^^<${INTEGER}>`, graph: g },
+      ]);
+      const r = await s2.query(
+        `SELECT ?o WHERE { GRAPH <${g}> { <urn:reuse2> <http://ex.org/v> ?o } }`,
+      );
+      expect(r.type).toBe('bindings');
+      if (r.type !== 'bindings') return;
+      expect(r.bindings).toHaveLength(1);
+      expect(r.bindings[0]['o']).toBe(`"55"^^<${INTEGER}>`);
       await s2.close();
     } finally {
       cleanup();

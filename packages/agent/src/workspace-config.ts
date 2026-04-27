@@ -186,11 +186,34 @@ export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
   // The contract from the JSDoc above is "frontmatter OR fence";
   // honour it by treating frontmatter-without-`dkg` as "keep looking"
   // and only erroring after BOTH carriers have been checked.
+  //
+  // PR #229 bot review (r3146759647, workspace-config.ts:191): the
+  // prior revision called `yaml.load(fm[1])` directly. If the
+  // frontmatter is unrelated to DKG and uses a YAML extension or
+  // shape that `js-yaml` rejects (a tab-indented block, a bare
+  // colon, a custom tag) the parse error bubbled out of the
+  // function and the fenced-block fallback never ran — exactly
+  // the multi-tool case this logic is supposed to serve. Catch
+  // YAML parse errors here and treat the frontmatter as "absent
+  // for our purposes"; the ```dkg-config``` fence (or the final
+  // diagnostic) carries the loader the rest of the way. We
+  // remember that frontmatter WAS present so the trailing error
+  // can still surface the more helpful "frontmatter present but
+  // no `dkg:` key" diagnostic when neither carrier yields a
+  // config.
   const fm = FRONTMATTER_RE.exec(src);
+  let frontmatterPresent = !!fm;
   if (fm) {
-    const parsed = yaml.load(fm[1]) as Record<string, unknown> | null;
-    if (parsed && typeof parsed === 'object' && 'dkg' in parsed) {
-      return parseWorkspaceConfig(parsed.dkg);
+    try {
+      const parsed = yaml.load(fm[1]) as Record<string, unknown> | null;
+      if (parsed && typeof parsed === 'object' && 'dkg' in parsed) {
+        return parseWorkspaceConfig(parsed.dkg);
+      }
+    } catch {
+      // Frontmatter is not parseable as YAML — most likely it's
+      // intended for a different tool. Fall through to the
+      // fenced-block fallback rather than aborting the loader.
+      frontmatterPresent = false;
     }
   }
   const fenceBody = extractDkgConfigFenceBody(src);
@@ -212,7 +235,7 @@ export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
     }
     return parseWorkspaceConfig(parsed);
   }
-  if (fm) {
+  if (frontmatterPresent) {
     // Frontmatter was present but did not carry `dkg:`, and no fenced
     // fallback exists either. Surface a diagnostic that tells the
     // adopter exactly which carriers we tried so they don't have to

@@ -208,10 +208,21 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         // real V10 publishes, and indexers have no state change in this
         // contract to cross-check. Lock the caller to the one contract
         // that owns the V10 publish pipeline: `KnowledgeAssetsV10`.
-        // `hub.owner()` is kept as an explicit admin break-glass (same
-        // pattern used elsewhere in `HubDependent._checkHubContract`).
+        //
+        // PR #229 bot review (r3146974251, KnowledgeAssetsStorage.sol:214).
+        // The earlier revision kept `hub.owner()` as a break-glass on
+        // the emitter itself, but this contract stores no state that
+        // indexers can reconcile against the audit event — a single
+        // owner call could forge an arbitrary `V10KnowledgeBatchEmitted`
+        // that downstream tooling treats as a real V10 publish. We
+        // remove the owner bypass so the audit event is now strictly
+        // 1:1 with `KnowledgeAssetsV10`-driven publishes. Operators
+        // who need to emit a synthetic record (migrations, recovery,
+        // index rebuilds) must do so via a separate admin-only
+        // pipeline that emits a DISTINCT event — not by laundering
+        // the call through the production audit channel.
         address v10 = hub.getContractAddress("KnowledgeAssetsV10");
-        if (msg.sender != v10 && msg.sender != hub.owner()) {
+        if (msg.sender != v10) {
             revert HubLib.UnauthorizedAccess("Only KnowledgeAssetsV10");
         }
         emit V10KnowledgeBatchEmitted(

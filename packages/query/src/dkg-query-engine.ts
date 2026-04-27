@@ -336,10 +336,26 @@ export class DKGQueryEngine implements QueryEngine {
     // SelfAttested, so the per-triple filter would otherwise reject
     // every quad that lacks a `dkg:trustLevel` literal (i.e. every
     // pre-Q-1 quad).
+    //
+    // PR #229 bot review (r3146759642, dkg-query-engine.ts:342):
+    // we ALSO skip the per-triple filter at `Endorsed`. The graph-
+    // scope resolution above already drops the root data graph and
+    // unions only over `<…>/_verified_memory/{quorum}` sub-graphs,
+    // and any quad that landed in `_verified_memory` is by
+    // definition at least `Endorsed` (the on-chain quorum that
+    // promoted it IS the endorsement). Until the publisher / quorum
+    // writers actually emit `dkg:trustLevel` literals (tracked
+    // upstream), the per-triple join would silently turn every
+    // legitimate `minTrust=Endorsed` query into an empty result.
+    // Levels strictly above Endorsed (`PartiallyVerified`,
+    // `ConsensusVerified`) still require the per-triple filter
+    // because graph-scope alone cannot distinguish those tiers from
+    // a basic Endorsed write — a fail-closed empty result there is
+    // the correct behaviour until writers stamp the literal.
     if (
       view === 'verified-memory' &&
       effectiveMinTrust !== undefined &&
-      effectiveMinTrust > TrustLevel.SelfAttested
+      effectiveMinTrust > TrustLevel.Endorsed
     ) {
       const rewritten = injectMinTrustFilter(sparql, effectiveMinTrust);
       if (!rewritten) {

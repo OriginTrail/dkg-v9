@@ -83,6 +83,59 @@ describe('dkgPlugin.hooks wiring', () => {
       await expect(hook(runtime, msg)).rejects.toThrow(/DKG node not started/);
     }
   });
+
+  // PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts:355).
+  // The previous declaration `(...args: Parameters<typeof
+  // dkgService.onChatTurn>) => …` collapsed the overloaded service
+  // signature into the catch-all `Memory + Record<string, unknown>`
+  // shape, so a downstream caller could omit `userMessageId` /
+  // `userTurnPersisted` and only discover the violation at runtime.
+  // We now declare an explicit overloaded callable
+  // (`DkgChatTurnHook`) so the user-turn / assistant-reply split is
+  // enforced at compile time. This test pins the contract by:
+  //
+  //   (a) validating that a well-formed assistant-reply call still
+  //       compiles (positive path),
+  //   (b) using `// @ts-expect-error` to assert that an
+  //       assistant-reply call MISSING `userMessageId` is rejected
+  //       at compile time (negative path).
+  //
+  // The negative branch is the failure mode the bot flagged: under
+  // the pre-fix `Parameters<>`-derived signature the @ts-expect-error
+  // marker would itself error ("unused @ts-expect-error directive"),
+  // so this is a real regression guard, not a stylistic comment.
+  it('PR #229 r3131820494: hook surface enforces the assistant-reply contract at compile time', async () => {
+    type Hook = typeof dkgPlugin.hooks.onAssistantReply;
+    const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+    const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r' } as any;
+
+    // Positive path — a complete AssistantReplyChatTurnOptions
+    // satisfies the typed surface. We don't actually invoke it here
+    // because a real call would need a live DKGAgent; the test only
+    // pins the SHAPE.
+    const positive: Parameters<Hook> = [
+      runtime,
+      msg,
+      undefined,
+      { mode: 'assistant-reply', userMessageId: 'u-1' },
+    ];
+    expect(positive.length).toBe(4);
+
+    // Negative path — `mode: 'assistant-reply'` without
+    // `userMessageId` MUST be a compile-time error against the
+    // typed overloads. If TypeScript ever stops rejecting this
+    // (regression to `Parameters<typeof onChatTurn>` or similar),
+    // the @ts-expect-error directive becomes unused and this test
+    // fails to compile.
+    // @ts-expect-error - assistant-reply without userMessageId is rejected
+    const negative: Parameters<Hook> = [
+      runtime,
+      msg,
+      undefined,
+      { mode: 'assistant-reply' },
+    ];
+    expect(Array.isArray(negative)).toBe(true);
+  });
 });
 
 // -----------------------------------------------------------------------

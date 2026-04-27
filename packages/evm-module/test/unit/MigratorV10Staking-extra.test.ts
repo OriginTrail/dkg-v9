@@ -154,6 +154,47 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     expect(frozenErr!.inputs![0].type).to.equal('uint72');
   });
 
+  // PR #229 bot review (r3146902144, MigratorV10Staking.sol:137).
+  // Before the fix, `finalizeMigration()` only required
+  // `onlyOwnerOrMultiSigOwner` and irreversibly flipped
+  // `migrationFinalized = true` even when `initiateMigration` had
+  // never been called. Because every write surface (`migrateDelegator`,
+  // `markNodeMigrated`) is gated by `whenInitiated` (which BANS calls
+  // when `migrationFinalized` is true) AND `initiateMigration` itself
+  // reverts with `MigrationAlreadyFinalized` once finalised, the
+  // single fat-finger would brick the migrator with no recovery
+  // path — only redeployment can unfreeze it. The fix requires the
+  // migration to be active (initiated AND not yet finalised) before
+  // finalisation succeeds. We pin the source-level guard at the
+  // statement granularity so a refactor that drops it can't slip
+  // back in unnoticed.
+  it('bot review r3146902144: finalizeMigration requires migrationInitiated before flipping the kill switch', () => {
+    const src = fs.readFileSync(contractPath, 'utf8');
+
+    // Locate the body of finalizeMigration without depending on
+    // exact whitespace.
+    const fnMatch = src.match(/function\s+finalizeMigration\s*\([^)]*\)\s*[^{]*\{([^}]*)\}/);
+    expect(
+      fnMatch,
+      'finalizeMigration must exist in MigratorV10Staking.sol',
+    ).to.not.equal(null);
+    const body = fnMatch![1];
+
+    // The new guard MUST revert with MigrationNotInitiated when the
+    // migration was never started.
+    expect(
+      /if\s*\(\s*!\s*migrationInitiated\s*\)\s*revert\s+MigrationNotInitiated\s*\(\s*\)\s*;/.test(body),
+      'finalizeMigration must `revert MigrationNotInitiated()` when migrationInitiated is false',
+    ).to.equal(true);
+
+    // And it MUST also revert with MigrationAlreadyFinalized when
+    // already finalised — keeps finalize idempotent (no double flip).
+    expect(
+      /if\s*\(\s*migrationFinalized\s*\)\s*revert\s+MigrationAlreadyFinalized\s*\(\s*\)\s*;/.test(body),
+      'finalizeMigration must `revert MigrationAlreadyFinalized()` when already finalised',
+    ).to.equal(true);
+  });
+
   it('baseline sanity: contracts/migrations/ contains MigratorV10Staking.sol (pins detection)', () => {
     // Meta-test: confirms `fs.readdirSync` itself sees the migrations
     // directory the way the SPEC-GAP test above expects. The legacy

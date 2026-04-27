@@ -14,8 +14,13 @@
  *     },
  *   };
  */
-import type { Plugin } from './types.js';
-import { dkgService } from './service.js';
+import type { Plugin, IAgentRuntime, Memory, PersistableMemory, State } from './types.js';
+import {
+  dkgService,
+  type ChatTurnPersistResult,
+  type UserTurnChatTurnOptions,
+  type AssistantReplyChatTurnOptions,
+} from './service.js';
 import { dkgKnowledgeProvider } from './provider.js';
 import {
   dkgPublish,
@@ -349,12 +354,53 @@ async function onChatTurnHandler(
   return result;
 }
 
+// PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts:355).
+// Pre-fix the plugin's hook surface declared its callable type as
+// `(...args: Parameters<typeof dkgService.onChatTurn>) => ReturnType<…>`.
+// `Parameters<>` on an OVERLOADED method only sees the LAST overload
+// (the catch-all `Memory + Record<string, unknown>` shape that exists
+// for the loose `dkgService as any` legacy callers), so direct
+// downstream callers of `dkgPlugin.hooks.onChatTurn` lost the
+// compile-time enforcement of `userMessageId` / `userTurnPersisted`
+// that round 18 (r18-2) added to `DKGService`. The runtime guards in
+// `persistChatTurnImpl` still caught violations, but the bot's point
+// was that the typed surface should also enforce them.
+//
+// Fix: declare an explicit overloaded callable interface here so the
+// compiler keeps the user-turn / assistant-reply split visible to
+// callers of `dkgPlugin.hooks.onChatTurn` /
+// `dkgPlugin.hooks.onAssistantReply` /
+// `dkgPlugin.chatPersistenceHook`. The catch-all signature is
+// preserved last so the existing internal wiring
+// (`dkgService as any` callers, dynamic options shapes) still type-
+// checks.
+export interface DkgChatTurnHook {
+  (
+    runtime: IAgentRuntime,
+    message: PersistableMemory,
+    state?: State,
+    options?: UserTurnChatTurnOptions,
+  ): Promise<ChatTurnPersistResult>;
+  (
+    runtime: IAgentRuntime,
+    message: Memory,
+    state: State | undefined,
+    options: AssistantReplyChatTurnOptions,
+  ): Promise<ChatTurnPersistResult>;
+  (
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options?: Record<string, unknown>,
+  ): Promise<ChatTurnPersistResult>;
+}
+
 export const dkgPlugin: Plugin & {
   hooks: {
-    onChatTurn: (...args: Parameters<typeof dkgService.onChatTurn>) => ReturnType<typeof dkgService.onChatTurn>;
-    onAssistantReply: (...args: Parameters<typeof dkgService.onChatTurn>) => ReturnType<typeof dkgService.onChatTurn>;
+    onChatTurn: DkgChatTurnHook;
+    onAssistantReply: DkgChatTurnHook;
   };
-  chatPersistenceHook: (...args: Parameters<typeof dkgService.onChatTurn>) => ReturnType<typeof dkgService.onChatTurn>;
+  chatPersistenceHook: DkgChatTurnHook;
 } = {
   name: 'dkg',
   description:
@@ -368,15 +414,25 @@ export const dkgPlugin: Plugin & {
     // r16-2: route onChatTurn through `onChatTurnHandler` so
     // successful writes are recorded in the in-process cache that
     // onAssistantReply consults.
-    onChatTurn: (runtime, message, state, options) =>
-      onChatTurnHandler(runtime, message, state, options),
+    //
+    // PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts).
+    // The hook surface is now declared as an explicit overloaded
+    // callable (`DkgChatTurnHook`) so direct callers see the typed
+    // user-turn / assistant-reply split. The internal handlers below
+    // still take the loose `Record<string, unknown>` shape — the
+    // runtime guards inside `persistChatTurnImpl` provide defence-
+    // in-depth — so we widen the inferred union to a plain options
+    // bag before delegating. The compiler-side guarantee for direct
+    // callers is preserved by `DkgChatTurnHook`.
+    onChatTurn: ((runtime, message, state, options) =>
+      onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
     // A6: dedicated handler — merges assistant text into the matching
     // turnUri rather than duplicating the whole turn.
-    onAssistantReply: (runtime, message, state, options) =>
-      onAssistantReplyHandler(runtime, message, state, options),
+    onAssistantReply: ((runtime, message, state, options) =>
+      onAssistantReplyHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
   },
-  chatPersistenceHook: (runtime, message, state, options) =>
-    onChatTurnHandler(runtime, message, state, options),
+  chatPersistenceHook: ((runtime, message, state, options) =>
+    onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
 };
 
 export { dkgService, getAgent } from './service.js';

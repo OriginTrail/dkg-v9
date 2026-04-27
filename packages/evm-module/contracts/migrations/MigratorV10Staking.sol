@@ -134,7 +134,23 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         emit MigrationInitiated();
     }
 
+    /// PR #229 bot review (r3146902144, MigratorV10Staking.sol:137).
+    /// Pre-fix `finalizeMigration` had no guard against being called
+    /// before `initiateMigration`. A single fat-finger by an operator
+    /// (or any caller able to satisfy `onlyOwnerOrMultiSigOwner`) would
+    /// flip `migrationFinalized` to `true` permanently, bricking the
+    /// migrator: every subsequent write surface checks
+    /// `migrationFinalized` via `whenInitiated`, and `initiateMigration`
+    /// itself reverts with `MigrationAlreadyFinalized` when finalised.
+    /// There is NO recovery path once the bool is set, so the contract
+    /// is dead and a redeployment is the only remediation.
+    /// Require the migration to be active (initiated and not yet
+    /// finalised — same shape as `whenInitiated`) before allowing
+    /// finalisation. The new `MigrationNotInitiated` revert is the
+    /// existing error type already used by `whenInitiated`.
     function finalizeMigration() external onlyOwnerOrMultiSigOwner {
+        if (!migrationInitiated) revert MigrationNotInitiated();
+        if (migrationFinalized) revert MigrationAlreadyFinalized();
         migrationInitiated = false;
         migrationFinalized = true;
         emit MigrationFinalized();

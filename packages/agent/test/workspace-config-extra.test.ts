@@ -290,6 +290,53 @@ describe('A-13: alternative config locations', () => {
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('fallthrough-cg');
   });
+
+  // PR #229 bot review (r3146759647, workspace-config.ts:191):
+  // before the fix, frontmatter that yaml.load() rejected (a
+  // tab-indented block, a custom tag, an unsupported syntax) would
+  // throw out of parseAgentsMdFrontmatter() before the fence
+  // parser ran, breaking the multi-tool case the fence fallback
+  // was added to support. Lock the new behaviour: a YAML parse
+  // error in frontmatter must NOT abort the loader — control
+  // continues into the fence parser, and only after both carriers
+  // have been considered do we throw the "no workspace config
+  // found" diagnostic.
+  it('PR #229 bugbot: falls through to fence when frontmatter is unparseable YAML', () => {
+    const md = [
+      '---',
+      // Frontmatter whose body is intentionally invalid YAML (a
+      // bare colon at column 0 with no key). js-yaml rejects this.
+      ': not valid yaml',
+      '\t- with: tab indentation',
+      '   broken: [unclosed',
+      '---',
+      '',
+      '# Notes',
+      '',
+      '```dkg-config',
+      'contextGraph: "yaml-error-fallthrough"',
+      'node: "http://n"',
+      '```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('yaml-error-fallthrough');
+  });
+
+  // Companion test: when frontmatter is unparseable AND no fence
+  // exists, the user gets the canonical "no carrier found"
+  // diagnostic — NOT the js-yaml internal parse error, which leaks
+  // implementation detail and doesn't tell the user what to add.
+  it('PR #229 bugbot: unparseable frontmatter + no fence yields the canonical "no carrier" diagnostic', () => {
+    const md = [
+      '---',
+      ': not valid yaml',
+      '   broken: [unclosed',
+      '---',
+      '',
+      '# Notes — no dkg-config fence',
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/);
+  });
 });
 
 describe('A-13: file-system priority resolution', () => {

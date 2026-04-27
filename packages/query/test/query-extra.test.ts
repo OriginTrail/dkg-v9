@@ -78,7 +78,18 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   // minTrust > SelfAttested). Q-1 is the remaining per-triple half: if a
   // writer ever stamps mixed-trust quads into a single sub-graph, the
   // graph-scope filter cannot catch it. This test pins that gap.
-  it('filters out sub-threshold trust quads WITHIN a verified-memory sub-graph (EXPECTED to fail until Q-1 is fixed)', async () => {
+  //
+  // PR #229 bot review (r3146759642): the per-triple filter is now
+  // skipped at `Endorsed` because no production writer emits
+  // `dkg:trustLevel` literals — applying the join at Endorsed would
+  // collapse legitimate queries against real data. The per-triple
+  // filter still runs at `PartiallyVerified` / `ConsensusVerified`,
+  // where graph-scope alone cannot distinguish the tiers, and where
+  // a fail-closed empty result on un-tagged data is the correct
+  // behaviour. This test now exercises the per-triple filter at
+  // `ConsensusVerified` (the highest tier) — that path is what
+  // production callers asking for the strictest tier will hit.
+  it('filters out sub-threshold trust quads WITHIN a verified-memory sub-graph at ConsensusVerified (Q-1)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
 
@@ -90,7 +101,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
 
     await store.insert([
       quad('urn:low', 'http://schema.org/name', '"LowTrust"', mixedGraph),
-      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, mixedGraph),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Endorsed}"`, mixedGraph),
       quad('urn:high', 'http://schema.org/name', '"HighTrust"', mixedGraph),
       quad('urn:high', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, mixedGraph),
       // Root-level quad — P-13 graph-scope filter already excludes this.
@@ -102,21 +113,80 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
       {
         contextGraphId: CG,
         view: 'verified-memory',
-        // Endorsed is the highest tier the engine currently accepts for
-        // union queries (P-13 review: `PartiallyVerified` / `ConsensusVerified`
-        // are rejected at the resolver until per-graph trust tagging lands
-        // under Q-1). The gap below — per-triple filtering within a
-        // /_verified_memory/* sub-graph — is orthogonal and still unmet.
-        minTrust: TrustLevel.Endorsed,
+        minTrust: TrustLevel.ConsensusVerified,
       },
     );
 
     const names = result.bindings.map((b) => b['name']);
-    // Spec §14: only triples at or above the requested trust tier should survive.
-    // Today, per-triple filtering inside a sub-graph is not implemented —
-    // this assertion fails and documents Q-1. P-13's graph-scope filter
-    // alone returns both LowTrust and HighTrust from the mixed sub-graph.
+    // Per-triple filter strips the Endorsed-only `urn:low` quad —
+    // only `urn:high` (which carries `ConsensusVerified`) survives.
     expect(names).toEqual(['"HighTrust"']);
+  });
+
+  // PR #229 bot review (r3146759642): explicit pin that the new
+  // `> Endorsed` threshold leaves Endorsed queries reading from
+  // /_verified_memory/* sub-graphs without applying the per-triple
+  // join. Real production data lands in those sub-graphs WITHOUT a
+  // `dkg:trustLevel` literal (writer-side trust tagging is tracked
+  // upstream), so the previously-applied per-triple filter would
+  // collapse every Endorsed query to `[]`. This test exercises that
+  // exact production shape: data in /_verified_memory/{quorum}
+  // with NO trustLevel triples must still be visible at Endorsed.
+  it('Endorsed reads /_verified_memory/* WITHOUT requiring per-triple trustLevel (graph-scope is the trust gate)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+
+    const subGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
+    const rootGraph = contextGraphDataUri(CG);
+
+    // Production-shaped data: quads in a quorum sub-graph with NO
+    // trustLevel literals (matches today's publisher write path).
+    await store.insert([
+      quad('urn:prod1', 'http://schema.org/name', '"Production1"', subGraph),
+      quad('urn:prod2', 'http://schema.org/name', '"Production2"', subGraph),
+      // Root-graph data must NOT leak into Endorsed (P-13 graph-scope filter).
+      quad('urn:root', 'http://schema.org/name', '"RootDataGraph"', rootGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.Endorsed,
+      },
+    );
+
+    const names = result.bindings.map((b) => b['name']).sort();
+    // BOTH quorum-sub-graph quads survive (no per-triple filter at
+    // Endorsed) and the root-graph quad is excluded by P-13.
+    expect(names).toEqual(['"Production1"', '"Production2"']);
+  });
+
+  // PR #229 bot review (r3146759642): pin that ConsensusVerified
+  // STILL fails closed on un-tagged production data — the higher
+  // tier requires explicit per-triple metadata, and a fail-closed
+  // empty result is the correct behaviour when writers haven't
+  // started emitting `dkg:trustLevel` yet.
+  it('ConsensusVerified fails CLOSED on production data WITHOUT trustLevel literals', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+
+    const subGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
+    await store.insert([
+      quad('urn:prod1', 'http://schema.org/name', '"Production1"', subGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.ConsensusVerified,
+      },
+    );
+
+    expect(result.bindings).toEqual([]);
   });
 
   // ─────────────────────────────────────────────────────────────────────────

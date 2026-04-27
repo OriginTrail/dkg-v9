@@ -810,7 +810,25 @@ export function httpAuthGuard(
       // methods) is a no-op.
       const clRaw = req.headers['content-length'];
       const clNum = typeof clRaw === 'string' ? Number(clRaw) : NaN;
-      const isChunked = req.headers['transfer-encoding'] === 'chunked';
+      // PR #229 bot review (r3147347820, auth.ts:813). Pre-fix this did
+      // an exact lowercase string comparison `=== 'chunked'`. Node can
+      // surface `Transfer-Encoding` with different casing
+      // (`Chunked` / `CHUNKED`), as a comma-separated list
+      // (`gzip, chunked`), or as a string array (after multiple TE
+      // headers in the wire request). Any of those would cause the
+      // strict equality check to return false, so a body-carrying
+      // signed request would slip into the `isZeroBody` fast-path
+      // below — `verifyHttpSignedRequestAfterBody(req, '')` binds the
+      // HMAC to an empty string and `pending.verified` flips true
+      // BEFORE the real body is read. An attacker with a valid bearer
+      // token could then PUT/POST arbitrary bytes against any signed
+      // route. We mirror the parsing already used in
+      // `isFramingBodylessByHeaders` (line 1191) so the two zero-body
+      // gates agree on what "chunked" means: case-insensitive
+      // substring match against the joined header value.
+      const teRaw = req.headers['transfer-encoding'];
+      const teHeader = Array.isArray(teRaw) ? teRaw.join(', ') : (teRaw ?? '');
+      const isChunked = /chunked/i.test(teHeader);
       const method = req.method ?? 'GET';
       // PR #229 bot review round 7 (auth.ts:692): DELETE was lumped in
       // with GET/HEAD/OPTIONS as "definitely body-less", but RFC 9110

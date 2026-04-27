@@ -37,6 +37,10 @@ import {
   _rndIdForTesting,
   _resetSeededRngCounterForTesting,
   precomputeSeededSchedule,
+  runScenario,
+  runOnLibp2p,
+  Libp2pRunnerNotImplementedError,
+  type SimScenario,
 } from '../src/server/sim-engine.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -303,5 +307,49 @@ describe('[sim-engine] fmtError edge cases (additional positive coverage)', () =
 
   it('stringifies plain objects (not just primitives)', () => {
     expect(fmtError({ toString: () => 'weird' } as unknown, 'query')).toBe('weird');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347829, sim-engine.ts:1004). The pre-fix
+// `runOnLibp2p` silently delegated to `runScenario`, so the K-5 parity
+// surface was model-vs-model and ALWAYS looked green. The fix makes
+// `runOnLibp2p` fail closed with `Libp2pRunnerNotImplementedError` until a
+// real libp2p host exists. Pin both halves of the contract here:
+//   - `runScenario` still runs deterministically (the sim's reference
+//     side of the parity diff);
+//   - `runOnLibp2p` rejects loudly so a caller cannot accidentally
+//     compare the model against itself.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[sim-engine] K-5 parity surface (bot review r3147347829)', () => {
+  const scenario: SimScenario = {
+    name: 'parity-fixture',
+    seed: 42,
+    ops: [
+      { type: 'publish', nodeId: 1 },
+      { type: 'publish', nodeId: 2 },
+      { type: 'publish', nodeId: 1 },
+    ],
+  };
+
+  it('runScenario stays deterministic and reproducible under the same seed', async () => {
+    const a = await runScenario(scenario);
+    const b = await runScenario(scenario);
+    expect(a).toEqual(b);
+    expect(a.perNode[1]).toBe(2);
+    expect(a.perNode[2]).toBe(1);
+    expect(a.messageCount).toBe(3);
+  });
+
+  it('runOnLibp2p fails loudly with Libp2pRunnerNotImplementedError (no silent self-parity)', async () => {
+    let caught: unknown;
+    try {
+      await runOnLibp2p(scenario);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Libp2pRunnerNotImplementedError);
+    expect((caught as Error).message).toMatch(/no real libp2p-backed runner/i);
+    expect((caught as Error).name).toBe('Libp2pRunnerNotImplementedError');
   });
 });

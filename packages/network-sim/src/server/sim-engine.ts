@@ -996,13 +996,44 @@ export async function runScenario(scenario: SimScenario): Promise<ScenarioRunRes
 }
 
 /**
- * libp2p-backed runner for the same scenario surface (K-5). The current
- * implementation reuses the deterministic runner so downstream callers can
- * already diff message counts; swapping in a real libp2p host only
- * requires editing this function without changing the public contract.
+ * Sentinel error thrown by {@link runOnLibp2p} until a real libp2p host
+ * is wired up. Exported so callers can `instanceof`-narrow on it
+ * without parsing error messages.
  */
-export async function runOnLibp2p(scenario: SimScenario): Promise<ScenarioRunResult> {
-  return runScenario(scenario);
+export class Libp2pRunnerNotImplementedError extends Error {
+  override readonly name = 'Libp2pRunnerNotImplementedError';
+}
+
+/**
+ * libp2p-backed runner for the same scenario surface (K-5).
+ *
+ * PR #229 bot review (r3147347829, sim-engine.ts:1004). The previous
+ * implementation silently delegated to {@link runScenario}, so any
+ * parity check `compareMessageCounts(runScenario(s), runOnLibp2p(s))`
+ * was comparing the deterministic model against itself and ALWAYS
+ * looked green — turning the K-5 parity surface into theatre rather
+ * than a real protective check.
+ *
+ * Until a real libp2p host is wired up, `runOnLibp2p` fails closed
+ * with {@link Libp2pRunnerNotImplementedError}. The export still
+ * exists (so the K-5 contract test in `network-sim-extra.test.ts` —
+ * which asserts the symbol is reachable — keeps passing) but callers
+ * who try to USE it for a parity diff get a loud, attributable
+ * failure instead of a misleading "looks identical" result.
+ *
+ * To swap in a real implementation: replace this body with a libp2p-
+ * backed scenario replay that mirrors the deterministic runner's
+ * `ScenarioRunResult` shape. The unused `_scenario` parameter is
+ * intentional — it pins the contract a real implementation must
+ * satisfy.
+ */
+export async function runOnLibp2p(_scenario: SimScenario): Promise<ScenarioRunResult> {
+  throw new Libp2pRunnerNotImplementedError(
+    'runOnLibp2p: no real libp2p-backed runner is wired up yet. ' +
+      'Comparing this against runScenario would be model-vs-model and ' +
+      'misrepresent parity. Implement a real libp2p host or use ' +
+      'runScenario directly.',
+  );
 }
 
 /**

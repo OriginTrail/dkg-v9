@@ -490,16 +490,93 @@ export class DKGQueryEngine implements QueryEngine {
 }
 
 /**
+ * Locate the opening `{` of the WHERE clause in a SPARQL query.
+ *
+ * SPARQL 1.1 (§16) allows the `WHERE` keyword to be omitted from
+ * `SELECT`, `DESCRIBE`, and `ASK` queries, and from the second
+ * `GroupGraphPattern` of a `CONSTRUCT`. The legacy callers (`wrapWithGraph`,
+ * `wrapWithGraphUnion`, `injectMinTrustFilter`) all matched only
+ * `WHERE\s*\{`, so any of those legitimate shorthand forms left the
+ * query untouched (no GRAPH wrapping, no trust filter injection) and —
+ * on a `verified-memory` view whose data lives in a named sub-graph —
+ * silently returned `[]` instead of executing against the right graph.
+ *
+ * Strategy:
+ *   1. Prefer the explicit `WHERE { ... }` form.
+ *   2. Otherwise, walk top-level braces (skipping IRIs / quoted
+ *      strings / comments) and use the LAST top-level `{...}`. This
+ *      is correct for every form:
+ *        - `SELECT ?x { ... }`           (1 top-level brace)
+ *        - `ASK { ... }`                 (1)
+ *        - `DESCRIBE ?x { ... }`         (1)
+ *        - `CONSTRUCT { tmpl } { where }`(2 — last is the WHERE)
+ *      `CONSTRUCT WHERE { ... }` already matches the primary path.
+ *
+ * Returns `null` when no top-level `{...}` block is balanced.
+ *
+ * Bot review: PR #229 r3147347827 (dkg-query-engine.ts:718).
+ */
+function findWhereBraceStart(sparql: string): number {
+  const whereIdx = sparql.search(/\bWHERE\s*\{/i);
+  if (whereIdx !== -1) {
+    const idx = sparql.indexOf('{', whereIdx);
+    return idx === -1 ? -1 : idx;
+  }
+
+  // Fallback: scan for top-level `{` while honouring SPARQL token
+  // boundaries — IRIs (`<...>`), quoted literals, and `#` comments
+  // can all contain stray `{` chars that the regex would
+  // misinterpret as block openers.
+  const n = sparql.length;
+  const opens: number[] = [];
+  let depth = 0;
+  let i = 0;
+  while (i < n) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      while (i < n && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '<') {
+      const end = sparql.indexOf('>', i + 1);
+      if (end === -1) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (sparql[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (sparql[j] === quote) { j++; break; }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) opens.push(i);
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth < 0) return -1;
+    }
+    i++;
+  }
+  if (depth !== 0 || opens.length === 0) return -1;
+  return opens[opens.length - 1];
+}
+
+/**
  * Wraps a SELECT query to scope it to a named graph.
  * If the query already uses GRAPH patterns, returns it unchanged.
  */
 function wrapWithGraph(sparql: string, graphUri: string): string {
   if (sparql.toLowerCase().includes('graph ')) return sparql;
 
-  const whereIdx = sparql.search(/WHERE\s*\{/i);
-  if (whereIdx === -1) return sparql;
+  const braceStart = findWhereBraceStart(sparql);
+  if (braceStart === -1) return sparql;
 
-  const braceStart = sparql.indexOf('{', whereIdx);
   let depth = 0;
   let braceEnd = -1;
   for (let i = braceStart; i < sparql.length; i++) {
@@ -545,10 +622,9 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
   if (sparql.toLowerCase().includes('graph ')) return sparql;
   if (graphUris.length === 0) return sparql;
 
-  const whereIdx = sparql.search(/WHERE\s*\{/i);
-  if (whereIdx === -1) return sparql;
+  const braceStart = findWhereBraceStart(sparql);
+  if (braceStart === -1) return sparql;
 
-  const braceStart = sparql.indexOf('{', whereIdx);
   let depth = 0;
   let braceEnd = -1;
   for (let i = braceStart; i < sparql.length; i++) {
@@ -715,9 +791,15 @@ function splitTopLevelTripleStatements(body: string): string[] {
 }
 
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
-  const whereIdx = sparql.search(/WHERE\s*\{/i);
-  if (whereIdx === -1) return null;
-  const braceStart = sparql.indexOf('{', whereIdx);
+  // PR #229 bot review (r3147347827, dkg-query-engine.ts:718). The
+  // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
+  // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
+  // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) returned
+  // `null` and the `minTrust > Endorsed` caller silently fell
+  // through to an empty result. `findWhereBraceStart` normalises
+  // every shape to the WHERE-clause brace position before we apply
+  // the existing depth-counting pass below.
+  const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return null;
 
   let depth = 0;

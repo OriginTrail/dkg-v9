@@ -993,6 +993,76 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(401);
   });
 
+  it('r28: a body-carrying POST with `Transfer-Encoding: gzip, chunked` (comma-list) is NOT short-circuited as zero-body — tampered body still 401s', async () => {
+    // PR #229 bot review (r3147347820, auth.ts:813). The pre-fix
+    // chunked check did `req.headers['transfer-encoding'] === 'chunked'`,
+    // which Node only satisfies when the wire header is the EXACT
+    // lowercase string "chunked". A signed client could ship
+    // `Transfer-Encoding: gzip, chunked` (or `Chunked` / a duplicate
+    // TE header that Node surfaces as an array) and slip into the
+    // `isZeroBody` fast path — `verifyHttpSignedRequestAfterBody(req, '')`
+    // would then bind the HMAC to an empty string and flip
+    // `pending.verified = true` BEFORE the actual body bytes were
+    // read. With a valid bearer token an attacker could PUT/POST
+    // arbitrary bytes against any signed route.
+    //
+    // Post-r28 we share the parsing rule with `isFramingBodylessByHeaders`
+    // (case-insensitive `/chunked/i.test(joined)`), so the comma-list
+    // shape is correctly classified as "body-carrying chunked" and
+    // the request flows through the deferred drain-and-verify guard.
+    // A tampered signature against a non-empty body is therefore
+    // fail-closed to 401 — the test below would have returned 200
+    // against the pre-fix code.
+    const body = 'attacker-payload';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const tamperedSig = 'dead'.repeat(16);
+    const { hostname, port } = new URL(baseUrl);
+    const chunkHex = Buffer.byteLength(body).toString(16);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Transfer-Encoding: gzip, chunked\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${tamperedSig}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      `${chunkHex}\r\n${body}\r\n0\r\n\r\n`;
+    const res = await sendRawHttp(Number(port), rawReq);
+    expect(res.status).toBe(401);
+  });
+
+  it('r28: a body-carrying POST with `Transfer-Encoding: Chunked` (mixed-case) is NOT short-circuited as zero-body', async () => {
+    // Same r28 fix as above: the strict lowercase comparison missed
+    // `Chunked` / `CHUNKED`. Even though most HTTP libraries
+    // lowercase the header before exposing it, the auth path must
+    // not rely on it because `req.headers['transfer-encoding']`
+    // surfaces whatever case Node's parser preserved (and a custom
+    // socket-level client can send anything). Confirm a tampered
+    // signature with mixed-case TE is fail-closed to 401.
+    const body = 'attacker-payload-mixed-case';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const tamperedSig = 'beef'.repeat(16);
+    const { hostname, port } = new URL(baseUrl);
+    const chunkHex = Buffer.byteLength(body).toString(16);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Transfer-Encoding: Chunked\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${tamperedSig}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      `${chunkHex}\r\n${body}\r\n0\r\n\r\n`;
+    const res = await sendRawHttp(Number(port), rawReq);
+    expect(res.status).toBe(401);
+  });
+
   it('r25-2: a chunked POST with a CORRECTLY-signed empty body whose handler IGNORES the body returns 200 (not 401)', async () => {
     // PR #229 bot review round 25 (r25-2, cli/auth.ts). The r23-1
     // response-guard unconditionally 401'd any chunked request whose

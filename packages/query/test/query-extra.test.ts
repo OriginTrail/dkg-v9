@@ -911,3 +911,70 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
     expect(resp.error).toBe('Internal error processing query');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347827, dkg-query-engine.ts:718). The pre-fix
+// `injectMinTrustFilter` only matched `WHERE\s*\{`. SPARQL 1.1 allows
+// the `WHERE` keyword to be omitted from `SELECT`, `ASK`, and
+// `DESCRIBE` queries, and from the second `GroupGraphPattern` of a
+// `CONSTRUCT`. Those legitimate shorthand queries used to return
+// `null` from the rewriter and the caller silently fell through to
+// `emptyQueryResultForKind(...)` whenever `minTrust > Endorsed`,
+// turning a valid query into a fail-closed empty result.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[Q-1] minTrust handles SPARQL 1.1 shorthand WHERE forms (bot review r3147347827)', () => {
+  it('rewrites a SELECT shorthand (no WHERE keyword) when minTrust > Endorsed', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?n { <urn:e1> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('rewrites an ASK shorthand (no WHERE keyword) when minTrust > Endorsed', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const result = await engine.query(
+      'ASK { <urn:e1> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBeGreaterThan(0);
+    const first = result.bindings[0];
+    expect(first['result'] === 'true' || first['result'] === true).toBe(true);
+  });
+
+  it('fails CLOSED on a SELECT shorthand whose entity is below the trust threshold', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const selfAttestedGraph = contextGraphVerifiedMemoryUri(CG, 'self-attested');
+    await store.insert([
+      quad('urn:low', 'http://schema.org/name', '"Bob"', selfAttestedGraph),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, selfAttestedGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?n { <urn:low> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    // Below threshold → empty (proves the rewriter ran and the FILTER
+    // is enforced; without the shorthand fix this would also be empty
+    // BUT for the wrong reason — `injectMinTrustFilter` returning
+    // null and the caller short-circuiting. The two cases are
+    // distinguishable through the positive shorthand test above.)
+    expect(result.bindings).toEqual([]);
+  });
+});

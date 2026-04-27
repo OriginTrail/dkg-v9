@@ -316,6 +316,32 @@ describe("ChatTurnWriter", () => {
     await new Promise((r) => setTimeout(r, 50));
   });
 
+  it("compacting one session does not clear another session whose sessionKey contains ':' (R9.3/R9.6 cross-session isolation)", async () => {
+    // Two sessions with sessionKeys that overlap on suffix — pre-fix code
+    // used `endsWith(':<sessionKey-suffix>')` and would have wiped the
+    // wrong queue. Today's exact-key delete must keep them isolated.
+    writer.onMessageReceived({
+      sessionKey: "agent:a-1:background",
+      context: { channelId: "ch", accountId: "acc", conversationId: "c1", content: "from-A" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "background", // bare suffix that the old buggy matcher would also match
+      context: { channelId: "ch", accountId: "acc", conversationId: "c2", content: "from-B" },
+    } as any);
+
+    const pending = (writer as any).pendingUserMessages as Map<string, string[]>;
+    expect(pending.size).toBe(2);
+
+    // Compact only session A.
+    await writer.onBeforeCompaction({}, { channelId: "ch", accountId: "acc", conversationId: "c1", sessionKey: "agent:a-1:background" });
+
+    // Session B's queue must survive — its content is still recoverable.
+    expect(pending.size).toBe(1);
+    const remainingKey = Array.from(pending.keys())[0];
+    expect(remainingKey).toContain("c2");
+    expect(pending.get(remainingKey)).toEqual(["from-B"]);
+  });
+
   it("flush() drains in-flight persists before returning (R9.8)", async () => {
     let releasePersist: (() => void) | null = null;
     mockClient.storeChatTurn = vi.fn().mockImplementation(

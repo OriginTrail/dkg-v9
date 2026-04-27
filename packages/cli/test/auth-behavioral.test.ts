@@ -404,6 +404,104 @@ describe('rotateToken / revokeToken', () => {
     expect(tokens.has(fileToken)).toBe(true);
   });
 
+  // ---------------------------------------------------------------------------
+  // PR #229 bot review (r3148... — auth.ts:315). The earlier r19-4
+  // ENOENT branch handled "file vanished mid-revoke" by:
+  //
+  //   - removing ONLY the requested token from the in-memory set
+  //   - then DROPPING the snapshot
+  //
+  // That sequence broke a critical invariant: if the file used to
+  // back N tokens (`A` and `B`), and the file is gone, then on the
+  // next `verifyToken(B)` call `reconcileFileTokens()` would take the
+  // ENOENT branch, look up the snapshot, find it missing, and skip
+  // the per-fileToken revoke loop. `B` therefore stays valid forever
+  // even though its source-of-truth file is gone.
+  //
+  // The fix in this round eagerly revokes EVERY token in the
+  // surviving snapshot when the ENOENT branch fires. The two tests
+  // below pin both ends:
+  //   1. a sibling file-backed token is revoked alongside the
+  //      explicitly-revoked one
+  //   2. `verifyToken()` on the sibling reflects the revocation on
+  //      the very next call (no stale-survival window)
+  // ---------------------------------------------------------------------------
+  it('r30-4: revokeToken ENOENT branch eagerly revokes ALL file-backed tokens (no orphan stays valid)', async () => {
+    const { verifyToken } = await import('../src/auth.js');
+    const tokenA = 'enoent-orphan-a-' + randomBytes(8).toString('hex');
+    const tokenB = 'enoent-orphan-b-' + randomBytes(8).toString('hex');
+    const tokenC = 'enoent-orphan-c-' + randomBytes(8).toString('hex');
+    const tokPath = join(tempDir, 'auth.token');
+    await writeFile(tokPath, `${tokenA}\n${tokenB}\n${tokenC}\n`, { mode: 0o600 });
+
+    const tokens = await loadTokens();
+    expect(tokens.has(tokenA)).toBe(true);
+    expect(tokens.has(tokenB)).toBe(true);
+    expect(tokens.has(tokenC)).toBe(true);
+
+    // Race the file-vanish-then-revoke sequence by deleting the file
+    // FIRST (simulating an external `rm` between snapshot and
+    // revokeToken).
+    await unlink(tokPath);
+
+    // Revoke A. Pre-fix: only A removed, B+C stay valid forever.
+    // Post-fix: A, B, C all removed because the file (their source of
+    // truth) is gone.
+    expect(await revokeToken(tokenA, tokens)).toBe(true);
+    expect(tokens.has(tokenA), 'A must be revoked').toBe(false);
+    expect(tokens.has(tokenB), 'B must be revoked too — its file is gone').toBe(false);
+    expect(tokens.has(tokenC), 'C must be revoked too — its file is gone').toBe(false);
+
+    // Cross-check via verifyToken: every subsequent request that
+    // arrives with B or C MUST be rejected. This is the bug that the
+    // pre-fix code shipped with — verifyToken would happily accept B
+    // because reconcileFileTokens had no snapshot to subtract from.
+    expect(verifyToken(tokenA, tokens)).toBe(false);
+    expect(verifyToken(tokenB, tokens)).toBe(false);
+    expect(verifyToken(tokenC, tokens)).toBe(false);
+  });
+
+  it('r30-4: revokeToken ENOENT branch is idempotent (second call returns false, set stays empty)', async () => {
+    const tokenA = 'enoent-idem-a-' + randomBytes(8).toString('hex');
+    const tokenB = 'enoent-idem-b-' + randomBytes(8).toString('hex');
+    const tokPath = join(tempDir, 'auth.token');
+    await writeFile(tokPath, `${tokenA}\n${tokenB}\n`, { mode: 0o600 });
+
+    const tokens = await loadTokens();
+    await unlink(tokPath);
+
+    // First revoke clears both A and B (and returns true because
+    // SOMETHING was removed). Subsequent calls have nothing to do
+    // and must return false without throwing.
+    expect(await revokeToken(tokenA, tokens)).toBe(true);
+    expect(tokens.size).toBe(0);
+    expect(await revokeToken(tokenB, tokens)).toBe(false);
+    expect(await revokeToken(tokenA, tokens)).toBe(false);
+    expect(await revokeToken('never-existed-' + randomBytes(4).toString('hex'), tokens)).toBe(false);
+  });
+
+  it('r30-4: ENOENT eager-revoke does NOT touch config-pinned tokens (only file-backed ones get cleaned)', async () => {
+    const fileTok = 'enoent-mixed-file-' + randomBytes(8).toString('hex');
+    const configTok = 'enoent-mixed-config-' + randomBytes(8).toString('hex');
+    const tokPath = join(tempDir, 'auth.token');
+    await writeFile(tokPath, `${fileTok}\n`, { mode: 0o600 });
+
+    // Mix: one file-backed, one config-pinned. Loader merges both.
+    const tokens = await loadTokens({ tokens: [configTok] });
+    expect(tokens.has(fileTok)).toBe(true);
+    expect(tokens.has(configTok)).toBe(true);
+
+    await unlink(tokPath);
+
+    // Revoking the file-backed token via the ENOENT branch must
+    // NOT cascade-revoke the config-pinned one — config-pinned
+    // tokens have a different lifecycle (they're authoritative
+    // until explicitly revoked or the process restarts).
+    expect(await revokeToken(fileTok, tokens)).toBe(true);
+    expect(tokens.has(fileTok)).toBe(false);
+    expect(tokens.has(configTok), 'config-pinned token must survive ENOENT cascade').toBe(true);
+  });
+
   it('verifyToken hot-reloads tokens when the file mtime changes', async () => {
     const { verifyToken } = await import('../src/auth.js');
     const tokens = await loadTokens();

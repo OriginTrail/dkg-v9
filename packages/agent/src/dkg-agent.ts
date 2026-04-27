@@ -903,6 +903,14 @@ export class DKGAgent {
           );
           return recovered !== undefined;
         },
+        // PR #229 bot review (r3148... — chain-event-poller.ts:271).
+        // The agent installs `onUnmatchedBatchCreated` for every
+        // node, but a brand-new node has nothing in its journal and
+        // should NOT scan from genesis on first boot. Expose the
+        // live journal length as the WAL-presence signal so the
+        // poller's seed-near-tip decision tracks reality, not
+        // callback installation.
+        hasRecoverableWal: () => this.publisher.preBroadcastJournal.length > 0,
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 

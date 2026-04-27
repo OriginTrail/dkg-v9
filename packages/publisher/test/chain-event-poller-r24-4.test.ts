@@ -232,3 +232,135 @@ describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL rec
     expect(lastBlock).toBeLessThanOrEqual(750_000 + 9_000);
   });
 });
+
+/**
+ * PR #229 bot review (r3148... — chain-event-poller.ts:271). The r25-1
+ * fix above gated the "refuse to seed near tip" decision on
+ * `!!onUnmatchedBatchCreated`, but `DKGAgent` always wires that
+ * callback. So a brand-new node with an empty WAL would refuse the
+ * near-tip seed and scan from genesis on first boot — a multi-hour
+ * startup penalty for zero benefit. The follow-up fix introduces
+ * `hasRecoverableWal()` so the seed decision tracks actual WAL
+ * presence, not callback installation.
+ *
+ * Three regression pins below:
+ *   1. callback present + `hasRecoverableWal === false`  →  SEED near tip
+ *      (the brand-new-node case the bot flagged)
+ *   2. callback present + `hasRecoverableWal === true`   →  refuse seed
+ *      (the legitimate WAL-drain case)
+ *   3. callback present + `hasRecoverableWal` not provided → refuse seed
+ *      (legacy callers / tests that pre-date the accessor still get the
+ *      r25-1 behaviour)
+ */
+describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-near-tip suppression', () => {
+  it('does SEED near tip when callback is wired but hasRecoverableWal returns false (brand-new node, empty WAL)', async () => {
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {},
+      // The actual signal: this node has nothing in its journal, so
+      // there's nothing to recover.
+      hasRecoverableWal: () => false,
+    });
+
+    await callPollDirectly(poller);
+
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    // If the bot's regression were unfixed `lastBlock` would be ≤ 9001
+    // (scanned from genesis). With the fix, the seed lands at
+    // `head - 500 = 999_500` and the first poll advances by up to
+    // MAX_RANGE.
+    expect(lastBlock).toBeGreaterThan(500_000);
+  });
+
+  it('does NOT seed near tip when hasRecoverableWal returns true (a publish crashed pre-broadcast and the journal survived)', async () => {
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    let walPresent = true;
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {},
+      hasRecoverableWal: () => walPresent,
+    });
+
+    await callPollDirectly(poller);
+
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    expect(lastBlock).toBeLessThan(9001);
+    expect(lastBlock).toBeGreaterThan(0);
+
+    // Sanity: flipping the accessor mid-flight does NOT retroactively
+    // re-seed (that would erase the recovery progress already made).
+    // We only assert the FIRST-tick gate; the seed decision is
+    // headKnown-gated so it only fires once.
+    walPresent = false;
+    await callPollDirectly(poller);
+    const lastBlock2 = (poller as unknown as { lastBlock: number }).lastBlock;
+    expect(lastBlock2).toBeGreaterThanOrEqual(lastBlock);
+    // It should still be far below the near-tip seed value.
+    expect(lastBlock2).toBeLessThan(500_000);
+  });
+
+  it('legacy callers without hasRecoverableWal still get the r25-1 refuse-to-seed behaviour (back-compat)', async () => {
+    // No `hasRecoverableWal` provided — simulates older test fixtures
+    // and any external embedder that hasn't adopted the accessor yet.
+    // The poller falls back to "callback presence implies WAL is live"
+    // so r25-1's contract is preserved verbatim.
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {},
+    });
+
+    await callPollDirectly(poller);
+
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    expect(lastBlock).toBeLessThan(9001);
+    expect(lastBlock).toBeGreaterThan(0);
+  });
+
+  it('hasRecoverableWal is queried on EACH poll tick — not once at construction (so a publish crashed mid-session still flips to refuse-seed)', async () => {
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    const calls: number[] = [];
+    let returnValue = false;
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {},
+      hasRecoverableWal: () => {
+        calls.push(Date.now());
+        return returnValue;
+      },
+    });
+
+    await callPollDirectly(poller);
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const callsAfterFirst = calls.length;
+
+    // Subsequent ticks must continue to ask. We cannot assert the
+    // EXACT count (the poll() method may consult the accessor more
+    // than once per tick — current impl uses it both in the seed
+    // gate and could in future use it elsewhere) but it MUST grow.
+    returnValue = true;
+    await callPollDirectly(poller);
+    expect(calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+});

@@ -791,14 +791,32 @@ export class DKGPublisher implements Publisher {
     // never made it to the store on this node, or the tentative
     // timeout already cleared it. We log the outcome either way so
     // operators can reconcile against the chain.
-    let promotedUal: string | null = null;
+    //
+    // PR #229 bot review (r3148... — dkg-publisher.ts:813). The
+    // promoter now returns a discriminated result so this caller can
+    // RETAIN the WAL entry on `'ambiguous'`. Pre-fix, two same-
+    // merkleRoot retries shared a single chain `Confirmed` event:
+    // the first event would (correctly) refuse to promote AND
+    // (incorrectly) splice the WAL anyway, severing the recovery
+    // record for the surviving tentative UAL forever.
+    let promotion:
+      | { status: 'promoted'; ual: string }
+      | { status: 'none' }
+      | { status: 'ambiguous'; candidates: string[] } = { status: 'none' };
     try {
-      promotedUal = await this.promoteTentativeKcByMerkleRoot(
+      promotion = await this.promoteTentativeKcByMerkleRoot(
         entry.contextGraphId,
         merkleRootHex,
         opCtx,
       );
     } catch (promoteErr) {
+      // Transient store / SPARQL failures: log and continue. The chain
+      // confirmation IS real even if the local store can't reflect
+      // it right now. Splicing the WAL on this branch matches the
+      // pre-r30-4 behaviour (callers that needed retry-on-store-
+      // outage have always relied on the chain re-event, not on the
+      // WAL). If we retained the WAL here a wedged store would also
+      // wedge the journal forever.
       this.log.warn(
         opCtx,
         `WAL_RECOVERY_PROMOTE_FAILED merkleRoot=${merkleRootHex} ` +
@@ -807,32 +825,50 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const idx = this.preBroadcastJournal.findIndex(
-      (e) => e.publishOperationId === entry.publishOperationId,
-    );
-    if (idx >= 0) this.preBroadcastJournal.splice(idx, 1);
-    if (this.publishWalFilePath) {
-      try {
-        rewriteWalSync(this.publishWalFilePath, this.preBroadcastJournal);
-      } catch (rewriteErr) {
-        // Recovery itself succeeded (in-memory journal is current);
-        // a rewrite failure just means the WAL file may still
-        // contain the dropped entry until the next successful
-        // rewrite. We log loudly so operators can intervene if the
-        // disk is wedged, but don't throw — that would mask the
-        // useful recovery telemetry.
-        this.log.warn(
-          opCtx,
-          `WAL_RECOVERY_REWRITE_FAILED merkleRoot=${merkleRootHex} ` +
-            `op=${entry.publishOperationId}: ${rewriteErr instanceof Error ? rewriteErr.message : String(rewriteErr)}`,
-        );
+    // Ambiguous case: refuse to splice the WAL. The chain confirmation
+    // is real, but we cannot tell which of the N tentative UALs it
+    // belongs to. An explicit follow-up `confirmPublish` (which
+    // carries the UAL) will reconcile, and on the next process restart
+    // the WAL re-loads → poller re-fires → we re-attempt promotion;
+    // if the ambiguity has resolved (e.g. the duplicate tentative
+    // quads were cleaned by gossip), the next pass succeeds.
+    const retainWal = promotion.status === 'ambiguous';
+
+    if (!retainWal) {
+      const idx = this.preBroadcastJournal.findIndex(
+        (e) => e.publishOperationId === entry.publishOperationId,
+      );
+      if (idx >= 0) this.preBroadcastJournal.splice(idx, 1);
+      if (this.publishWalFilePath) {
+        try {
+          rewriteWalSync(this.publishWalFilePath, this.preBroadcastJournal);
+        } catch (rewriteErr) {
+          // Recovery itself succeeded (in-memory journal is current);
+          // a rewrite failure just means the WAL file may still
+          // contain the dropped entry until the next successful
+          // rewrite. We log loudly so operators can intervene if the
+          // disk is wedged, but don't throw — that would mask the
+          // useful recovery telemetry.
+          this.log.warn(
+            opCtx,
+            `WAL_RECOVERY_REWRITE_FAILED merkleRoot=${merkleRootHex} ` +
+              `op=${entry.publishOperationId}: ${rewriteErr instanceof Error ? rewriteErr.message : String(rewriteErr)}`,
+          );
+        }
       }
     }
+
+    const promotedUalForLog =
+      promotion.status === 'promoted'
+        ? promotion.ual
+        : promotion.status === 'ambiguous'
+          ? `ambiguous(${promotion.candidates.length})`
+          : 'none';
     this.log.info(
       opCtx,
       `WAL_RECOVERY_MATCH op=${entry.publishOperationId} merkleRoot=${merkleRootHex} ` +
         `cg=${entry.contextGraphId.slice(0, 16)}… kas=${onChainData.startKAId}..${onChainData.endKAId} ` +
-        `promoted=${promotedUal ?? 'none'} ` +
+        `promoted=${promotedUalForLog} retainedWal=${retainWal} ` +
         `(${this.preBroadcastJournal.length} entries surviving)`,
     );
     try {
@@ -843,7 +879,9 @@ export class DKGPublisher implements Publisher {
         publisherAddress: entry.publisherAddress,
         startKAId: onChainData.startKAId.toString(),
         endKAId: onChainData.endKAId.toString(),
-        promotedUal,
+        promotedUal: promotion.status === 'promoted' ? promotion.ual : null,
+        promotionStatus: promotion.status,
+        retainedWal: retainWal,
       });
     } catch {
       // EventBus emit failures are observability-only; never let
@@ -861,14 +899,39 @@ export class DKGPublisher implements Publisher {
    * (see `toHex` in metadata.ts); we case-insensitively match the
    * incoming hex so a caller passing an uppercase variant still hits.
    *
-   * Returns the promoted UAL, or `null` when no matching tentative KC
-   * exists in the store.
+   * Returns a discriminated result so the WAL-recovery caller can
+   * distinguish:
+   *   - `'promoted'`: a unique tentative KC was found and flipped to
+   *     `confirmed`. WAL entry is safe to drop.
+   *   - `'none'`:     no tentative KC matches. The KC never made it to
+   *     this node's store, or the tentative timeout already cleared
+   *     it. WAL entry is also safe to drop — the chain confirmation
+   *     itself is real.
+   *   - `'ambiguous'`: TWO OR MORE tentative KCs in the same context
+   *     graph share this `merkleRoot` (legitimate on retries /
+   *     republishes of identical content). The chain `Confirmed`
+   *     event addresses the batch only by `merkleRoot`, so we cannot
+   *     pick a UAL safely. The CALLER MUST RETAIN THE WAL ENTRY so
+   *     an explicit follow-up `confirmPublish` (which carries the
+   *     UAL) can reconcile the right one.
+   *
+   * PR #229 bot review (r3148... — dkg-publisher.ts:813). Pre-fix this
+   * helper returned `null` for both `'none'` AND `'ambiguous'` and the
+   * caller's WAL splice was unconditional. The chain confirmation for
+   * the FIRST of two same-merkleRoot retries would therefore drop the
+   * surviving WAL entry for the OTHER tentative UAL, severing the
+   * recovery record forever. The discriminated return below lets the
+   * caller skip the WAL splice in the ambiguous branch.
    */
   private async promoteTentativeKcByMerkleRoot(
     contextGraphId: string,
     merkleRootHex: string,
     opCtx: OperationContext,
-  ): Promise<string | null> {
+  ): Promise<
+    | { status: 'promoted'; ual: string }
+    | { status: 'none' }
+    | { status: 'ambiguous'; candidates: string[] }
+  > {
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const needle = merkleRootHex.toLowerCase();
     // Escape any double-quotes in the needle defensively. `toHex`
@@ -884,7 +947,7 @@ export class DKGPublisher implements Publisher {
       `FILTER(LCASE(STR(?root)) = "${needle}") } }`;
     const res = await this.store.query(select);
     const rows = res.type === 'bindings' ? res.bindings : [];
-    if (rows.length === 0) return null;
+    if (rows.length === 0) return { status: 'none' };
 
     // PR #229 bot review (r3147347... — dkg-publisher.ts:888).
     // Two or more tentative KCs in the SAME context graph can share
@@ -907,20 +970,20 @@ export class DKGPublisher implements Publisher {
       const ambiguousUals = rows
         .map((r) => r['ual'])
         .filter((u): u is string => Boolean(u))
-        .map((u) => (u.startsWith('<') && u.endsWith('>') ? u.slice(1, -1) : u))
-        .slice(0, 8); // cap log spam — full set is in the store
+        .map((u) => (u.startsWith('<') && u.endsWith('>') ? u.slice(1, -1) : u));
+      const truncated = ambiguousUals.slice(0, 8); // cap log spam — full set is in the store
       this.log.warn(
         opCtx,
         `WAL_RECOVERY_PROMOTE_AMBIGUOUS merkleRoot=${merkleRootHex} ` +
           `cg=${contextGraphId} candidates=${rows.length} ` +
-          `firstUals=${ambiguousUals.join(',')} — refusing to promote, ` +
+          `firstUals=${truncated.join(',')} — refusing to promote, ` +
           `WAL entry retained for explicit confirmPublish reconciliation`,
       );
-      return null;
+      return { status: 'ambiguous', candidates: ambiguousUals };
     }
 
     const rawUal = rows[0]['ual'];
-    if (!rawUal) return null;
+    if (!rawUal) return { status: 'none' };
     // Oxigraph returns bound IRIs as `<...>`; strip the angle brackets.
     const ual = rawUal.startsWith('<') && rawUal.endsWith('>')
       ? rawUal.slice(1, -1)
@@ -936,7 +999,7 @@ export class DKGPublisher implements Publisher {
       );
       throw writeErr;
     }
-    return ual;
+    return { status: 'promoted', ual };
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {

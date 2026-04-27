@@ -74,6 +74,25 @@ export interface ChainEventPollerConfig {
     endKAId: bigint;
     blockNumber: number;
   }) => Promise<boolean | void>;
+  /**
+   * PR #229 bot review (r3148... — chain-event-poller.ts:271).
+   * Optional accessor for "is there actually any recoverable WAL
+   * right now?". Pre-fix, the poller treated `onUnmatchedBatchCreated`
+   * being installed as a proxy for "WAL recovery is needed" — but
+   * `DKGAgent` ALWAYS wires the callback, so a brand-new node with
+   * an empty journal would scan from genesis on first boot
+   * (`lastBlock === 0` + the seed-near-tip suppression). On long-lived
+   * chains this is a multi-hour startup penalty for zero benefit.
+   *
+   * When this accessor is provided AND returns `false`, the poller
+   * treats WAL recovery as inactive — which restores the seed-near-
+   * tip behaviour for fresh nodes. When it's omitted or returns
+   * `true`, the legacy behaviour kicks in (refuse to seed, scan
+   * from `lastBlock` so any WAL entries can drain). The accessor is
+   * called fresh on every poll tick so a WAL entry written AFTER
+   * boot still flips the gate immediately on the next tick.
+   */
+  hasRecoverableWal?: () => boolean;
 }
 
 /**
@@ -98,6 +117,7 @@ export class ChainEventPoller {
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly cursorPersistence?: CursorPersistence;
   private readonly onUnmatchedBatchCreated?: ChainEventPollerConfig['onUnmatchedBatchCreated'];
+  private readonly hasRecoverableWal?: ChainEventPollerConfig['hasRecoverableWal'];
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
   private headKnown = false;
@@ -132,6 +152,7 @@ export class ChainEventPoller {
     this.onProfileEvent = config.onProfileEvent;
     this.cursorPersistence = config.cursorPersistence;
     this.onUnmatchedBatchCreated = config.onUnmatchedBatchCreated;
+    this.hasRecoverableWal = config.hasRecoverableWal;
   }
 
   async start(): Promise<void> {
@@ -258,16 +279,29 @@ export class ChainEventPoller {
     const watchUpdates = !!this.onCollectionUpdated;
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
-    // PR #229 bot review round 24 (r24-4). The unmatched-batch
-    // reconciler (`onUnmatchedBatchCreated`) is the durable path that
-    // drains the WAL after a restart — the in-memory pending map is
-    // empty by construction at that point, so relying solely on
-    // `hasPending` here would leave recovered WAL entries un-scanned
-    // forever. A poller wired ONLY for WAL recovery (no publishes
-    // queued locally, no CG/update/allowlist/profile watchers) still
-    // needs every tick to scan `KnowledgeBatchCreated` / `KCCreated`
-    // so the recovered entry can be matched. Treat the callback as
-    // an active watcher in the early-return gate too.
+    // PR #229 bot review round 24 (r24-4) + r30-4 follow-up
+    // (chain-event-poller.ts:271). The unmatched-batch reconciler
+    // (`onUnmatchedBatchCreated`) is the durable path that drains the
+    // WAL after a restart, but the callback being installed is NOT
+    // the right gate — `DKGAgent` wires it unconditionally for every
+    // node, so testing `!!this.onUnmatchedBatchCreated` would force
+    // every brand-new node with an empty journal to scan from genesis
+    // (and refuse to seed near tip — see the `headKnown` block below).
+    //
+    // The honest gate is "is there actually any recoverable WAL right
+    // now?". When `hasRecoverableWal` is provided we use its return
+    // value; when omitted (legacy callers without the accessor) we
+    // fall back to the "callback installed" check so existing tests
+    // continue to exercise the WAL-recovery code path.
+    const walRecoveryActive =
+      !!this.onUnmatchedBatchCreated &&
+      (this.hasRecoverableWal ? this.hasRecoverableWal() : true);
+    // The early-return gate still needs to keep the poller alive when
+    // the callback is installed even if the WAL is empty right now —
+    // a publish-then-crash a few seconds in must still drain. So this
+    // condition uses the looser "callback present" test for the
+    // tick-skip decision but the stricter `walRecoveryActive` test
+    // for the seed-near-tip decision below.
     const watchUnmatchedBatches = !!this.onUnmatchedBatchCreated;
     if (
       !hasPending
@@ -310,15 +344,15 @@ export class ChainEventPoller {
     // fire and no scanning is wasted.
     if (head != null && !this.headKnown) {
       this.headKnown = true;
-      if (this.lastBlock === 0 && !hasPending && !watchUnmatchedBatches) {
+      if (this.lastBlock === 0 && !hasPending && !walRecoveryActive) {
         this.lastBlock = Math.max(0, head - 500);
         this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
-      } else if (this.lastBlock === 0 && watchUnmatchedBatches) {
+      } else if (this.lastBlock === 0 && walRecoveryActive) {
         this.log.info(
           ctx,
           `WAL recovery active — NOT seeding poller cursor near head; ` +
             `scanning from genesis to drain any pre-crash WAL entries ` +
-            `(head=${head}, r25-1)`,
+            `(head=${head}, r25-1 / r30-4)`,
         );
       }
     }

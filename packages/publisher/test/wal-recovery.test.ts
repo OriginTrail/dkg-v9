@@ -461,12 +461,18 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     // call the WAL recovery path makes. A minimal opCtx shape is
     // sufficient — the helper only uses it for log routing.
     const opCtx = { traceId: 'trace-promote-ambiguous', operation: 'walRecover' } as any;
-    const promoted: string | null = await (publisher as any).promoteTentativeKcByMerkleRoot(
+    // PR #229 bot review (r3148... — dkg-publisher.ts:813). Helper
+    // now returns a discriminated result so the WAL caller can
+    // distinguish 'ambiguous' (RETAIN WAL) from 'none' / 'promoted'.
+    const promoted = await (publisher as any).promoteTentativeKcByMerkleRoot(
       cg,
       root,
       opCtx,
     );
-    expect(promoted, 'must NOT promote any of the ambiguous tentative KCs').toBeNull();
+    expect(promoted.status, 'must NOT promote — status must be ambiguous').toBe('ambiguous');
+    expect(promoted.candidates, 'all colliding UALs must be reported back to the caller')
+      .toEqual(expect.arrayContaining([ualA, ualB]));
+    expect(promoted.candidates).toHaveLength(2);
 
     // Crucially, BOTH tentative quads must STILL be tentative in the
     // store — neither one was flipped to confirmed.
@@ -484,6 +490,145 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
       `ASK { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> "confirmed" } }`,
     );
     expect(askNoneConfirmed.type === 'boolean' && askNoneConfirmed.value).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // PR #229 bot review (r3148... — dkg-publisher.ts:813).
+  // The earlier r30-2 fix made the helper REFUSE to promote on
+  // ambiguity, but the recovery caller still spliced the WAL
+  // unconditionally. This regression-pinned both ends together: when
+  // two same-merkleRoot retries collide on a single chain `Confirmed`
+  // event, the WAL entry MUST be retained so an explicit
+  // `confirmPublish` (which carries the actual UAL) can later
+  // reconcile.
+  // ---------------------------------------------------------------------------
+  it('r30-4: ambiguous promotion RETAINS the WAL entry instead of severing the recovery record', async () => {
+    const contextGraphId = 'cg-r30-4-retain';
+    const merkleRootHex = '0x' + '7d'.repeat(32);
+    const ualA = 'did:dkg:test/0xa1/1';
+    const ualB = 'did:dkg:test/0xb2/2';
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    // Real OxigraphStore so the SPARQL SELECT inside the helper
+    // actually fires and returns 2 rows.
+    const store = new OxigraphStore();
+    await store.insert([
+      { subject: ualA, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ualA, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+      { subject: ualB, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ualB, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+    ]);
+
+    // Seed a real WAL entry for the first retry; the second retry
+    // would normally have its own WAL entry too, but the bug only
+    // needs one to exhibit (the chain confirmation is shared, both
+    // tentative quads exist, and the splice would drop our journal
+    // record before any explicit confirmPublish could reach it).
+    const entry = makeEntry({
+      publishOperationId: 'op-r30-4-retain',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+      publisherAddress: '0xfeed1234feed1234feed1234feed1234feed1234',
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const observed: Array<Record<string, unknown>> = [];
+    const ee = new EventEmitter();
+    ee.on('publisher.walRecoveryMatch', (data: Record<string, unknown>) => observed.push(data));
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus: ee as unknown as EventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: walPath,
+    });
+
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 1n,
+      endKAId: 1n,
+    });
+    // We DO treat the chain event as recovered — it really happened.
+    expect(recovered?.publishOperationId).toBe('op-r30-4-retain');
+
+    // But CRUCIALLY the WAL entry must SURVIVE in memory so an
+    // explicit follow-up confirmPublish can reconcile.
+    expect(publisher.preBroadcastJournal).toHaveLength(1);
+    expect(publisher.preBroadcastJournal[0].publishOperationId).toBe('op-r30-4-retain');
+
+    // And the WAL FILE on disk must still contain the entry, so a
+    // subsequent process restart will re-load it. We re-read the
+    // raw file (the publisher writes one JSON line per entry).
+    const raw = (await readFile(walPath, 'utf-8')).trim();
+    expect(raw.length).toBeGreaterThan(0);
+    expect(JSON.parse(raw).publishOperationId).toBe('op-r30-4-retain');
+
+    // BOTH tentative quads must STILL be tentative — no premature
+    // promotion, no false confirmation.
+    const askA = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ualA}> <http://dkg.io/ontology/status> "tentative" } }`,
+    );
+    const askB = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ualB}> <http://dkg.io/ontology/status> "tentative" } }`,
+    );
+    expect(askA.type === 'boolean' && askA.value).toBe(true);
+    expect(askB.type === 'boolean' && askB.value).toBe(true);
+
+    // The recovery event must surface the ambiguity to observers.
+    expect(observed).toHaveLength(1);
+    expect(observed[0].promotionStatus).toBe('ambiguous');
+    expect(observed[0].retainedWal).toBe(true);
+    expect(observed[0].promotedUal).toBeNull();
+  });
+
+  it('r30-4: unambiguous promotion still SPLICES the WAL (regression guard so the retain-path does not over-fire)', async () => {
+    const contextGraphId = 'cg-r30-4-splice';
+    const merkleRootHex = '0x' + '8e'.repeat(32);
+    const ual = 'did:dkg:test/0xc3/3';
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+
+    const store = new OxigraphStore();
+    await store.insert([
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: `"${merkleRootHex}"`, graph: metaGraph },
+      { subject: ual, predicate: 'http://dkg.io/ontology/status',     object: '"tentative"',  graph: metaGraph },
+    ]);
+
+    const entry = makeEntry({
+      publishOperationId: 'op-r30-4-splice',
+      contextGraphId,
+      merkleRoot: merkleRootHex,
+      publisherAddress: '0xc0ffee0000000000000000000000000000000000',
+    });
+    await writeFile(walPath, JSON.stringify(entry) + '\n', 'utf-8');
+
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus: new EventEmitter() as unknown as EventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: walPath,
+    });
+
+    await publisher.recoverFromWalByMerkleRoot(merkleRootHex, {
+      publisherAddress: entry.publisherAddress,
+      startKAId: 3n,
+      endKAId: 3n,
+    });
+
+    // Single matching tentative → promoted → WAL splice fires.
+    expect(publisher.preBroadcastJournal).toHaveLength(0);
+    // `rewriteWalSync` deletes the file when there are no entries
+    // surviving (zero-byte WAL files are pruned to keep ENOENT and
+    // empty-WAL semantically equivalent on the read path). So
+    // either the file is missing, or it is empty — both indicate a
+    // successful splice.
+    const survives = await readFile(walPath, 'utf-8').then((s) => s, () => '');
+    expect(survives.trim().length).toBe(0);
+
+    const askConfirmed = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    );
+    expect(askConfirmed.type === 'boolean' && askConfirmed.value).toBe(true);
   });
 
   it('r30-2: promoteTentativeKcByMerkleRoot still promotes the unique tentative KC (regression guard for the single-row path)', async () => {
@@ -507,12 +652,13 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     });
 
     const opCtx = { traceId: 'trace-promote-unique', operation: 'walRecover' } as any;
-    const promoted: string | null = await (publisher as any).promoteTentativeKcByMerkleRoot(
+    const promoted = await (publisher as any).promoteTentativeKcByMerkleRoot(
       cg,
       root,
       opCtx,
     );
-    expect(promoted).toBe(ual);
+    expect(promoted.status).toBe('promoted');
+    expect(promoted.ual).toBe(ual);
 
     const askConfirmed = await realStore.query(
       `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,

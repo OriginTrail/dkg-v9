@@ -307,13 +307,36 @@ export async function revokeToken(
     try {
       raw = readFileSync(filePath).toString('utf-8');
     } catch (err: any) {
-      // File vanished between the snapshot and now — there is
-      // nothing to rewrite. Drop the snapshot so the next reconcile
-      // takes the ENOENT branch and removes any stragglers, then
-      // fall through to the in-memory delete below.
+      // File vanished between the snapshot and now. PR #229 bot review
+      // (r3148... — auth.ts:315). Pre-fix, this branch deleted ONLY
+      // the requested `token` from `validTokens` and then dropped the
+      // snapshot. But the snapshot is exactly what
+      // `reconcileFileTokens()` consults to subtract file-derived
+      // tokens on the ENOENT path — once it's gone, every OTHER
+      // token that was originally loaded from the now-missing file
+      // (`auth.token` containing `[A, B]`, `revokeToken(A)` after
+      // file deletion → only A removed; B stays valid forever).
+      //
+      // Fix: if the token file is gone, EVERY token it used to back
+      // is now stale — eagerly revoke ALL of `snapshot.fileTokens`
+      // and drop the snapshot so subsequent `verifyToken()` calls do
+      // not re-add anything. This matches the contract of
+      // `reconcileFileTokens()` ENOENT (which would have removed
+      // them on the next call had the snapshot still been there).
       if (err && err.code === 'ENOENT') {
+        let removedAny = false;
+        if (snapshot) {
+          for (const fileTok of snapshot.fileTokens) {
+            if (validTokens.delete(fileTok)) removedAny = true;
+          }
+        }
+        // Belt-and-suspenders: also delete the explicitly-revoked
+        // token in case the caller passed something not present in
+        // the snapshot (e.g. a config-pinned token that happened to
+        // collide with the file's prior contents).
+        if (validTokens.delete(token)) removedAny = true;
         lastFileSnapshot.delete(validTokens);
-        return validTokens.delete(token);
+        return removedAny;
       }
       throw err;
     }

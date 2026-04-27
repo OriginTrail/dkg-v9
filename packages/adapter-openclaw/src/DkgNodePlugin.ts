@@ -308,12 +308,14 @@ export class DkgNodePlugin {
       this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
+        // Retry typed-hook installs if the first register() call used a
+        // setup-runtime api where api.on was undefined. HookSurface records
+        // those as installedVia='none' with installError set; we detect
+        // that and re-install against the current (possibly full-mode)
+        // api. Gate on `runtimeEnabled` so a `setup-only` re-entry never
+        // wires prompt-injection / turn-persistence hooks (R14.3).
+        this.installHooksIfNeeded(api);
       }
-      // Retry typed-hook installs if the first register() call used a
-      // setup-runtime api where api.on was undefined. HookSurface records
-      // those as installedVia='none' with installError set; we detect that
-      // and re-install against the current (possibly full-mode) api.
-      this.installHooksIfNeeded(api);
       return;
     }
 
@@ -325,7 +327,13 @@ export class DkgNodePlugin {
       ?? process.env.OPENCLAW_STATE_DIR
       ?? `${homedir()}/.openclaw`;
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
-    this.installHooksIfNeeded(api);
+    // Hook installation is a runtime-only side effect — `setup-only`
+    // metadata loads must not wire `before_prompt_build` / `agent_end` /
+    // internal `message:*` handlers, which would turn a metadata-only
+    // load into live prompt injection and turn persistence (R14.3).
+    if (runtimeEnabled) {
+      this.installHooksIfNeeded(api);
+    }
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
@@ -1663,7 +1671,14 @@ export class DkgNodePlugin {
     event: any,
     ctx: any,
   ): Promise<{ appendSystemContext: string } | undefined> {
-    if (!this.memoryPlugin) return undefined;
+    // Gate on slot ownership — without this, the hook would inject DKG
+    // recall on every turn even when another plugin owns
+    // `plugins.slots.memory`, silently bypassing the elected provider
+    // (R14.2). `memoryPlugin` exists whenever memory is config-enabled,
+    // but `isRegistered()` flips false when `register()` returned false
+    // because the slot is owned by someone else, OR after
+    // `invalidateRegistration()` is called on a later re-entry.
+    if (!this.memoryPlugin || !this.memoryPlugin.isRegistered()) return undefined;
 
     // Per-turn re-assertion of the memory-slot capability. Cheap (one
     // property assignment per DkgMemoryPlugin.reAssertCapability docstring)

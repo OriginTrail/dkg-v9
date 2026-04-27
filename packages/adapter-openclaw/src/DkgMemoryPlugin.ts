@@ -631,6 +631,18 @@ export class DkgMemoryPlugin {
   }
 
   /**
+   * Whether this adapter currently owns the gateway memory slot. Returns
+   * `false` when `registerCapability()` was skipped (e.g. another plugin
+   * owns `plugins.slots.memory`) or after `invalidateRegistration()` is
+   * called. Per-turn anchors (`before_prompt_build`, `memory_search`)
+   * use this to avoid injecting DKG recall when the elected provider is
+   * a different plugin.
+   */
+  isRegistered(): boolean {
+    return this.registeredCapability !== null;
+  }
+
+  /**
    * Registers the memory-slot capability. Two gates must pass:
    *
    * 1. The gateway must expose `api.registerMemoryCapability` — older

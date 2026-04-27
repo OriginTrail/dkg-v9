@@ -469,6 +469,49 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
   });
 
+  it("R14.1 — W4a advances the watermark when the last-pair peek hits W4b's reservation", async () => {
+    // R14.1 regression: when W4b has already persisted a turn via
+    // `message:sent` and the cross-path peek tells W4a to skip it, the
+    // watermark must STILL advance to that pair's index. Without this,
+    // a later `agent_end` (after the 3s TTL has expired and the W4b
+    // reservation has been swept) would re-pair the same turn as
+    // unsaved backfill and write a duplicate to the daemon.
+    const sessionId = "openclaw:tg:::sk";
+    const dkw = writer as any;
+    // Simulate W4b having just persisted "ping/pong" by stamping the
+    // w4b-origin key directly in the dedup map. This is what
+    // `onMessageSent` does after a successful persist.
+    dkw.markTurnIdSeen(sessionId, dkw.w4bOriginKey("ping", "pong"));
+
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // W4a must NOT have written — W4b owns this turn (cross-path peek).
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    // The bumpWatermark scheduled a debounced commit. Watermark in the
+    // pending debounce slot must already reflect the persisted pair.
+    const pending = dkw.debounceTimers.get(sessionId);
+    expect(pending?.pendingIndex).toBe(0);
+    // Commit the watermark to disk-backed cache so the next onAgentEnd
+    // reads it via loadWatermark (mirrors the production debounce flush).
+    writer.flushSync();
+    expect(dkw.loadWatermark(sessionId)).toBe(0);
+
+    // Simulate TTL sweep — the W4b reservation has expired and would no
+    // longer trigger the cross-path peek. The watermark is the second
+    // line of defense and must independently prevent replay.
+    dkw.recentTurnIds.clear();
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+  });
+
   it("derives sessionId from context", async () => {
     const event: AgentEndContext = {
       sessionId: "test",

@@ -170,7 +170,15 @@ export class ChatTurnWriter {
           // (R13.1).
           if (i === lastIdx) {
             const w4bOrigin = this.w4bOriginKey(user, assistant);
-            if (this.peekTurnIdSeen(sessionId, w4bOrigin)) continue; // W4b wrote it
+            if (this.peekTurnIdSeen(sessionId, w4bOrigin)) {
+              // W4b already persisted this pair via `message:sent`. The
+              // pair is logically saved, so advance the watermark to its
+              // index — without this, a later `agent_end` (after the 3s
+              // dedup TTL has expired) would re-pair the same pair as
+              // unsaved backfill and write a duplicate (R14.1).
+              this.bumpWatermark(sessionId, pairIndex);
+              continue;
+            }
           }
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
@@ -723,6 +731,20 @@ export class ChatTurnWriter {
     return this.cachedWatermarks.get(sessionId) ?? -1;
   }
 
+  /**
+   * Advance the per-session watermark to `pairIndex` if (and only if) it
+   * is greater than the current pending or persisted index. Centralizes
+   * the "MAX of current and pairIndex" guard so the cross-path-skip path
+   * (R14.1) and `persistOne` use identical advancement semantics.
+   */
+  private bumpWatermark(sessionId: string, pairIndex: number): void {
+    const pending = this.debounceTimers.get(sessionId);
+    const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
+    if (pairIndex > currentIndex) {
+      this.saveWatermark(sessionId, pairIndex);
+    }
+  }
+
   private saveWatermark(sessionId: string, index: number): void {
     const existing = this.debounceTimers.get(sessionId);
     if (existing) clearTimeout(existing.timer);
@@ -764,11 +786,7 @@ export class ChatTurnWriter {
         //     `computeDelta`, which scans `messages[]`. W4b operates on
         //     ad-hoc internal-hook events that have no pair semantics.
         if (typeof opts?.pairIndex === "number") {
-          const pending = this.debounceTimers.get(sessionId);
-          const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
-          if (opts.pairIndex > currentIndex) {
-            this.saveWatermark(sessionId, opts.pairIndex);
-          }
+          this.bumpWatermark(sessionId, opts.pairIndex);
         }
         this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
         return;

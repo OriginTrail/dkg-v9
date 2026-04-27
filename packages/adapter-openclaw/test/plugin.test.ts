@@ -2402,6 +2402,67 @@ describe('DkgNodePlugin', () => {
     expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
   });
 
+  it('R14.3 — setup-only registration must NOT install before_prompt_build / agent_end / message:* hooks', () => {
+    // Regression for R14.3: `installHooksIfNeeded` previously ran
+    // unconditionally in `register()`, so a metadata-only setup-only load
+    // wired live prompt-injection and turn-persistence handlers. The
+    // hookSurface must remain null on setup-only so no listeners attach.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(mockApi);
+    expect((plugin as any).hookSurface).toBeNull();
+    // No typed-hook installs may have called api.on either.
+    expect(onSpy).not.toHaveBeenCalled();
+  });
+
+  it('R14.2 — handleBeforePromptBuild returns undefined when memoryPlugin exists but is not registered (slot owned by another plugin)', async () => {
+    // Regression for R14.2: when `plugins.slots.memory` points at a
+    // different plugin, `DkgMemoryPlugin.register()` returns false and
+    // `registeredCapability` stays null. The before_prompt_build hook
+    // must short-circuit instead of injecting DKG recall on top of the
+    // elected provider's prompt.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      // No `plugins.slots.memory` set → registerCapability returns false
+      // → isRegistered() === false.
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+
+    // memoryPlugin must exist — module is enabled — but it must NOT be
+    // registered, because the slot points elsewhere.
+    expect((plugin as any).memoryPlugin).not.toBeNull();
+    expect((plugin as any).memoryPlugin.isRegistered()).toBe(false);
+
+    const result = await (plugin as any).handleBeforePromptBuild(
+      { messages: [{ role: 'user', content: 'tatooine suns' }] },
+      { sessionKey: 'sk' },
+    );
+    expect(result).toBeUndefined();
+  });
+
   it('warns once when legacy OriginTrail Game config is still present', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',

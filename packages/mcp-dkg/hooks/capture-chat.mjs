@@ -1086,6 +1086,7 @@ When calling \`dkg_annotate_turn\`, ALWAYS pass \`forSession: "${sessionKey}"\`.
 - \`chat:proposes\` (URI) — ideas/decisions/tasks put forward
 - \`chat:concludes\` (URI) — Findings worth preserving
 - \`chat:asks\` (URI) — open Questions
+- \`chat:worksOn\` (URI) — the \`tasks:Task\` this turn is working on (emit while a task is \`in_progress\`)
 
 Call \`dkg_get_ontology\` for the full agent guide + formal Turtle (one-time per session).
 

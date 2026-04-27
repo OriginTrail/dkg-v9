@@ -7,6 +7,10 @@
 //     via `node -e` / `python -c` bypass of pre-shell)
 //   - out-of-task-scope, not protected → DELETED (matches default-deny intent)
 //   - in-scope or exempt → left alone
+//
+// Source of truth for "in-scope" is the local DKG daemon — the union of
+// `tasks:scopedToPath` across every `in_progress` task attributed to this
+// agent. See agent-scope/lib/scope.mjs + dkg-source.mjs.
 
 import { readFileSync, rmSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -19,13 +23,11 @@ const __dirname = dirname(__filename);
 const scopeUrl  = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/scope.mjs')).href;
 const logUrl    = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/log.mjs')).href;
 const denialUrl = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/denial.mjs')).href;
-const parseUrl  = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/shell-parse.mjs')).href;
 const {
   resolveRepoRoot, resolveActiveTaskId, loadTask, checkPath, checkNodeVersion,
 } = await import(scopeUrl);
 const { logDenial } = await import(logUrl);
 const { buildAfterShellContext } = await import(denialUrl);
-const { extractTaskCreateId, approvedTaskCreateWrites } = await import(parseUrl);
 
 try { checkNodeVersion(); } catch (e) {
   process.stderr.write(e.message + '\n');
@@ -68,58 +70,17 @@ async function main() {
 
   const root = resolveRepoRoot();
   const { id: taskId } = resolveActiveTaskId(root);
-
-  let task = null;
-  if (taskId) { try { task = loadTask(root, taskId); } catch { return emit({}); } }
+  const task = loadTask(root, taskId);
 
   const porcelain = gitPorcelain(root);
   if (porcelain === null) return emit({});
-
-  // Approved-task-create allowlist: if the command that just ran was
-  // `pnpm task create <id>` (or the canonical node equivalent), we allow
-  // the two specific files that command legitimately writes —
-  //   agent-scope/tasks/<id>.json
-  //   agent-scope/active
-  // Every other protected-path write still gets reverted/deleted.
-  const approvedId = extractTaskCreateId(command);
-  const approvedWrites = approvedTaskCreateWrites(approvedId);
-  const approved = [];
-
-  // Active-task state exemption: the currently active task's manifest and
-  // the `active` pointer file are legitimate persistent state, not
-  // collateral from the current command. Without this, a manifest created
-  // by an earlier `pnpm task create` gets reaped the next time ANY
-  // unrelated shell command runs (because it shows up as untracked in a
-  // protected path). Only shield the active-task id — every other
-  // manifest (including stale ones) is still reverted/deleted.
-  const activeTaskExemptions = new Set();
-  if (taskId) {
-    activeTaskExemptions.add(`agent-scope/tasks/${taskId}.json`);
-    activeTaskExemptions.add('agent-scope/active');
-  }
 
   const entries = parsePorcelain(porcelain);
   const outOfScope = entries.filter(({ path }) => {
     if (!path) return false;
     const d = checkPath(task, path, root);
-    if (d !== 'deny' && d !== 'protected') return false;
-    if (approvedWrites.has(path)) { approved.push(path); return false; }
-    if (activeTaskExemptions.has(path)) return false;
-    return true;
+    return d === 'deny' || d === 'protected';
   });
-
-  if (approved.length) {
-    for (const p of approved) {
-      logDenial(root, {
-        event: 'afterShell.approved-create',
-        tool: 'Shell',
-        path: p,
-        task: approvedId,
-        command,
-        sessionId,
-      });
-    }
-  }
 
   if (outOfScope.length === 0) return emit({});
 
@@ -168,7 +129,7 @@ async function main() {
   emit({ additional_context: message });
 }
 
-main().catch(err => {
+main().catch((err) => {
   process.stderr.write(`shell-diff-check error: ${err?.message || err}\n`);
   emit({});
 });

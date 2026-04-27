@@ -1,26 +1,23 @@
-// `pnpm task check-agent` — verify agent-scope is wired up correctly for
-// each supported agent on this machine. Pure data; presentation is in
-// agent-scope/bin/task.mjs.
+// `pnpm scope:check-agent` — verify agent-scope is wired up correctly for
+// each supported agent on this machine. This is the post-`git pull`
+// sanity command. Coworkers run it, see a per-agent green/yellow/red,
+// and know what (if anything) they need to do.
 //
-// This is the post-`git pull` sanity command. Coworkers run it, see a
-// per-agent green/yellow/red, and know what (if anything) they need to do.
-
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
-
-// One descriptor per agent. Each .check() returns { status, details } where
-// status is 'ok' | 'warn' | 'missing' | 'partial'. Soft-rule-only agents
-// always return 'partial' to make it clear they have no hard enforcement.
+// Pure data + a small CLI driver at the bottom (so this file is also the
+// executable). Library exports: detectAgents, statusGlyph, summary.
 //
+// Status values per agent:
 //   ok       → fully wired up; hard enforcement on
 //   partial  → instruction file present; agent must self-enforce
 //   warn     → wired up but something is questionable (e.g. hook not +x)
 //   missing  → not configured at all
 //
 // We never return 'fail' because a missing agent is the normal state for
-// users who don't use that agent. The CLI only exits non-zero if the
-// active task can't be loaded.
+// users who don't use that agent.
+
+import { existsSync, statSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export function detectAgents(root) {
   return [
@@ -63,8 +60,6 @@ function cursorAgent(root) {
     'scope-guard.mjs',
     'shell-precheck.mjs',
     'shell-diff-check.mjs',
-    'post-tool-use.mjs',
-    'stop.mjs',
   ];
   for (const f of requiredHooks) {
     const p = resolve(hooksDir, f);
@@ -85,7 +80,7 @@ function cursorAgent(root) {
 
   if (existsSync(rule)) out.details.push('  ✓ .cursor/rules/agent-scope.mdc present');
   else {
-    out.details.push('  ! .cursor/rules/agent-scope.mdc missing — agent will lack onboarding protocol');
+    out.details.push('  ! .cursor/rules/agent-scope.mdc missing — agent will lack the denial protocol');
     out.status = out.status === 'ok' ? 'warn' : out.status;
     out.setup.push('  • Pull the latest commit — .cursor/rules/agent-scope.mdc should be tracked.');
   }
@@ -127,7 +122,6 @@ function claudeCodeAgent(root) {
     'scope-guard.mjs',
     'shell-precheck.mjs',
     'shell-diff-check.mjs',
-    'post-tool-use.mjs',
     'user-prompt-submit.mjs',
   ];
   for (const f of requiredHooks) {
@@ -149,7 +143,7 @@ function claudeCodeAgent(root) {
 
   if (existsSync(claudeMd)) out.details.push('  ✓ CLAUDE.md present');
   else {
-    out.details.push('  ! CLAUDE.md missing — agent will lack onboarding protocol');
+    out.details.push('  ! CLAUDE.md missing — agent will lack the denial protocol');
     out.status = out.status === 'ok' ? 'warn' : out.status;
   }
 
@@ -250,13 +244,13 @@ function legacyAgent(root) {
 function isExecutable(p) {
   try {
     const m = statSync(p).mode;
-    // owner / group / other execute bits
     return Boolean(m & 0o111);
   } catch { return false; }
 }
 
 // ---------------------------------------------------------------------------
 // Aggregate
+// ---------------------------------------------------------------------------
 
 export function statusGlyph(s) {
   switch (s) {
@@ -273,3 +267,38 @@ export function summary(results) {
   for (const r of results) counts[r.status] = (counts[r.status] || 0) + 1;
   return counts;
 }
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+function repoRootFromHere() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..');
+}
+
+function runCli() {
+  const root = process.env.AGENT_SCOPE_ROOT || repoRootFromHere();
+  const results = detectAgents(root);
+  const counts = summary(results);
+
+  console.log(`agent-scope: agent wiring check  (root: ${root})\n`);
+  for (const r of results) {
+    console.log(`${statusGlyph(r.status)} ${r.name} — ${r.enforcement}`);
+    for (const d of r.details) console.log(d);
+    if (r.setup.length) {
+      console.log('  Setup:');
+      for (const s of r.setup) console.log(s);
+    }
+    console.log('');
+  }
+  console.log(
+    `Summary: ${counts.ok} ok · ${counts.partial} soft · ${counts.warn} check · ${counts.missing} missing`,
+  );
+}
+
+const isMain = (() => {
+  try { return import.meta.url === `file://${process.argv[1]}` || import.meta.url.endsWith(process.argv[1] || ''); }
+  catch { return false; }
+})();
+if (isMain) runCli();

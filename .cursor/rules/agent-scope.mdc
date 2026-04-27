@@ -1,165 +1,42 @@
----
-description: Task-scoped write permissions. Invisible by default; engaged via `pnpm task start` (agent-guided with pre-captured description) or an active task. All denials surface a plan-mode AskQuestion menu.
-alwaysApply: true
----
+# agent-scope — task-scoped writes, sourced from the local DKG
 
-# agent-scope — task-scoped writes
+The repo ships a thin write-time guard, but it stays **invisible** unless
+something engages it. If no `tasks:Task` is currently `in_progress` for
+your agent and you don't try to touch a protected path, behave normally —
+agent-scope is a no-op.
 
-The repo ships a task-scoping guard but it stays **invisible** unless the user
-engages it. If no active task is set and bootstrap is off, the system is a
-no-op for you — behave normally. The hardcoded protected paths (the guard's
-own files) are still defended, but that only matters if you try to touch them.
+## Mental model
 
-The user turns the system on in one of two ways:
+The active scope is the **union of `tasks:scopedToPath` globs** across
+every `tasks:Task` whose `tasks:status` is `"in_progress"` AND whose
+`prov:wasAttributedTo` matches the current agent URI. A small SPARQL
+query (cached for ~5s) feeds every hook. There is no separate manifest
+file, no `pnpm task` CLI, no "active task" pointer — the DKG is the
+source of truth. Calling `dkg_update_task_status({ taskUri, status:
+"done" })` removes that task's globs from the union immediately.
 
-1. **`pnpm task start`** — they want YOU to read their task description,
-   explore the repo, and propose a scope. The CLI captures a task
-   description from them and drops a one-shot marker
-   (`agent-scope/.pending-onboarding`, gitignored) that already embeds the
-   description. THREE parallel consumers compete for the marker — whichever
-   runs first wins, because consumption is atomic read-and-delete:
-   - `sessionStart` hook — injects the trigger as initial context in any
-     NEW chat.
-   - `postToolUse` hook — injects it as `additional_context` after ANY
-     tool call in an existing chat.
-   - **YOU, via the mandatory top-of-turn marker check below** — guarantees
-     onboarding triggers even for purely conversational messages (e.g. "hi")
-     in an existing chat.
-   Result: the next user message in any chat, new or existing, triggers
-   onboarding exactly once. After that the marker is gone and everything
-   else behaves normally.
-2. **Existing active task** — the session-start hook injects a context block
-   naming the active task. From that moment on, writes are task-scoped and
-   every denial must be surfaced via the plan-mode denial protocol below.
+## Starting a task
 
-## MANDATORY: top-of-turn marker check
+When the user gives you work and no covering `in_progress` task exists,
+file one with `dkg_add_task`:
 
-Before responding to **every** user message in a session with **no active
-task** (`agent-scope/active` is absent), your FIRST action MUST be:
+```ts
+dkg_add_task({
+  taskUri: 'urn:dkg:task:peer-sync-auth',
+  title: 'Peer sync uses workspace auth',
+  status: 'in_progress',
+  assignee: '<your agent URI>',
+  scopedToPath: ['packages/agent/**', 'packages/core/**'],
+  description: 'Refactor peer-sync to consume the new workspace auth.',
+})
+```
 
-1. Check whether `agent-scope/.pending-onboarding` exists. Use the `Read`
-   tool on that path. If the file does not exist, the tool will report so
-   — continue with your normal response.
-2. If the file exists:
-   a. Delete it immediately (`Delete` tool, or a single `rm` via `Shell`).
-      This is critical — leaving it behind would re-trigger onboarding next
-      turn.
-   b. IGNORE the user's actual message (whatever they typed, they knew
-      onboarding was pending when they sent it).
-   c. Pivot straight into the **Task onboarding protocol** below — ask the
-      user to describe the task in detail.
+The cache picks it up within ~5s; the next write to those paths
+succeeds. To extend scope mid-work, file an additional `in_progress`
+task or re-issue `dkg_add_task` for the same `taskUri` with the wider
+glob list.
 
-Skip this check only when:
-- `agent-scope/active` exists (a task is already set; onboarding is done), OR
-- You are already mid-onboarding (already asked "describe the task" and are
-  waiting for the description, or proposing a scope, etc.).
-
-If you receive initial context / additional_context beginning with
-`agent-scope: start task onboarding.` (injected by the sessionStart or
-postToolUse hooks), treat it the same as finding the marker: pivot to the
-onboarding protocol immediately. The hooks already delete the marker for
-you in that case; do not double-delete — just follow the protocol.
-
-## Task onboarding protocol — when the user wants to start a new scoped task
-
-Triggered by any of:
-
-- The onboarding trigger text (either found in the pending-onboarding
-  marker, or injected by the `sessionStart` / `postToolUse` hook). It
-  begins with `agent-scope: start task onboarding.` and usually contains a
-  `=== USER TASK DESCRIPTION ===` block.
-- The user typing "start a scoped task", "scope me", "agent-scope: start",
-  or similar intent without a description (in which case you'll need to
-  ask them to describe it first — see step 1).
-
-Follow these steps exactly:
-
-1. **Get the task description.**
-   - **If the trigger already contains a `=== USER TASK DESCRIPTION ===` block**
-     (the `pnpm task start` flow): use that description verbatim as your
-     brief. DO NOT re-ask the user to describe the task — they already
-     typed it into the CLI.
-   - **Otherwise** (bare marker or an intent phrase), send a plain chat
-     message:
-     > "OK, let's scope a new task. Describe in detail what we're building
-     > or fixing — packages, behaviours, tests, any files you already know
-     > about. The more detail, the tighter the scope I can propose."
-
-     Wait for the reply.
-
-2. **Explore the codebase.** Use `Glob`, `Grep`, `SemanticSearch`, `Read`,
-   and the DKG SPARQL queries at the top of this file to locate:
-   - The package(s) the task touches
-   - Specific source files implementing the mentioned behaviour
-   - Sibling test files that cover them
-   - Related schemas / contracts / migrations if the task mentions them
-   - Count matching files per package so you can show weights in Q1.
-
-3. **Draft a scope.** Aim for a set of globs that:
-   - Covers everything you reasonably expect to touch
-   - Errs slightly broad (under-scoping causes constant denials mid-work;
-     over-scoping just gives the user rope they can see via `pnpm task show`)
-   - Prefers whole-package globs (`packages/<name>/**`) over file globs
-     when in doubt
-   - Includes matching test files
-   - Always appends `!**/secrets.*`, `!**/.env*` as safety denies
-   - Inherits `base` unless there is a reason not to (base supplies the
-     standard exemptions: `**/dist/**`, lockfiles, build artefacts)
-
-4. **Propose the scope via a SINGLE `AskQuestion` call with ONE question
-   and TWO options.** Keep it short and natural — like you're asking a
-   coworker, not filling out a form. Do NOT include a second question, do
-   NOT list every package individually, do NOT dump JSON into the prompt.
-
-   - `id`: `scope`
-   - `allow_multiple`: `false`
-   - `prompt`: two short sentences. First: a one-line rephrase of what you
-     understood the task to be. Second: the scope you'd propose, as a short
-     **numbered** list of globs (3–5 lines max). Finish with "Sound good?"
-     Example:
-
-     > Refactor peer sync to use the new workspace auth. I'd scope it to:
-     > 1) `packages/agent/**`
-     > 2) `packages/core/**`
-     > 3) inherit `base` (standard build-artefact exemptions)
-     >
-     > Sound good?
-
-   - `options` (IDs must match exactly — only these two):
-     - `go` — `"Yes, go with that"`
-     - `custom_instruction` — `"Type what you want instead"`
-
-5. **On `go`:** **YOU (the agent) run the command directly** via the Shell
-   tool. The `afterShellExecution` hook has a narrow allowlist for the
-   canonical task-create invocation: `pnpm task create <id> ...` and
-   `node agent-scope/bin/task.mjs create <id> ...` are the ONLY shapes whose
-   writes to `agent-scope/tasks/<id>.json` and `agent-scope/active` may
-   persist. Use the exact globs you proposed (any divergence is a protocol
-   violation):
-
-   ```bash
-   pnpm task create <id> \
-     --description "<one-line description>" \
-     --allowed "<glob-1>" \
-     --allowed "<glob-2>" \
-     ...
-     --inherits base \
-     --activate
-   ```
-
-   After the command succeeds, continue with the actual work in the same
-   turn. If the command fails, surface the error and re-ask via
-   AskQuestion instead of retrying blindly.
-
-6. **On `custom_instruction`:** ask the user in plain chat what they want
-   changed — e.g. `"What would you like different? (add/remove packages,
-   tighten globs, different task id, whatever.)"` Then apply their reply to
-   the draft and re-ask step 4 (still a single question, still two options).
-
-From step 5 onward, the active task is set and the plan-mode denial
-protocol (below) governs every future write.
-
-## Plan-mode denial protocol — MANDATORY once a task is active
+## Plan-mode denial protocol — MANDATORY once a denial fires
 
 Every denial message from agent-scope carries a structured menu. You must
 **stop**, parse it, and surface it via `AskQuestion` — one question, two
@@ -180,8 +57,9 @@ A denial always contains a fenced JSON block:
 Plus a one-line prose summary starting with `agent-scope:` that you can
 also key off:
 
-- `preToolUse` / `beforeShellExecution` return `{ permission: "deny" }`
-  with an `agent_message` containing the fence.
+- `preToolUse` returns `{ permission: "deny" }` with an `agent_message`
+  containing the fence.
+- `beforeShellExecution` returns `{ permission: "deny" }` similarly.
 - `afterShellExecution` returns an `additional_context` containing the
   fence. Files have already been reverted or deleted.
 
@@ -193,17 +71,19 @@ The JSON shape (TypeScript for clarity):
 {
   version: 1,
   hook: "preToolUse" | "beforeShellExecution" | "afterShellExecution",
-  reason: "out-of-scope" | "protected" | "manifest-load-error" | "unknown",
-  humanSummary: string,     // short, natural — QUOTE THIS in your prompt
+  reason: "out-of-scope" | "protected" | "daemon-unreachable"
+        | "configuration-error" | "unknown",
+  humanSummary: string,           // short, natural — QUOTE THIS in your prompt
   deniedPath?: string,
   command?: string,
-  activeTask: string | null,
-  simpleOptions: [          // exactly two entries — SURFACE THESE
+  activeTask: string | null,      // legacy field; usually null in DKG mode
+  activeTaskUris: string[],       // current `in_progress` task URIs (canonical)
+  simpleOptions: [                // exactly two entries — SURFACE THESE
     { id: string, label: string, action: { kind: "..." /* + fields */ } },
     { id: "custom_instruction", label: "Type what you want instead",
       action: { kind: "custom" } }
   ],
-  recommendedOptionId: string,  // matches simpleOptions[0].id
+  recommendedOptionId: string,    // matches simpleOptions[0].id
   options: [ /* full verbose list — do NOT surface to the user */ ],
 }
 ```
@@ -218,10 +98,11 @@ The JSON shape (TypeScript for clarity):
      finish with a simple ask. Keep the whole prompt to 3 sentences max.
      Example:
 
-     > I'd like to edit `packages/evm-module/contracts/S.sol`, but the
-     > active task `sync` doesn't cover that file. I was trying to update
-     > the staking integration referenced in the PR. Want me to add it to
-     > the scope and continue?
+     > I'd like to edit `packages/evm-module/contracts/S.sol`, but no
+     > in-progress task covers that file. I was trying to update the
+     > staking integration referenced in the PR. Want me to file a new
+     > in-progress task covering `packages/evm-module/contracts/**` and
+     > continue?
 
    - `options`: pass `simpleOptions` from the JSON, verbatim. It always
      has exactly two entries — the recommended action and a free-text
@@ -229,15 +110,15 @@ The JSON shape (TypeScript for clarity):
      reword options.
 
 4. **Act on the user's choice** using the matching `action` object:
-   - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append the
-     listed patterns to `allowed`, save, then retry the original operation.
-   - `switch_task` → run `pnpm task set <task>`, then retry.
-   - `bootstrap` → print `action.instruction` verbatim. Wait for the user to
-     enable bootstrap. After the protected work is done, remind them to
-     `rm agent-scope/.bootstrap-token` to re-lock.
-   - `fix_manifest` → open the referenced manifest, fix the reported error,
-     re-run `pnpm task validate <task>`.
-   - `clear_task` → run `pnpm task clear`.
+   - `new_in_progress_task` → call `dkg_add_task` with `taskUri` of your
+     choice, `status: "in_progress"`, your agent URI as `assignee`, and
+     `scopedToPath: action.suggestedScopedToPath`. Wait ~5s for the
+     cache, then retry the original operation.
+   - `bootstrap` → print `action.instruction` verbatim. Wait for the
+     user to enable bootstrap. After the protected work is done, remind
+     them to `rm agent-scope/.bootstrap-token` to re-lock.
+   - `restart_daemon` / `configure_dkg` → print `action.instruction`
+     verbatim, wait, retry.
    - `skip` → acknowledge; move on to other in-scope work.
    - `cancel` → stop the turn; summarise what got done and what didn't.
    - `custom` → ask the user in plain chat: "OK, what should I do instead?"
@@ -247,14 +128,14 @@ The JSON shape (TypeScript for clarity):
    user's intent, the `custom_instruction` entry is always there — route
    through it.
 
-### Phrasing rules (for onboarding AND denials)
+### Phrasing rules
 
 - Write like you're texting a coworker, not filing a ticket.
 - One short question. One recommendation. One "type what you want" option.
 - Never use ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
 - Don't explain the internal architecture in the prompt — the user doesn't
-  need to know about hooks or manifests to answer. Keep it action-focused:
-  "I want to do X. Should I?"
+  need to know about hooks or SPARQL queries to answer. Keep it
+  action-focused: "I want to do X. Should I?"
 - If you need to say why something is restricted, one sentence is enough.
 - No emoji unless the user uses them first.
 
@@ -276,46 +157,28 @@ Always denied regardless of task, unless a human has enabled bootstrap
 
 - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
 - `.claude/hooks/**`, `.claude/settings.json`
-- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/schema/**`
-- `agent-scope/tasks/**`, `agent-scope/active`, `agent-scope/.bootstrap-token`
+- `agent-scope/lib/**`
+- `agent-scope/.bootstrap-token`
 - `AGENTS.md`, `GEMINI.md`, `.cursorrules`
 
-If one of these needs to change, use the `bootstrap` option from the denial
-menu — do not try to bypass (no shell redirection, no `node -e`, no alternate
-tooling). The `afterShell` hook will delete any untracked files in these paths
-even if the bypass succeeded, so retry attempts are wasted.
+If one of these needs to change, use the `bootstrap` option from the
+denial menu — do not try to bypass (no shell redirection, no `node -e`,
+no alternate tooling). The `afterShell` hook will delete any untracked
+files in these paths even if the bypass succeeded, so retry attempts are
+wasted.
 
 Note: the guard operates **only on agent actions**. Humans committing or
-pushing manually through their terminal/IDE are not restricted — there are no
-git hooks and no CI enforcement. If a human edits a protected file by hand,
-they can commit and push normally.
-
-## Manifest cheat sheet
-
-```json
-{
-  "id": "example",
-  "description": "...",
-  "inherits": ["base"],
-  "allowed": [
-    "packages/foo/**/*.ts",
-    "!packages/foo/**/secrets.*"
-  ],
-  "exemptions": ["**/dist/**", "pnpm-lock.yaml"]
-}
-```
-
-- Patterns support `*`, `**`, `?`.
-- Prefix with `!` for an explicit deny that overrides everything else.
-- `inherits` pulls `allowed` + `exemptions` from a parent manifest (e.g. `base`).
-- Default-deny: anything not matched is blocked.
+pushing manually through their terminal/IDE are not restricted — there
+are no git hooks and no CI enforcement. If a human edits a protected
+file by hand, they can commit and push normally.
 
 ## Don't
 
-- Don't edit `agent-scope/active` yourself — ask the user to switch tasks via
-  the menu's `switch_task` action, or via `pnpm task set`.
-- Don't add patterns to a manifest to unblock yourself — always confirm via
-  the plan-mode menu first.
-- Don't surface the verbose `options` list in AskQuestion — always use
+- Don't try to widen scope by editing local files — there are none.
+  Scope lives in the DKG.
+- Don't add a fake `in_progress` task to "self-grant" coverage. Surface
+  the denial menu, let the human approve scope changes via the
+  `new_in_progress_task` option.
+- Don't surface the verbose `options` list in `AskQuestion` — always use
   `simpleOptions` (two entries: recommendation + "something else").
 - Don't retry a blocked operation with a different tool or command form.

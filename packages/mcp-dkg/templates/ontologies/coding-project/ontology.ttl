@@ -93,6 +93,13 @@ chat:asks
   rdfs:domain chat:Turn ;
   rdfs:range :Question .
 
+chat:worksOn
+  a owl:ObjectProperty ;
+  rdfs:label "works on" ;
+  rdfs:comment "The tasks:Task this chat turn is working on. Pure observability — agents emit this on every substantive turn while a task is in_progress, so retrospective queries like 'what did agent X discuss while working on task Y' resolve to a single SPARQL. NOT used by the write-time guard (that derives scope from tasks:scopedToPath on the task itself)." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range tasks:Task .
+
 # ─── Section 2 — Universal annotation entity classes ────────────────
 
 :Concept
@@ -209,7 +216,33 @@ tasks:touches
   rdfs:label "touches" ;
   rdfs:domain tasks:Task ;
   rdfs:range owl:Thing ;
-  rdfs:comment "A code:File or code:Package this task edits." .
+  rdfs:comment "A code:File or code:Package this task edits. Human-readable record; NOT what the write-time guard evaluates (use tasks:scopedToPath for that)." .
+
+tasks:scopedToPath
+  a owl:DatatypeProperty ;
+  rdfs:label "scoped to path" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Glob pattern (relative to repo root) the agent IS allowed to write while this task is `in_progress`. Multivalued: emit one triple per glob. Bang-prefixed patterns are explicit denies. Used by the agent-scope write-time guard — the union of these globs across all in_progress tasks attributed to the agent forms the allow-list for that session. Example values: \"packages/agent/**\", \"packages/core/src/sync/**\", \"!**/secrets.*\"." .
+
+tasks:StatusEvent
+  a owl:Class ;
+  rdfs:label "Task Status Event" ;
+  rdfs:comment "An immutable record of a tasks:Task transitioning into a particular status at a particular time. Written by `dkg_update_task_status` alongside the (replace-semantics) status flip on the task itself, so retrospective queries can reconstruct the task's full state history without polluting the live `tasks:status` triple." .
+
+tasks:aboutTask
+  a owl:ObjectProperty ;
+  rdfs:label "about task" ;
+  rdfs:domain tasks:StatusEvent ;
+  rdfs:range tasks:Task ;
+  rdfs:comment "The task this status event is about." .
+
+tasks:eventStatus
+  a owl:DatatypeProperty ;
+  rdfs:label "event status" ;
+  rdfs:domain tasks:StatusEvent ;
+  rdfs:range xsd:string ;
+  rdfs:comment "The status the task transitioned INTO at this event." .
 
 # Code structure — aligned with schema:SoftwareSourceCode + DOAP.
 

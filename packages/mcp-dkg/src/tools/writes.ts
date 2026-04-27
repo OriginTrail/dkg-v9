@@ -70,6 +70,7 @@ const LabelP = NS.rdfs + 'label';
 const NameP = NS.schema + 'name';
 const TitleP = NS.dcterms + 'title';
 const CreatedP = NS.dcterms + 'created';
+const ModifiedP = NS.dcterms + 'modified';
 const AttrP = NS.prov + 'wasAttributedTo';
 
 const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -237,7 +238,13 @@ export function registerWriteTools(
       title: 'Add Task',
       description:
         'Author a `tasks:Task` and auto-promote to SWM. Use when the agent ' +
-        'wants to file follow-up work detected during a chat (e.g. "revisit ' +
+        'wants to label a piece of work in the project graph — both for follow-up ' +
+        'tracking AND, when status is `in_progress`, to declare the operational ' +
+        'scope the agent-scope write-time guard will allow (via `scopedToPath`). ' +
+        'The guard takes the union of `scopedToPath` globs across all `in_progress` ' +
+        'tasks attributed to this agent on this project as the live allow-list. ' +
+        'When the work is finished, flip status to `done` via `dkg_update_task_status`. ' +
+        'Use also when the agent wants to file follow-up work detected during a chat (e.g. "revisit ' +
         'SHACL on promote path"). Attribution via prov:wasAttributedTo.',
       inputSchema: {
         title: z.string().describe('Imperative, e.g. "Add SHACL validation on /promote endpoint".'),
@@ -248,10 +255,17 @@ export function registerWriteTools(
         dueDate: z.string().optional().describe('ISO date (YYYY-MM-DD).'),
         relatedDecision: z.array(z.string()).optional().describe('Decision slugs or full URIs.'),
         touches: z.array(z.string()).optional().describe('File or package URIs that the task edits.'),
+        scopedToPath: z.array(z.string()).optional().describe(
+          'Glob patterns (relative to repo root) this task is allowed to write while in_progress. ' +
+          'These are the operational allow-list the agent-scope write-time guard evaluates: ' +
+          'when status is "in_progress" and the task is attributed to the running agent, the union ' +
+          'of these globs forms that agent\'s scope on this CG. Bang-prefixed patterns ("!**/secrets.*") ' +
+          'are explicit denies. Example: ["packages/agent/**", "packages/core/src/sync/**", "!**/secrets.*"].'
+        ),
         projectId: z.string().optional(),
       },
     },
-    async ({ title, status, priority, assignee, estimate, dueDate, relatedDecision, touches, projectId }): Promise<ToolResult> => {
+    async ({ title, status, priority, assignee, estimate, dueDate, relatedDecision, touches, scopedToPath, projectId }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       if (!config.agentUri) return agentErr();
@@ -270,7 +284,14 @@ export function registerWriteTools(
       emit(triples, U(id), U(NameP), L(title));
       emit(triples, U(id), U(LabelP), L(title));
       emit(triples, U(id), U(TitleP), L(title));
-      emit(triples, U(id), U(NS.tasks + 'status'), L(st));
+      // NB: tasks:status does NOT live on the main task assertion. It lives
+      // in a dedicated `task-status-<slug>-<fp>` assertion that gets
+      // discardAssertion'd on every status flip (see below + `dkg_update_task_status`).
+      // The daemon's main /write endpoint is additive — if we put `tasks:status`
+      // here, a later "done" flip would coexist with the original "in_progress"
+      // and the agent-scope guard's SPARQL would see both. Splitting the status
+      // out into its own discardable assertion gives us replace semantics
+      // without losing the other fields.
       emit(triples, U(id), U(NS.tasks + 'priority'), L(pr));
       emit(triples, U(id), U(CreatedP), L(nowIso, XSD_DATETIME));
       if (typeof estimate === 'number') emit(triples, U(id), U(NS.tasks + 'estimate'), L(estimate, XSD_INT));
@@ -288,9 +309,25 @@ export function registerWriteTools(
         emit(triples, U(id), U(NS.tasks + 'relatedDecision'), U(decUri));
       }
       for (const t of touches ?? []) emit(triples, U(id), U(NS.tasks + 'touches'), U(t));
+      for (const p of scopedToPath ?? []) {
+        const trimmed = String(p).trim();
+        if (!trimmed) continue;
+        emit(triples, U(id), U(NS.tasks + 'scopedToPath'), L(trimmed));
+      }
       emit(triples, U(id), U(AttrP), U(config.agentUri));
 
       const assertion = `agent-task-${slug}-${rand(4)}`;
+      // Status lives in its own deterministic assertion so future status
+      // flips can `discardAssertion` it cleanly. Name is keyed off the
+      // task URI tail (the slug + fingerprint) so a same-URI re-create
+      // converges on the same status assertion.
+      const uriTail = id.replace(/^urn:dkg:task:/, '');
+      const statusAssertion = `task-status-${uriTail}`;
+      const statusTriples: Array<{ subject: string; predicate: string; object: string }> = [];
+      emit(statusTriples, U(id), U(NS.tasks + 'status'), L(st));
+      emit(statusTriples, U(id), U(ModifiedP), L(nowIso, XSD_DATETIME));
+      emit(statusTriples, U(id), U(AttrP), U(config.agentUri));
+
       try {
         await client.ensureSubGraph(pid, 'tasks');
         await client.writeAssertion({
@@ -298,6 +335,25 @@ export function registerWriteTools(
           assertionName: assertion,
           subGraphName: 'tasks',
           triples,
+        });
+        // Discard any prior status assertion first (defensive — handles the
+        // edge case where an agent re-runs `dkg_add_task` against an URI
+        // that converged with a previously-written task) and write the
+        // current status fresh.
+        try {
+          await client.discardAssertion({
+            contextGraphId: pid,
+            assertionName: statusAssertion,
+            subGraphName: 'tasks',
+          });
+        } catch {
+          /* nothing to discard on first write */
+        }
+        await client.writeAssertion({
+          contextGraphId: pid,
+          assertionName: statusAssertion,
+          subGraphName: 'tasks',
+          triples: statusTriples,
         });
         let shared = false;
         if (config.capture.autoShare) {
@@ -308,10 +364,16 @@ export function registerWriteTools(
               subGraphName: 'tasks',
               entities: [id],
             });
+            await client.promoteAssertion({
+              contextGraphId: pid,
+              assertionName: statusAssertion,
+              subGraphName: 'tasks',
+              entities: [id],
+            });
             shared = true;
           } catch (e) {
             return ok(
-              `Task written but promote failed: ${formatError(e)}\n\n- **URI**: \`${id}\`\n- **assertion**: \`${assertion}\`\n- **layer**: WM only`,
+              `Task written but promote failed: ${formatError(e)}\n\n- **URI**: \`${id}\`\n- **assertion**: \`${assertion}\`\n- **status assertion**: \`${statusAssertion}\`\n- **layer**: WM only`,
             );
           }
         }
@@ -319,11 +381,129 @@ export function registerWriteTools(
           `✔ Task ${shared ? '**shared** (WM → SWM)' : 'written to WM'}:\n\n` +
             `- **URI**: \`${id}\`\n` +
             `- **status**: ${st} · **priority**: ${pr}${assignee ? ` · **assignee**: ${assignee}` : ''}\n` +
+            (scopedToPath && scopedToPath.length
+              ? `- **scopedToPath**: ${scopedToPath.length} glob${scopedToPath.length === 1 ? '' : 's'}` +
+                (st === 'in_progress' ? ' (live in agent-scope allow-list)' : ' (will activate when status is `in_progress`)') +
+                '\n'
+              : '') +
             `- **attributed to**: \`${config.agentUri}\`\n` +
-            `- **assertion**: \`${assertion}\``,
+            `- **assertion**: \`${assertion}\` · **status assertion**: \`${statusAssertion}\``,
         );
       } catch (e) {
         return errResult(`Failed to add task: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_update_task_status ───────────────────────────────────
+  server.registerTool(
+    'dkg_update_task_status',
+    {
+      title: 'Update Task Status',
+      description:
+        'Flip an existing `tasks:Task`\'s status (e.g. todo → in_progress → done). ' +
+        'Marks the entity with a fresh `dcterms:modified` so the agent-scope ' +
+        'guard\'s "most-recent status wins" SPARQL picks up the change ' +
+        '(the daemon\'s assertion writes are additive, so the previous ' +
+        '`tasks:status` triple still lives in the graph — the timestamp ' +
+        'is what disambiguates). Use this to mark `in_progress` when you ' +
+        'start work (which makes the task\'s `scopedToPath` globs the ' +
+        'active allow-list) and `done` when you ship — that retracts the ' +
+        'scope and frees the agent for the next task.',
+      inputSchema: {
+        taskUri: z.string().describe('Full URI of the `tasks:Task` to update (e.g. `urn:dkg:task:refactor-peer-sync-1a2b`).'),
+        status: z.enum(['todo', 'in_progress', 'blocked', 'done', 'cancelled']),
+        note: z.string().optional().describe('Optional one-line rationale; surfaces as `rdfs:comment` on the update.'),
+        projectId: z.string().optional(),
+      },
+    },
+    async ({ taskUri, status, note, projectId }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      if (!config.agentUri) return agentErr();
+      const nowIso = new Date().toISOString();
+      // Status flips replace the dedicated `task-status-<uri-tail>` assertion
+      // (NOT the main task assertion) so the daemon's additive /write
+      // semantics don't end up with a `tasks:status "in_progress"` triple
+      // coexisting with a `tasks:status "done"` one. discardAssertion
+      // wipes the prior status graph; writeAssertion sets the fresh value.
+      // See the matching pattern in `dkg_add_task`.
+      const uriTail = taskUri.replace(/^urn:dkg:task:/, '').replace(/[^A-Za-z0-9._-]+/g, '-');
+      const statusAssertion = `task-status-${uriTail}`;
+      const triples: Array<{ subject: string; predicate: string; object: string }> = [];
+      emit(triples, U(taskUri), U(NS.tasks + 'status'), L(status));
+      emit(triples, U(taskUri), U(ModifiedP), L(nowIso, XSD_DATETIME));
+      emit(triples, U(taskUri), U(AttrP), U(config.agentUri));
+      if (note) emit(triples, U(taskUri), U(NS.rdfs + 'comment'), L(note));
+
+      // Optional rotating audit log of every flip — additive, never discarded —
+      // so retrospective queries can still reconstruct status history if needed.
+      const historyAssertion = `agent-task-status-log-${rand(6)}`;
+      const historyTriples: Array<{ subject: string; predicate: string; object: string }> = [];
+      const eventUri = `urn:dkg:task-status-event:${uriTail}-${Date.now()}`;
+      emit(historyTriples, U(eventUri), U(TypeP), U(NS.tasks + 'StatusEvent'));
+      emit(historyTriples, U(eventUri), U(NS.tasks + 'aboutTask'), U(taskUri));
+      emit(historyTriples, U(eventUri), U(NS.tasks + 'eventStatus'), L(status));
+      emit(historyTriples, U(eventUri), U(CreatedP), L(nowIso, XSD_DATETIME));
+      emit(historyTriples, U(eventUri), U(AttrP), U(config.agentUri));
+      if (note) emit(historyTriples, U(eventUri), U(NS.rdfs + 'comment'), L(note));
+
+      try {
+        await client.ensureSubGraph(pid, 'tasks');
+        try {
+          await client.discardAssertion({
+            contextGraphId: pid,
+            assertionName: statusAssertion,
+            subGraphName: 'tasks',
+          });
+        } catch {
+          /* discard on a non-existent assertion is a no-op upstream, but some
+             daemon builds throw — swallow either way; we're about to write fresh */
+        }
+        await client.writeAssertion({
+          contextGraphId: pid,
+          assertionName: statusAssertion,
+          subGraphName: 'tasks',
+          triples,
+        });
+        await client.writeAssertion({
+          contextGraphId: pid,
+          assertionName: historyAssertion,
+          subGraphName: 'tasks',
+          triples: historyTriples,
+        });
+        if (config.capture.autoShare) {
+          try {
+            await client.promoteAssertion({
+              contextGraphId: pid,
+              assertionName: statusAssertion,
+              subGraphName: 'tasks',
+              entities: [taskUri],
+            });
+            await client.promoteAssertion({
+              contextGraphId: pid,
+              assertionName: historyAssertion,
+              subGraphName: 'tasks',
+              entities: [eventUri],
+            });
+          } catch (e) {
+            return ok(
+              `Status written but promote failed: ${formatError(e)}\n\n- **task**: \`${taskUri}\`\n- **status**: ${status}\n- **status assertion**: \`${statusAssertion}\``,
+            );
+          }
+        }
+        return ok(
+          `✔ Task \`${taskUri}\` status set to **${status}**.\n\n` +
+            `- **modified at**: ${nowIso}\n` +
+            `- **attributed to**: \`${config.agentUri}\`\n` +
+            (status === 'in_progress'
+              ? '\nThis task\'s `scopedToPath` globs are now part of the agent-scope allow-list.'
+              : status === 'done' || status === 'cancelled'
+              ? '\nThis task no longer contributes to the agent-scope allow-list.'
+              : ''),
+        );
+      } catch (e) {
+        return errResult(`Failed to update task status: ${formatError(e)}`);
       }
     },
   );

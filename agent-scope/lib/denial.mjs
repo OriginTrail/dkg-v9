@@ -10,9 +10,16 @@
 //      action plus a free-text fallback. Never surface the full `options`
 //      list to the user; it exists for audit / back-compat / tests.
 //
+// Source-of-truth model: scope is now derived from the local DKG daemon
+// (in-progress `tasks:Task` entities attributed to this agent — see
+// `agent-scope/lib/dkg-source.mjs`). There are no local task manifests
+// anymore, so the only legitimate way to extend scope is for the agent
+// to file a NEW in-progress task via `dkg_add_task` covering the path
+// they need. The denial menus reflect that.
+//
 // Zero IO, zero deps. Pure functions; unit-testable.
 
-import { listTasks, loadTask, checkPath, PROTECTED_PATTERNS } from './scope.mjs';
+import { PROTECTED_PATTERNS } from './scope.mjs';
 
 export const DENIAL_FENCE_START = '<!-- agent-scope-menu:begin -->';
 export const DENIAL_FENCE_END   = '<!-- agent-scope-menu:end -->';
@@ -21,9 +28,6 @@ export const DENIAL_FENCE_END   = '<!-- agent-scope-menu:end -->';
 // Suggestion heuristics
 // ---------------------------------------------------------------------------
 
-// Propose a single representative glob for a denied path. Conservative: covers
-// the immediate parent directory's subtree. Callers can suggest tighter globs
-// interactively if the user prefers.
 export function suggestGlob(relPath) {
   if (typeof relPath !== 'string' || !relPath) return null;
   const clean = relPath.replace(/\/+$/, '');
@@ -33,8 +37,6 @@ export function suggestGlob(relPath) {
   return `${dir}/**`;
 }
 
-// Propose a tighter glob targeting the exact basename stem (same directory,
-// any extension). Useful when the agent is likely to touch sibling files.
 export function suggestTightGlob(relPath) {
   if (typeof relPath !== 'string' || !relPath) return null;
   const clean = relPath.replace(/\/+$/, '');
@@ -47,114 +49,84 @@ export function suggestTightGlob(relPath) {
   return dir ? `${dir}/${stem}*` : `${stem}*`;
 }
 
-// Find other task manifests whose scope already covers the denied path.
-// Skips the currently-active task. Protected paths have no alternatives.
-export function findAlternativeTasks(relPath, root, excludeTaskId = null) {
-  if (!relPath || !root) return [];
-  const out = [];
-  let ids = [];
-  try { ids = listTasks(root); } catch { return []; }
-  for (const id of ids) {
-    if (id === excludeTaskId) continue;
-    let t;
-    try { t = loadTask(root, id); } catch { continue; }
-    let d;
-    try { d = checkPath(t, relPath, root); } catch { continue; }
-    if (d === 'allow' || d === 'exempt') {
-      out.push({ id, description: t.description || '' });
-    }
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Option menus
 // ---------------------------------------------------------------------------
 
-// A free-text fallback. Included in every menu so the user can bypass the
-// presets entirely. When picked, the agent asks the user to describe what to
-// do next as a regular chat message.
 const CUSTOM_OPTION = {
   id: 'custom_instruction',
   label: 'Let me type my own instruction',
   action: { kind: 'custom' },
 };
 
-// Shorter version used in the two-option `simpleOptions` surface — this is
-// the label the user sees in the plan-mode AskQuestion, so it should read
-// like a chat button, not a legal clause.
 const CUSTOM_OPTION_SIMPLE = {
   id: 'custom_instruction',
   label: 'Type what you want instead',
   action: { kind: 'custom' },
 };
 
-// Short, natural-language label for the recommended action. The full
-// `options` array keeps its verbose labels (back-compat + audit), but the
-// plan-mode AskQuestion uses these casual ones so the prompt reads like a
-// human wrote it. Falls back to the verbose label if the id is unknown.
-function simpleLabelFor(optionId, { deniedPath, activeTaskId, altTaskId } = {}) {
-  if (optionId === 'add_file')   return 'Add this file to the task and try again';
-  if (optionId === 'add_glob')   return 'Add this folder to the task and try again';
-  if (optionId === 'bootstrap')  return 'Yes, unlock it so I can do this edit';
-  if (optionId === 'cancel')     return 'Skip it';
-  if (optionId === 'skip')       return 'Skip and keep working on other things';
-  if (optionId === 'fix_manifest') return 'Open the task file so I can fix it';
-  if (optionId === 'clear_task') return 'Clear the active task for now';
-  if (optionId === 'acknowledge') return 'OK, keep going';
-  if (optionId && optionId.startsWith('switch_task_') && altTaskId) {
-    return `Switch to task "${altTaskId}" and try again`;
-  }
+function simpleLabelFor(optionId) {
+  if (optionId === 'new_task_glob')    return 'File a new in-progress task covering this folder and continue';
+  if (optionId === 'new_task_file')    return 'File a new in-progress task covering this file and continue';
+  if (optionId === 'bootstrap')        return 'Yes, unlock it so I can do this edit';
+  if (optionId === 'cancel')           return 'Skip it';
+  if (optionId === 'skip')             return 'Skip and keep working on other things';
+  if (optionId === 'restart_daemon')   return 'Tell me how to restart the DKG daemon';
+  if (optionId === 'configure_dkg')    return 'Tell me how to set up the DKG project / agent';
+  if (optionId === 'acknowledge')      return 'OK, keep going';
   return null;
 }
 
-// Build the two-option `simpleOptions` array for plan-mode AskQuestion.
-// It always contains exactly two entries: the recommended option (with a
-// short human label) and a free-text fallback.
 function buildSimpleOptions(fullOptions, recommendedId) {
-  const rec = fullOptions.find(o => o.id === recommendedId) || fullOptions[0];
+  const rec = fullOptions.find((o) => o.id === recommendedId) || fullOptions[0];
   if (!rec) return [CUSTOM_OPTION_SIMPLE];
-  const altTaskId = rec.id.startsWith('switch_task_') ? rec.id.slice('switch_task_'.length) : null;
-  const label = simpleLabelFor(rec.id, { altTaskId }) || rec.label;
+  const label = simpleLabelFor(rec.id) || rec.label;
   return [
     { id: rec.id, label, action: rec.action },
     CUSTOM_OPTION_SIMPLE,
   ];
 }
 
-// Menu for out-of-scope write denials (path is in the repo but not in scope).
-export function buildOutOfScopeOptions({ deniedPath, activeTaskId, alternatives }) {
+export function buildOutOfScopeOptions({ deniedPath, activeTaskUris }) {
+  const folderGlob = suggestGlob(deniedPath);
+  const uris = Array.isArray(activeTaskUris) ? activeTaskUris : [];
+  const taskList = uris.length ? uris.join(', ') : 'none';
   const opts = [
     {
-      id: 'add_file',
-      label: `Add "${deniedPath}" to ${activeTaskId}'s manifest`,
-      action: { kind: 'add_to_manifest', task: activeTaskId, patterns: [deniedPath] },
+      id: 'new_task_glob',
+      label: `File a new in-progress task covering "${folderGlob}"`,
+      action: {
+        kind: 'new_in_progress_task',
+        suggestedScopedToPath: [folderGlob],
+        suggestedTitle: `Extend scope to ${folderGlob}`,
+        rationale: `Existing in-progress task${uris.length === 1 ? '' : 's'} (${taskList}) doesn't cover ${deniedPath}.`,
+      },
     },
     {
-      id: 'add_glob',
-      label: `Add "${suggestGlob(deniedPath)}" to ${activeTaskId}'s manifest`,
-      action: { kind: 'add_to_manifest', task: activeTaskId, patterns: [suggestGlob(deniedPath)] },
+      id: 'new_task_file',
+      label: `File a new in-progress task covering exactly "${deniedPath}"`,
+      action: {
+        kind: 'new_in_progress_task',
+        suggestedScopedToPath: [deniedPath],
+        suggestedTitle: `Extend scope to ${deniedPath}`,
+        rationale: `Existing in-progress task${uris.length === 1 ? '' : 's'} (${taskList}) doesn't cover ${deniedPath}.`,
+      },
     },
-  ];
-  if (Array.isArray(alternatives) && alternatives.length) {
-    for (const alt of alternatives.slice(0, 3)) {
-      opts.push({
-        id: `switch_task_${alt.id}`,
-        label: `Switch active task to "${alt.id}"` + (alt.description ? ` — ${alt.description}` : ''),
-        action: { kind: 'switch_task', task: alt.id },
-      });
-    }
-  }
-  opts.push(
-    { id: 'skip',   label: 'Skip this edit, keep working on in-scope files', action: { kind: 'skip' } },
-    { id: 'cancel', label: 'Cancel this turn — the edit should not happen',  action: { kind: 'cancel' } },
+    {
+      id: 'skip',
+      label: 'Skip this edit, keep working on in-scope files',
+      action: { kind: 'skip' },
+    },
+    {
+      id: 'cancel',
+      label: 'Cancel this turn — the edit should not happen',
+      action: { kind: 'cancel' },
+    },
     CUSTOM_OPTION,
-  );
+  ];
   return opts;
 }
 
-// Classify a protected path so the denial prose can explain WHY that specific
-// file is guarded, not just that it is. Keeps the menu copy concrete.
 export function classifyProtected(relPath) {
   if (!relPath || typeof relPath !== 'string') return { kind: 'unknown', role: 'protected file' };
   if (relPath.startsWith('.cursor/hooks/') || relPath === '.cursor/hooks.json') {
@@ -163,28 +135,21 @@ export function classifyProtected(relPath) {
   if (relPath === '.cursor/rules/agent-scope.mdc') {
     return { kind: 'cursor-rule', role: 'the rule that tells the agent to surface denial menus via AskQuestion' };
   }
+  if (relPath.startsWith('.claude/hooks/') || relPath === '.claude/settings.json') {
+    return { kind: 'claude-hook', role: 'a Claude Code hook that enforces agent-scope in every session' };
+  }
   if (relPath.startsWith('agent-scope/lib/')) {
     return { kind: 'scope-library', role: 'the shared enforcement library used by every hook' };
-  }
-  if (relPath.startsWith('agent-scope/bin/')) {
-    return { kind: 'scope-cli', role: 'the `pnpm task` CLI — if modified, the whole task workflow can be subverted' };
-  }
-  if (relPath.startsWith('agent-scope/schema/')) {
-    return { kind: 'scope-schema', role: 'the JSON schema that validates every task manifest' };
-  }
-  if (relPath.startsWith('agent-scope/tasks/')) {
-    return { kind: 'task-manifest', role: 'a task manifest — editing it would silently expand or shrink what agents can write' };
-  }
-  if (relPath === 'agent-scope/active') {
-    return { kind: 'active-pointer', role: 'the active-task pointer — editing it would let the agent pick its own scope' };
   }
   if (relPath === 'agent-scope/.bootstrap-token') {
     return { kind: 'bootstrap-token', role: 'the bootstrap token itself — writing it would self-grant full access' };
   }
+  if (relPath === 'AGENTS.md' || relPath === 'GEMINI.md' || relPath === '.cursorrules') {
+    return { kind: 'agent-instructions', role: 'the agent-instruction file the AI reads to learn how to behave in this repo' };
+  }
   return { kind: 'unknown', role: 'a file on the hardcoded protected list' };
 }
 
-// Menu for protected-path denials — only the human can unlock.
 export function buildProtectedOptions({ deniedPath }) {
   return [
     {
@@ -209,44 +174,59 @@ export function buildProtectedOptions({ deniedPath }) {
   ];
 }
 
-// Menu for manifest load errors — the task file is broken.
-export function buildLoadErrorOptions({ taskId, error }) {
+export function buildResolutionErrorOptions({ reason }) {
+  if (reason === 'daemon-unreachable') {
+    return [
+      {
+        id: 'restart_daemon',
+        label: 'Tell me how to restart the local DKG daemon',
+        action: {
+          kind: 'restart_daemon',
+          instruction: 'In your own terminal run:\n    dkg start\n(or `pnpm -F @origintrail-official/dkg-cli start`).\nThen reply "go" and I\'ll re-check.',
+        },
+      },
+      {
+        id: 'skip',
+        label: 'Keep going in soft mode (only protected paths blocked)',
+        action: { kind: 'skip' },
+      },
+      { id: 'cancel', label: 'Cancel this turn', action: { kind: 'cancel' } },
+      CUSTOM_OPTION,
+    ];
+  }
   return [
     {
-      id: 'fix_manifest',
-      label: `Open and fix agent-scope/tasks/${taskId}.json`,
-      action: { kind: 'fix_manifest', task: taskId, error },
+      id: 'configure_dkg',
+      label: 'Tell me how to wire up the DKG project + agent for this workspace',
+      action: {
+        kind: 'configure_dkg',
+        instruction: 'Edit `.dkg/config.yaml` so it has both `contextGraph: <your project id>` and `agent.uri: <your agent URI>` populated, then reply "go". (Alternatively, export `DKG_PROJECT` and `DKG_AGENT_URI` for one-off runs.)',
+      },
     },
     {
-      id: 'clear_task',
-      label: 'Clear the active task for now (pnpm task clear)',
-      action: { kind: 'clear_task' },
+      id: 'skip',
+      label: 'Keep going in soft mode (only protected paths blocked)',
+      action: { kind: 'skip' },
     },
     { id: 'cancel', label: 'Cancel this turn', action: { kind: 'cancel' } },
     CUSTOM_OPTION,
   ];
 }
 
-// Pick a sensible default for the highlighted option. Agents are instructed
-// to respect this when surfacing the menu via AskQuestion, but it's only a
-// recommendation — the user is always free to choose anything.
 function recommendFor(reason, options) {
-  const ids = new Set(options.map(o => o.id));
+  const ids = new Set(options.map((o) => o.id));
   if (reason === 'out-of-scope') {
-    if (ids.has('add_glob')) return 'add_glob';
-    if (ids.has('add_file')) return 'add_file';
+    if (ids.has('new_task_glob')) return 'new_task_glob';
+    if (ids.has('new_task_file')) return 'new_task_file';
   }
-  if (reason === 'protected') {
-    return 'cancel'; // safest default; user opts into bootstrap deliberately
-  }
-  if (reason === 'manifest-load-error') {
-    if (ids.has('fix_manifest')) return 'fix_manifest';
-  }
+  if (reason === 'protected') return 'cancel';
+  if (reason === 'daemon-unreachable') return 'restart_daemon';
+  if (reason === 'configuration-error') return 'configure_dkg';
   return options[0]?.id || null;
 }
 
 // ---------------------------------------------------------------------------
-// Full denial message builders (prose + structured block)
+// Full denial message builders
 // ---------------------------------------------------------------------------
 
 function wrapStructured(payload) {
@@ -257,10 +237,6 @@ function wrapStructured(payload) {
   ].join('\n');
 }
 
-// Emit a short human-readable summary and append the machine-readable JSON
-// block. Agents are instructed to quote `humanSummary` verbatim in their
-// AskQuestion prompt and offer only the two `simpleOptions` — never the
-// full `options` list.
 function render(summary, structured) {
   return [
     `agent-scope: ${summary}`,
@@ -269,7 +245,6 @@ function render(summary, structured) {
   ].join('\n');
 }
 
-// Build a preToolUse denial message.
 export function buildPreToolUseDenial({
   tool, deniedPath, decision, task, taskId, root,
 }) {
@@ -290,6 +265,7 @@ export function buildPreToolUseDenial({
       protectedKind: classification.kind,
       protectedRole: classification.role,
       activeTask: taskId || null,
+      activeTaskUris: (task && task.dkgTaskUris) || [],
       protectedPatterns: [...PROTECTED_PATTERNS],
       humanSummary,
       options,
@@ -300,16 +276,19 @@ export function buildPreToolUseDenial({
     return { message: render(humanSummary, structured), structured };
   }
 
-  // out-of-scope (deny)
-  const alternatives = findAlternativeTasks(deniedPath, root, taskId);
-  const options = buildOutOfScopeOptions({ deniedPath, activeTaskId: taskId, alternatives });
+  const activeTaskUris = (task && task.dkgTaskUris) || [];
+  const options = buildOutOfScopeOptions({ deniedPath, activeTaskUris });
   const recommendedOptionId = recommendFor('out-of-scope', options);
-  const positives  = ((task && task.allowed)    || []).filter(p => !p.startsWith('!'));
-  const exemptions = ((task && task.exemptions) || []).filter(p => !p.startsWith('!'));
+  const positives  = ((task && task.allowed)    || []).filter((p) => !p.startsWith('!'));
+  const exemptions = ((task && task.exemptions) || []).filter((p) => !p.startsWith('!'));
+  const taskListLabel = activeTaskUris.length === 1
+    ? `\`${activeTaskUris[0]}\``
+    : activeTaskUris.length
+    ? `${activeTaskUris.length} in-progress tasks`
+    : 'no in-progress task';
   const humanSummary =
-    `I'd like to edit \`${deniedPath}\`, but the active task ` +
-    `${taskId ? `\`${taskId}\`` : '(none)'}` +
-    `${task && task.description ? ` — ${task.description}` : ''}` +
+    `I'd like to edit \`${deniedPath}\`, but ${taskListLabel}` +
+    `${task && task.description ? ` (${task.description})` : ''}` +
     ` doesn't cover that file.`;
   const structured = {
     version: 1,
@@ -318,12 +297,12 @@ export function buildPreToolUseDenial({
     tool,
     deniedPath,
     activeTask: taskId || null,
+    activeTaskUris,
     activeTaskDescription: (task && task.description) || null,
     allowed: positives,
     exemptions,
     suggestedGlob: suggestGlob(deniedPath),
     suggestedTightGlob: suggestTightGlob(deniedPath),
-    alternativeTasks: alternatives,
     humanSummary,
     options,
     simpleOptions: buildSimpleOptions(options, recommendedOptionId),
@@ -333,19 +312,17 @@ export function buildPreToolUseDenial({
   return { message: render(humanSummary, structured), structured };
 }
 
-// Build a manifest-load-error denial message.
-export function buildLoadErrorDenial({ taskId, error }) {
-  const options = buildLoadErrorOptions({ taskId, error });
-  const recommendedOptionId = recommendFor('manifest-load-error', options);
-  const humanSummary =
-    `The active task manifest \`${taskId}\` won't load — ${error}. ` +
-    `I can't apply any scope check until it's fixed or cleared.`;
+export function buildResolutionErrorDenial({ reason, diagnostic }) {
+  const options = buildResolutionErrorOptions({ reason });
+  const recommendedOptionId = recommendFor(reason, options);
+  const humanSummary = reason === 'daemon-unreachable'
+    ? `I can't reach the local DKG daemon, so I can't check whether this edit is in scope. ${diagnostic || ''}`.trim()
+    : `The DKG project / agent isn't fully configured for this workspace, so I can't resolve scope. ${diagnostic || ''}`.trim();
   const structured = {
     version: 1,
     hook: 'preToolUse',
-    reason: 'manifest-load-error',
-    activeTask: taskId,
-    error,
+    reason,
+    diagnostic: diagnostic || null,
     humanSummary,
     options,
     simpleOptions: buildSimpleOptions(options, recommendedOptionId),
@@ -355,18 +332,23 @@ export function buildLoadErrorDenial({ taskId, error }) {
   return { message: render(humanSummary, structured), structured };
 }
 
-// Build a beforeShellExecution denial message from a set of violations.
-// A violation is { sub, cmd, path, decision }.
+// Back-compat alias retained so older hook bindings keep loading. Maps to
+// the new resolution-error builder; pre-existing callers that pass
+// `{ taskId, error }` get a sensible default.
+export function buildLoadErrorDenial({ taskId, error } = {}) {
+  return buildResolutionErrorDenial({
+    reason: 'configuration-error',
+    diagnostic: `Couldn't load active scope${taskId ? ` for task ${taskId}` : ''}: ${error || 'unknown error'}.`,
+  });
+}
+
 export function buildShellPrecheckDenial({
   command, violations, task, taskId, root,
 }) {
-  const anyProtected = violations.some(v => String(v.decision).startsWith('protected'));
-  // Use the first out-of-scope path (if any) to seed the menu; if everything
-  // is protected, show the protected menu. If mixed, protected wins because
-  // the user needs bootstrap before we can address scope fixes.
+  const anyProtected = violations.some((v) => String(v.decision).startsWith('protected'));
   let reason, options, suggestedFix;
-  const firstScopePath = violations.find(v => v.decision === 'deny')?.path || null;
-  const firstProtPath  = violations.find(v => String(v.decision).startsWith('protected'))?.path || null;
+  const firstScopePath = violations.find((v) => v.decision === 'deny')?.path || null;
+  const firstProtPath  = violations.find((v) => String(v.decision).startsWith('protected'))?.path || null;
 
   if (anyProtected) {
     reason = 'protected';
@@ -374,11 +356,11 @@ export function buildShellPrecheckDenial({
     suggestedFix = 'enable bootstrap — see options';
   } else if (firstScopePath) {
     reason = 'out-of-scope';
-    const alternatives = findAlternativeTasks(firstScopePath, root, taskId);
     options = buildOutOfScopeOptions({
-      deniedPath: firstScopePath, activeTaskId: taskId, alternatives,
+      deniedPath: firstScopePath,
+      activeTaskUris: (task && task.dkgTaskUris) || [],
     });
-    suggestedFix = `add "${suggestGlob(firstScopePath)}" to ${taskId}'s manifest`;
+    suggestedFix = `file a new in-progress task covering "${suggestGlob(firstScopePath)}"`;
   } else {
     reason = 'unknown';
     options = [
@@ -392,13 +374,18 @@ export function buildShellPrecheckDenial({
   const recommendedOptionId = recommendFor(reason, options);
   const firstPath = firstProtPath || firstScopePath || '(target)';
   const firstCmd = violations[0]?.cmd || 'command';
+  const taskListLabel = (task?.dkgTaskUris?.length || 0) === 1
+    ? `\`${task.dkgTaskUris[0]}\``
+    : (task?.dkgTaskUris?.length || 0) > 1
+    ? `${task.dkgTaskUris.length} in-progress tasks`
+    : 'no in-progress task';
   const humanSummary =
     reason === 'protected'
       ? `The shell command I was about to run (\`${firstCmd}\` on \`${firstPath}\`) ` +
         `would touch a protected system file. Blocked before it ran.`
       : reason === 'out-of-scope'
       ? `The shell command I was about to run (\`${firstCmd}\` on \`${firstPath}\`) ` +
-        `would write outside the active task \`${taskId || '(none)'}\`. Blocked before it ran.`
+        `would write outside ${taskListLabel}. Blocked before it ran.`
       : `That shell command was blocked before it ran.`;
 
   const structured = {
@@ -407,7 +394,8 @@ export function buildShellPrecheckDenial({
     reason,
     command,
     activeTask: taskId || null,
-    violations: violations.map(v => ({
+    activeTaskUris: (task && task.dkgTaskUris) || [],
+    violations: violations.map((v) => ({
       cmd: v.cmd, path: v.path, decision: v.decision,
     })),
     suggestedFix,
@@ -421,9 +409,6 @@ export function buildShellPrecheckDenial({
   return { message: render(humanSummary, structured), structured };
 }
 
-// Build an afterShellExecution context message. Unlike the other two this
-// isn't a deny — the shell already ran. Files were reverted/deleted. Still
-// emit a plan-mode menu so the agent surfaces the "what now?" question.
 export function buildAfterShellContext({
   command, task, taskId, root,
   reverted, deleted, unreverted,
@@ -433,7 +418,7 @@ export function buildAfterShellContext({
   unreverted = Array.isArray(unreverted) ? unreverted : [];
 
   const touched = [...reverted, ...deleted];
-  const firstProtected = touched.find(p => {
+  const firstProtected = touched.find((p) => {
     for (const pat of PROTECTED_PATTERNS) {
       const re = new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*') + '$');
       if (re.test(p)) return true;
@@ -445,11 +430,11 @@ export function buildAfterShellContext({
   if (firstProtected) {
     reason = 'protected';
     options = buildProtectedOptions({ deniedPath: firstProtected });
-  } else if (touched.length && taskId) {
+  } else if (touched.length) {
     reason = 'out-of-scope';
-    const alternatives = findAlternativeTasks(touched[0], root, taskId);
     options = buildOutOfScopeOptions({
-      deniedPath: touched[0], activeTaskId: taskId, alternatives,
+      deniedPath: touched[0],
+      activeTaskUris: (task && task.dkgTaskUris) || [],
     });
   } else {
     reason = 'unknown';
@@ -462,6 +447,11 @@ export function buildAfterShellContext({
 
   const recommendedOptionId = recommendFor(reason, options);
   const touchedCount = reverted.length + deleted.length;
+  const taskListLabel = (task?.dkgTaskUris?.length || 0) === 1
+    ? `\`${task.dkgTaskUris[0]}\``
+    : (task?.dkgTaskUris?.length || 0) > 1
+    ? `${task.dkgTaskUris.length} in-progress tasks`
+    : 'no in-progress task';
   const humanSummary = (() => {
     if (touchedCount === 0) {
       return `A shell command ran and finished cleanly — nothing needed to be reverted.`;
@@ -474,7 +464,7 @@ export function buildAfterShellContext({
       return `A shell command touched a protected system file, so I ${fix} to put things back.`;
     }
     if (reason === 'out-of-scope') {
-      return `A shell command touched files outside the active task \`${taskId}\`, so I ${fix} to put things back.`;
+      return `A shell command touched files outside ${taskListLabel}, so I ${fix} to put things back.`;
     }
     return `A shell command touched files it shouldn't have, so I ${fix}.`;
   })();
@@ -485,9 +475,10 @@ export function buildAfterShellContext({
     reason,
     command,
     activeTask: taskId || null,
+    activeTaskUris: (task && task.dkgTaskUris) || [],
     reverted,
     deleted,
-    unreverted: unreverted.map(u => ({ path: u.path, status: u.status, reason: u.reason })),
+    unreverted: unreverted.map((u) => ({ path: u.path, status: u.status, reason: u.reason })),
     humanSummary,
     options,
     simpleOptions: buildSimpleOptions(options, recommendedOptionId),
@@ -495,8 +486,6 @@ export function buildAfterShellContext({
     agentReasoning: null,
   };
 
-  // Prose stays minimal: the humanSummary + paths the agent may want to
-  // reference. No banners, no STOP, no agent-directed meta copy.
   const lines = [humanSummary];
   if (reverted.length) {
     lines.push('', 'Reverted:');

@@ -275,6 +275,7 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
         examines: z.array(z.string()).optional().describe('chat:examines URIs — entities the turn analysed in detail (vs just citing).'),
         concludes: z.array(z.string()).optional().describe('chat:concludes URIs — Findings the turn produced. Bare strings minted as urn:dkg:finding:<slug>.'),
         asks: z.array(z.string()).optional().describe('chat:asks URIs — Questions the turn left open. Bare strings minted as urn:dkg:question:<slug>.'),
+        worksOn: z.string().optional().describe('chat:worksOn URI — the tasks:Task this turn is working on. Emit on every substantive turn while a task is in_progress so retrospective queries like "what did agent X discuss while working on task Y" resolve to a single SPARQL. Pure observability — does NOT change the agent-scope guard\'s scope (that derives from tasks:scopedToPath on the task itself). Pass the full task URI (e.g. `urn:dkg:task:refactor-...`); bare strings are wrapped as urn:dkg:task:<slug>.'),
         proposedDecisions: z.array(z.object({
           title: z.string(),
           context: z.string(),
@@ -358,6 +359,11 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
         const eUri = toUri(e, 'concept');
         if (!eUri) { skippedEmptyLabels.push(e); continue; }
         emit(triples, U(turnUri), U(NS.chat + 'examines'), U(eUri));
+      }
+      if (args.worksOn) {
+        const wUri = toUri(args.worksOn, 'task');
+        if (wUri) emit(triples, U(turnUri), U(NS.chat + 'worksOn'), U(wUri));
+        else skippedEmptyLabels.push(args.worksOn);
       }
 
       // Findings — referenced via chat:concludes; minted as :Finding entities
@@ -474,7 +480,7 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
 
       if (triples.length === 0) {
         return errResult(
-          'Empty annotation. Pass at least one of: topics, mentions, examines, concludes, asks, proposedDecisions, proposedTasks, comments, vmPublishRequests.',
+          'Empty annotation. Pass at least one of: topics, mentions, examines, concludes, asks, worksOn, proposedDecisions, proposedTasks, comments, vmPublishRequests.',
         );
       }
 
@@ -574,6 +580,7 @@ function buildSummary(
     examines: args.examines?.length ?? 0,
     concludes: args.concludes?.length ?? 0,
     asks: args.asks?.length ?? 0,
+    worksOn: args.worksOn ? 1 : 0,
     proposedDecisions: args.proposedDecisions?.length ?? 0,
     proposedTasks: args.proposedTasks?.length ?? 0,
     comments: args.comments?.length ?? 0,

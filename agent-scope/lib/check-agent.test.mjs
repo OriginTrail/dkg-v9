@@ -10,7 +10,7 @@ import { detectAgents, summary, statusGlyph } from './check-agent.mjs';
 
 function makeRepo() {
   const root = mkdtempSync(join(tmpdir(), 'agent-scope-checkagent-'));
-  mkdirSync(join(root, 'agent-scope/tasks'), { recursive: true });
+  mkdirSync(join(root, 'agent-scope/lib'), { recursive: true });
   return root;
 }
 
@@ -34,15 +34,23 @@ test('detectAgents: empty repo → all missing', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+const CURSOR_HOOKS = [
+  'session-start.mjs', 'scope-guard.mjs',
+  'shell-precheck.mjs', 'shell-diff-check.mjs',
+];
+const CLAUDE_HOOKS = [
+  'session-start.mjs', 'scope-guard.mjs',
+  'shell-precheck.mjs', 'shell-diff-check.mjs',
+  'user-prompt-submit.mjs',
+];
+
 test('detectAgents: full Cursor wiring → ok', () => {
   const root = makeRepo();
   try {
     mkdirSync(join(root, '.cursor/rules'), { recursive: true });
     writeFileSync(join(root, '.cursor/hooks.json'), '{}');
     writeFileSync(join(root, '.cursor/rules/agent-scope.mdc'), '');
-    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs', 'stop.mjs']) {
-      touchHook(root, '.cursor', f);
-    }
+    for (const f of CURSOR_HOOKS) touchHook(root, '.cursor', f);
     const cursor = detectAgents(root).find(a => a.name === 'Cursor');
     assert.equal(cursor.status, 'ok', JSON.stringify(cursor, null, 2));
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -54,9 +62,7 @@ test('detectAgents: Cursor hook not executable → warn', () => {
     mkdirSync(join(root, '.cursor/rules'), { recursive: true });
     writeFileSync(join(root, '.cursor/hooks.json'), '{}');
     writeFileSync(join(root, '.cursor/rules/agent-scope.mdc'), '');
-    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs', 'stop.mjs']) {
-      touchHook(root, '.cursor', f);
-    }
+    for (const f of CURSOR_HOOKS) touchHook(root, '.cursor', f);
     chmodSync(join(root, '.cursor/hooks/scope-guard.mjs'), 0o644);
     const cursor = detectAgents(root).find(a => a.name === 'Cursor');
     assert.equal(cursor.status, 'warn');
@@ -70,9 +76,7 @@ test('detectAgents: full Claude Code wiring → ok', () => {
     mkdirSync(join(root, '.claude'), { recursive: true });
     writeFileSync(join(root, '.claude/settings.json'), '{}');
     writeFileSync(join(root, 'CLAUDE.md'), '');
-    for (const f of ['session-start.mjs', 'scope-guard.mjs', 'shell-precheck.mjs', 'shell-diff-check.mjs', 'post-tool-use.mjs', 'user-prompt-submit.mjs']) {
-      touchHook(root, '.claude', f);
-    }
+    for (const f of CLAUDE_HOOKS) touchHook(root, '.claude', f);
     const cc = detectAgents(root).find(a => a.name === 'Claude Code');
     assert.equal(cc.status, 'ok', JSON.stringify(cc, null, 2));
   } finally { rmSync(root, { recursive: true, force: true }); }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "Two purposes: (1) agent-scope hooks enforce task-scoped writes (sessionStart/preToolUse/postToolUse/beforeShellExecution/afterShellExecution/stop). (2) DKG chat-capture hooks (sessionStart/sessionEnd/beforeSubmitPrompt/afterAgentResponse via packages/mcp-dkg/hooks/capture-chat.mjs) auto-promote each conversation turn to the chat sub-graph of the project pinned in .dkg/config.yaml. See agent-scope/README.md and packages/mcp-dkg/README.md.",
+  "_comment": "Two purposes: (1) agent-scope hooks enforce DKG-derived scope on writes (sessionStart/preToolUse/beforeShellExecution/afterShellExecution). The active scope is the union of `tasks:scopedToPath` across in-progress `tasks:Task` entities attributed to this agent — see agent-scope/README.md. (2) DKG chat-capture hooks (sessionStart/sessionEnd/beforeSubmitPrompt/afterAgentResponse via packages/mcp-dkg/hooks/capture-chat.mjs) auto-promote each conversation turn to the chat sub-graph of the project pinned in .dkg/config.yaml.",
   "hooks": {
     "sessionStart": [
       {
@@ -39,13 +39,6 @@
         "timeout": 5
       }
     ],
-    "postToolUse": [
-      {
-        "command": ".cursor/hooks/post-tool-use.mjs",
-        "failClosed": false,
-        "timeout": 5
-      }
-    ],
     "beforeShellExecution": [
       {
         "command": ".cursor/hooks/shell-precheck.mjs",
@@ -58,14 +51,6 @@
         "command": ".cursor/hooks/shell-diff-check.mjs",
         "failClosed": false,
         "timeout": 10
-      }
-    ],
-    "stop": [
-      {
-        "command": ".cursor/hooks/stop.mjs",
-        "failClosed": false,
-        "timeout": 5,
-        "loop_limit": 1
       }
     ]
   }

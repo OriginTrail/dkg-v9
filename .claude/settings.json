@@ -34,11 +34,6 @@
         "hooks": [
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/shell-diff-check.mjs", "timeout": 10 }
         ]
-      },
-      {
-        "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use.mjs", "timeout": 5 }
-        ]
       }
     ]
   }

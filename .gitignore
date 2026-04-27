@@ -30,9 +30,6 @@ snapshots/_cache_phase1_neuroweb_epoch16.json
 !.claude/hooks/
 .claude/settings.local.json
 
-# agent-scope: never commit the bootstrap override, local audit logs, the
-# per-developer active-task pointer, or the one-shot onboarding marker
+# agent-scope: never commit the bootstrap override or local audit logs
 agent-scope/.bootstrap-token
-agent-scope/.pending-onboarding
 agent-scope/logs/
-agent-scope/active

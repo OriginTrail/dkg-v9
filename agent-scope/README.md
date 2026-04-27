@@ -2,36 +2,49 @@
 
 Keeps AI coding agents from editing files they shouldn't.
 
-The agent can read the whole repo, but can only **write** the files your
-current task covers. If it tries to touch something else, you get a short
-question first — accept or tell it what to do instead. You're never
-restricted. This only watches the agent.
+The agent can read the whole repo, but can only **write** the files
+covered by an `in_progress` `tasks:Task` in the local DKG, attributed to
+the agent. If it tries to touch something else, you get a short question
+first — accept or tell it what to do instead. You're never restricted.
+This only watches the agent.
 
-## Start a task
+## Mental model
 
-```bash
-pnpm task start
+agent-scope is a thin write-time guard. The "active scope" is the
+**union of `tasks:scopedToPath` globs** across every `tasks:Task` that
+is `in_progress` AND attributed (`prov:wasAttributedTo`) to the current
+agent. There is no separate manifest file, no per-task JSON, no "active
+task" pointer — the local DKG daemon is the source of truth and the
+guard reads it live (with a 5-second cache).
+
+That means starting / extending / finishing a piece of work is exactly
+the same call you'd make to log it in your project's task graph anyway:
+
+```ts
+dkg_add_task({
+  taskUri: 'urn:dkg:task:peer-sync-auth',
+  title: 'Peer sync uses workspace auth',
+  status: 'in_progress',
+  assignee: '<agent uri>',
+  scopedToPath: ['packages/agent/**', 'packages/core/**'],
+})
+
+// later …
+dkg_update_task_status({ taskUri: '…', status: 'done' })
 ```
 
-Type what you're working on, hit Enter. Then send any message in the chat
-(`start working`, `hi`, whatever). The agent reads your description, looks
-around the repo, and proposes which folders to include. Accept it and the
-agent starts working inside that scope.
-
-When you're done:
-
-```bash
-pnpm task clear
-```
+There's nothing to install, no CLI to learn — the guard just observes
+the graph.
 
 ## When the agent wants to go out of scope
 
 You'll see something like this in the chat:
 
-> I'd like to edit `packages/foo/bar.ts`, but the active task doesn't cover
-> it. Add that folder and keep going?
+> I'd like to edit `packages/foo/bar.ts`, but no in-progress task covers
+> that file. Want me to file a new in-progress task covering
+> `packages/foo/**` and continue?
 >
-> A) Yes, add it and continue
+> A) Yes, file it and continue
 > B) Type what you want instead
 
 Pick A, or just type what you'd rather have. Nothing out of scope gets
@@ -42,25 +55,13 @@ written without your OK.
 - **Cursor** and **Claude Code** — hard-blocked at the hook level, the
   agent physically can't write out-of-scope files.
 - **Codex CLI** and **Gemini CLI** — no hook API yet, so they read
-  `AGENTS.md` / `GEMINI.md` on session start and are expected to follow the
-  rules. Best-effort.
+  `AGENTS.md` / `GEMINI.md` on session start and are expected to follow
+  the rules. Best-effort.
 
 After you clone the repo, run this once to check your agent is wired up:
 
 ```bash
 pnpm scope:check-agent
-```
-
-## Commands
-
-```bash
-pnpm task start         # AI-guided onboarding (normal flow)
-pnpm task show          # what's active and what it covers
-pnpm task list          # all tasks, * marks active
-pnpm task set <id>      # switch to an existing task
-pnpm task check <path>  # will this file be allowed?
-pnpm task audit         # recent denials
-pnpm task clear         # turn protection off
 ```
 
 ## Editing agent-scope itself
@@ -72,3 +73,30 @@ otherwise it could disable itself. To edit them, drop a token:
 touch agent-scope/.bootstrap-token   # unlock
 rm agent-scope/.bootstrap-token      # lock again
 ```
+
+## Architecture (one-pager)
+
+| Layer | Cursor | Claude Code | Soft agents |
+|---|---|---|---|
+| Inject scope context at session start | `.cursor/hooks/session-start.mjs` | `.claude/hooks/session-start.mjs` | reads `AGENTS.md` / `GEMINI.md` |
+| Block out-of-scope writes pre-tool | `.cursor/hooks/scope-guard.mjs` | `.claude/hooks/scope-guard.mjs` | self-enforce |
+| Block destructive shell pre-execution | `.cursor/hooks/shell-precheck.mjs` | `.claude/hooks/shell-precheck.mjs` | self-enforce |
+| Revert / delete leakage post-execution | `.cursor/hooks/shell-diff-check.mjs` | `.claude/hooks/shell-diff-check.mjs` | n/a |
+| Bootstrap reminder per turn | n/a | `.claude/hooks/user-prompt-submit.mjs` | n/a |
+
+All hook implementations sit on the same shared library at
+`agent-scope/lib/`:
+
+- `scope.mjs` — protected-path list, glob matching, `checkPath()`,
+  bootstrap detection.
+- `dkg-source.mjs` — talks to the local DKG daemon, runs the SPARQL
+  query that resolves the active scope, caches results for 5s.
+- `denial.mjs` — builds the human-readable summary + the structured
+  `simpleOptions` menu the agent surfaces via `AskQuestion`.
+- `shell-parse.mjs` — pure parser for the shell pre/post hooks.
+- `log.mjs` — appends decisions and denials to `agent-scope/logs/`.
+- `check-agent.mjs` — diagnostics CLI.
+
+The guard restricts **agent** actions only. Humans committing,
+pushing, or editing through their own terminal are not restricted —
+there are no git hooks and no CI enforcement.

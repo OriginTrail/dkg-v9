@@ -634,12 +634,12 @@ function refreshActiveChatSemanticEventPayloadIfNeeded(
     kind !== 'chat_turn'
     || payload.kind !== 'chat_turn'
     || row.payload_json === payloadJson
-    || (row.status !== 'pending' && row.status !== 'leased')
+    || row.status !== 'pending'
   ) {
     return undefined;
   }
 
-  const refreshed = dashDb.refreshActiveSemanticEnrichmentEventPayload(
+  const refreshed = dashDb.refreshPendingSemanticEnrichmentEventPayload(
     row.id,
     payloadJson,
     semanticTripleCount,

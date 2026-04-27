@@ -1008,13 +1008,13 @@ export class DashboardDB {
     });
   }
 
-  refreshActiveSemanticEnrichmentEventPayload(
+  refreshPendingSemanticEnrichmentEventPayload(
     id: string,
     payloadJson: string,
     semanticTripleCount: number,
     updatedAt: number,
   ): boolean {
-    const result = this.stmt('refreshActiveSemanticEnrichmentEventPayload', `
+    const result = this.stmt('refreshPendingSemanticEnrichmentEventPayload', `
       UPDATE semantic_enrichment_events
       SET payload_json = ?,
           status = 'pending',
@@ -1024,7 +1024,7 @@ export class DashboardDB {
           lease_expires_at = NULL,
           last_error = NULL,
           updated_at = ?
-      WHERE id = ? AND status IN ('pending', 'leased')
+      WHERE id = ? AND status = 'pending'
     `).run(payloadJson, semanticTripleCount, updatedAt, updatedAt, id);
     return result.changes > 0;
   }

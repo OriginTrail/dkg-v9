@@ -1233,7 +1233,7 @@ describe('best-effort semantic enqueue helper', () => {
     expect(payload).not.toHaveProperty('rootEntity');
   });
 
-  it('refreshes active chat-turn payloads before reusing an existing semantic event', () => {
+  it('refreshes pending chat-turn payloads before reusing an existing semantic event', () => {
     const oldPayload = {
       kind: 'chat_turn' as const,
       sessionId: 'openclaw:dkg-ui',
@@ -1257,20 +1257,20 @@ describe('best-effort semantic enqueue helper', () => {
       kind: 'chat_turn',
       idempotency_key: 'chat-turn:turn-refresh',
       payload_json: JSON.stringify(oldPayload),
-      status: 'leased',
+      status: 'pending',
       semantic_triple_count: 5,
-      attempts: 1,
+      attempts: 0,
       max_attempts: 5,
       next_attempt_at: 1_000,
-      lease_owner: 'worker-a',
-      lease_expires_at: 300_000,
+      lease_owner: null,
+      lease_expires_at: null,
       last_error: 'old failure',
       created_at: 900,
       updated_at: 1_000,
     };
     const dashDb = {
       getSemanticEnrichmentEventByIdempotencyKey: vi.fn(() => row),
-      refreshActiveSemanticEnrichmentEventPayload: vi.fn((
+      refreshPendingSemanticEnrichmentEventPayload: vi.fn((
         id: string,
         payloadJson: string,
         semanticTripleCount: number,
@@ -1313,7 +1313,7 @@ describe('best-effort semantic enqueue helper', () => {
     });
 
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
-    expect(dashDb.refreshActiveSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
+    expect(dashDb.refreshPendingSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
       'evt-chat-refresh',
       JSON.stringify(newPayload),
       0,

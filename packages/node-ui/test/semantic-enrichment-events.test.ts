@@ -37,7 +37,7 @@ function insertEvent(overrides: Partial<InsertEventInput> = {}): void {
 }
 
 describe('DashboardDB — semantic enrichment events', () => {
-  it('refreshes active chat-turn payloads and clears stale leases', () => {
+  it('refreshes pending chat-turn payloads without stealing active leases', () => {
     insertEvent({
       id: 'semantic-event-refresh-pending',
       kind: 'chat_turn',
@@ -57,18 +57,18 @@ describe('DashboardDB — semantic enrichment events', () => {
       lease_expires_at: 2_000,
     });
 
-    expect(db.refreshActiveSemanticEnrichmentEventPayload(
+    expect(db.refreshPendingSemanticEnrichmentEventPayload(
       'semantic-event-refresh-pending',
       JSON.stringify({ assistantReply: 'final' }),
       0,
       3_000,
     )).toBe(true);
-    expect(db.refreshActiveSemanticEnrichmentEventPayload(
+    expect(db.refreshPendingSemanticEnrichmentEventPayload(
       'semantic-event-refresh-leased',
       JSON.stringify({ assistantReply: 'final' }),
       0,
       3_000,
-    )).toBe(true);
+    )).toBe(false);
 
     expect(db.getSemanticEnrichmentEvent('semantic-event-refresh-pending')).toMatchObject({
       payload_json: JSON.stringify({ assistantReply: 'final' }),
@@ -81,22 +81,21 @@ describe('DashboardDB — semantic enrichment events', () => {
       updated_at: 3_000,
     });
     expect(db.getSemanticEnrichmentEvent('semantic-event-refresh-leased')).toMatchObject({
-      payload_json: JSON.stringify({ assistantReply: 'final' }),
-      status: 'pending',
+      payload_json: JSON.stringify({ assistantReply: 'draft' }),
+      status: 'leased',
       attempts: 1,
-      semantic_triple_count: 0,
-      lease_owner: null,
-      lease_expires_at: null,
-      last_error: null,
-      next_attempt_at: 3_000,
-      updated_at: 3_000,
+      semantic_triple_count: 4,
+      lease_owner: 'worker-a',
+      lease_expires_at: 2_000,
+      next_attempt_at: 1_000,
+      updated_at: 900,
     });
     expect(db.completeSemanticEnrichmentEvent(
       'semantic-event-refresh-leased',
       'worker-a',
       3_100,
       2,
-    )).toBe(false);
+    )).toBe(true);
   });
 
   it('does not refresh completed or dead-lettered semantic payloads', () => {
@@ -115,13 +114,13 @@ describe('DashboardDB — semantic enrichment events', () => {
       status: 'dead_letter',
     });
 
-    expect(db.refreshActiveSemanticEnrichmentEventPayload(
+    expect(db.refreshPendingSemanticEnrichmentEventPayload(
       'semantic-event-refresh-completed',
       JSON.stringify({ assistantReply: 'new' }),
       0,
       3_000,
     )).toBe(false);
-    expect(db.refreshActiveSemanticEnrichmentEventPayload(
+    expect(db.refreshPendingSemanticEnrichmentEventPayload(
       'semantic-event-refresh-dead-letter',
       JSON.stringify({ assistantReply: 'new' }),
       0,

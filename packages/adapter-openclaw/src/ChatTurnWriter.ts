@@ -165,7 +165,7 @@ export class ChatTurnWriter {
           const contentAlias = this.contentAliasKey(sessionId, user, assistant);
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
-            await this.persistOne(sessionId, user, assistant, turnId);
+            await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
             // After successful persist, refresh the content alias so
             // a same-cycle W4b fire dedups against the latest write.
             this.markTurnIdSeen(sessionId, contentAlias);
@@ -631,7 +631,8 @@ export class ChatTurnWriter {
     sessionId: string,
     user: string,
     assistant: string,
-    turnId: string
+    turnId: string,
+    opts?: { pairIndex?: number }
   ): Promise<void> {
     let attempt = 0;
     while (attempt < 2) {
@@ -644,14 +645,24 @@ export class ChatTurnWriter {
         // identical exchanges in the same session collide on the same RDF
         // subject URI.
         await this.client.storeChatTurn(sessionId, user, assistant);
-        // Prefer the pending debounced index (in-flight increments not yet
-        // committed to cachedWatermarks) so two persists inside the 50ms
-        // debounce window each advance the watermark instead of both
-        // computing the same cached+1. Without this, a restart after a
-        // burst would re-persist every turn past the first as a "delta".
-        const pending = this.debounceTimers.get(sessionId);
-        const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
-        this.saveWatermark(sessionId, currentIndex + 1);
+        // Watermark advance:
+        //   - W4a passes `pairIndex` (the position of the persisted pair
+        //     in the messages array). We set the watermark to MAX of
+        //     current and pairIndex — absolute position, not increment.
+        //     This way if W4a and W4b both fire for the same turn (cross-
+        //     path race), the watermark stays at pairIndex regardless of
+        //     order and never drifts past it.
+        //   - W4b omits `pairIndex` entirely; it does not advance the
+        //     watermark. The watermark is only meaningful for W4a's
+        //     `computeDelta`, which scans `messages[]`. W4b operates on
+        //     ad-hoc internal-hook events that have no pair semantics.
+        if (typeof opts?.pairIndex === "number") {
+          const pending = this.debounceTimers.get(sessionId);
+          const currentIndex = pending ? pending.pendingIndex : this.loadWatermark(sessionId);
+          if (opts.pairIndex > currentIndex) {
+            this.saveWatermark(sessionId, opts.pairIndex);
+          }
+        }
         this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
         return;
       } catch (err) {

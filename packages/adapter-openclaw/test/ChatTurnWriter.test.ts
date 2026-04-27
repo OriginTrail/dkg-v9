@@ -181,6 +181,54 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("watermark uses absolute pairIndex and does not drift on cross-path persist (R11.2)", async () => {
+    // Simulate W4a + W4b firing for the same turn: W4a persists with
+    // pairIndex=0, W4b persists without pairIndex. Watermark must end
+    // at 0, NOT 1 (no double-increment). Then a follow-up agent_end
+    // with the same pair must NOT be re-persisted.
+    await writer.onAgentEnd(
+      {
+        sessionId: "t",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+        ],
+      },
+      { channelId: "tg", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 70)); // commit debounce
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const watermarks = (writer as any).cachedWatermarks as Map<string, number>;
+    const sid = "openclaw:tg:::sk";
+    expect(watermarks.get(sid)).toBe(0); // absolute pair index, NOT 1
+  });
+
+  it("backfill: W4a persists pair 5 then pair 7 — watermark is 7, not incrementing arithmetic (R11.2)", async () => {
+    // 4 unsaved pairs: indices 0..3 in messages. Set watermark to -1 (fresh).
+    // After all persist, watermark should be at the last persisted pair's
+    // index (3), not whatever cumulative count of persists.
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "a3" },
+      ],
+    };
+    await writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 70));
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(4);
+    const watermarks = (writer as any).cachedWatermarks as Map<string, number>;
+    expect(watermarks.get("openclaw:ch:::sk")).toBe(3); // last pairIndex
+  });
+
   it("collapses tool-using turn into one (user, final-reply) pair (R10.3)", async () => {
     // Tool-using turn: [user, assistant(tool_call), tool, assistant(final_reply)].
     // Without the intermediate-step skip, computeDelta would emit TWO pairs:

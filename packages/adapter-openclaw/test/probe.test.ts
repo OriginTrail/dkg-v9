@@ -103,6 +103,39 @@ describe('DkgNodePlugin registration-mode probe', () => {
     expect(registerHookSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
   });
 
+  it('per-api gating: re-registers on a NEW api instance, skips on the SAME api (R11.3)', () => {
+    process.env.DKG_PROBE_REGISTRATION_MODE = '1';
+
+    const apiSetup = makeMockApi({ registrationMode: 'setup-runtime' });
+    const apiFull = makeMockApi({ registrationMode: 'full' });
+    const plugin = new DkgNodePlugin();
+
+    // Multi-phase init: same plugin, fresh api on each call.
+    plugin.register(apiSetup);
+    plugin.register(apiFull);
+
+    // Both APIs must have received the probe's "register() called" log —
+    // proves the probe handler-registration flow ran for each, not just
+    // the first call. Without per-api gating, the second call would have
+    // hit the `> 1` global guard and skipped everything.
+    const setupRegLogs = (apiSetup.logger.info as any).mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: string) => typeof m === 'string' && m.includes('[dkg-probe] register() called'));
+    const fullRegLogs = (apiFull.logger.info as any).mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: string) => typeof m === 'string' && m.includes('[dkg-probe] register() called'));
+    expect(setupRegLogs.length).toBe(1);
+    expect(fullRegLogs.length).toBe(1);
+
+    // Now hit apiSetup AGAIN — same api as call #1. The probe must log
+    // a "skipping" debug line, NOT a fresh registration.
+    plugin.register(apiSetup);
+    const skipLogs = (apiSetup.logger.debug as any).mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: string) => typeof m === 'string' && m.includes('[dkg-probe] skipping handler registration'));
+    expect(skipLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('probe gracefully handles missing globalThis internal-hook map', () => {
     process.env.DKG_PROBE_REGISTRATION_MODE = '1';
     

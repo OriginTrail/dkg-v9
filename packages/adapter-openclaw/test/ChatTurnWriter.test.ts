@@ -300,6 +300,63 @@ describe("ChatTurnWriter", () => {
     expect(counts.get(sessionId)).toBe(1);
   });
 
+  it("R22.1 — computeDelta drops assistant-only artifacts (initial greeting, compaction) and does NOT advance pairIndex", async () => {
+    // Regression for R22.1: pre-fix, an assistant message with no
+    // preceding user (initial agent greeting, post-compaction artifact,
+    // system-injected announcement) emitted a pair as ("", asst) and
+    // bumped `pairIndex`. That polluted memory AND inflated the
+    // watermark — so the next REAL (user, assistant) pair would be
+    // skipped on the next agent_end as already-saved.
+    //
+    // Setup: messages = [asst(greeting), user, asst(reply)]. Pre-fix
+    // would emit two pairs (greeting at index 0, reply at index 1) and
+    // skip the next agent_end's reply if backfill watermark = 1.
+    // Post-fix emits exactly one pair: (user, reply) at pairIndex 0.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "assistant", content: "Hi! I'm your assistant." }, // initial greeting, no pending user
+        { role: "user", content: "Real question" },
+        { role: "assistant", content: "Real reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("Real question");
+    expect(call[2]).toBe("Real reply");
+  });
+
+  it("R22.1 — pairIndex is NOT advanced for orphan assistant messages so the watermark stays correct", async () => {
+    // Stronger guard: drive the same shape twice and confirm the second
+    // agent_end (with the same messages array) does not write a new
+    // pair, because the watermark advanced exactly to the one real
+    // pair persisted on the first call.
+    const dkw = writer as any;
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "assistant", content: "system greeting" },
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    // Flush so loadWatermark reflects the persisted index.
+    writer.flushSync();
+    // The real pair lands at pairIndex 0 (orphan asst was skipped, NOT
+    // counted), so the watermark should be 0 — not 1.
+    expect(dkw.loadWatermark("openclaw:tg:::sk")).toBe(0);
+
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Second call must not re-persist anything.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("R19.1 — computeDelta concatenates consecutive user messages before pairing with assistant reply", async () => {
     // Regression for R19.1: pre-fix, the parser used a single
     // `currentUser` slot that overwrote on each user message. So

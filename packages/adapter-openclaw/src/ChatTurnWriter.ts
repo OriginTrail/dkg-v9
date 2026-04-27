@@ -655,6 +655,17 @@ export class ChatTurnWriter {
           // accumulated user side.
           continue;
         }
+        if (pendingUsers.length === 0) {
+          // R22.1 — Assistant message arrived without any pending user
+          // (initial agent greeting, post-compaction artifact, system-
+          // injected announcement). Don't emit an empty-user pair, and
+          // crucially DON'T advance `pairIndex`: doing so would inflate
+          // the watermark and let the next real (user, assistant) pair
+          // be skipped as already-saved on the next agent_end. Skip the
+          // orphan, leave the watermark untouched, mirror W4b's
+          // R21.2 drop-orphan-assistant invariant on the W4a side.
+          continue;
+        }
         const userText = pendingUsers.join("\n");
         pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {

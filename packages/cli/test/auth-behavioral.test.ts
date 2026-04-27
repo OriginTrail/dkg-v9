@@ -1397,6 +1397,174 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.body).not.toContain('"ok":true');
   });
 
+  // -----------------------------------------------------------------
+  // PR #229 bot review (r3148998554 — auth.ts:1202).
+  //
+  // Pre-fix `waitForRequestEnd` had no deadline. A signed request that
+  // declared `Transfer-Encoding: chunked` and never sent the
+  // terminating `0\r\n\r\n` would keep the queued response and the
+  // socket pinned forever — a slowloris / FD-exhaustion vector against
+  // any auth-gated route that does not call `readBody*()` itself.
+  //
+  // Post-fix: race against `DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS` (1s in
+  // these tests for fast turn-around), destroy the request on expiry,
+  // fail-closed to 401. This test sets a tiny env override and sends a
+  // chunked body that NEVER terminates; the response must be 401
+  // strictly within `5x` the deadline (the 5x is for CI noise tolerance).
+  // -----------------------------------------------------------------
+  it('r30-7: signed request whose body never ends (chunked slowloris) is fail-closed within the drain deadline', async () => {
+    // Spin up an isolated server with a short drain budget. We use a
+    // process-env override (the production code reads
+    // `DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS` once per `httpAuthGuard`
+    // closure) so this test stays self-contained.
+    const prevTimeout = process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS;
+    process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS = '300';
+    const slowServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      // Handler does NOT read the body — that's the precondition for
+      // the deferred drain path to engage.
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>(r => slowServer.listen(0, '127.0.0.1', r));
+    try {
+      const port = (slowServer.address() as { port: number }).port;
+      const ts = String(Date.now());
+      const nonce = `n-${randomBytes(8).toString('hex')}`;
+      // Sign the empty body so the framing-bodyless fast-path is
+      // disabled (we declare chunked in the request) and the deferred
+      // drain MUST run.
+      const sigForEmpty = sigFor(VALID, 'POST', '/api/agents', ts, nonce, '');
+      // Build a chunked request whose body never terminates: send one
+      // valid chunk header + one byte of payload, then stop. No
+      // `0\r\n\r\n` terminator is sent, so Node's HTTP parser will
+      // wait forever for the next chunk.
+      const headers =
+        `POST /api/agents HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Authorization: Bearer ${VALID}\r\n` +
+        `Transfer-Encoding: chunked\r\n` +
+        `x-dkg-timestamp: ${ts}\r\n` +
+        `x-dkg-nonce: ${nonce}\r\n` +
+        `x-dkg-signature: ${sigForEmpty}\r\n` +
+        `Connection: close\r\n` +
+        `\r\n` +
+        `1\r\n` + // chunk length: 1 byte
+        `X` +     // 1 byte of payload
+        // INTENTIONALLY no `\r\n0\r\n\r\n` terminator — slowloris.
+        ``;
+
+      const t0 = Date.now();
+      const result = await new Promise<{ status: number; body: string; elapsedMs: number }>((resolve, reject) => {
+        const sock = createConnection(port, '127.0.0.1');
+        let chunks = '';
+        const ko = setTimeout(() => {
+          // Hard upper bound: if the server fails to respond within 5s
+          // the test fails (would have been "forever" pre-fix).
+          sock.destroy();
+          reject(new Error('server did not respond within hard deadline (slowloris fix regression)'));
+        }, 5000);
+        sock.once('error', (err) => { clearTimeout(ko); reject(err); });
+        sock.on('data', (b) => { chunks += b.toString('utf8'); });
+        sock.on('end', () => {
+          clearTimeout(ko);
+          const headerEnd = chunks.indexOf('\r\n\r\n');
+          const statusLine = chunks.slice(0, chunks.indexOf('\r\n'));
+          const body = headerEnd >= 0 ? chunks.slice(headerEnd + 4) : '';
+          const m = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})/);
+          resolve({ status: m ? Number(m[1]) : 0, body, elapsedMs: Date.now() - t0 });
+        });
+        sock.on('close', () => {
+          clearTimeout(ko);
+          if (!chunks) resolve({ status: 0, body: '', elapsedMs: Date.now() - t0 });
+        });
+        sock.write(headers);
+      });
+
+      // The deferred-drain race must surface a 401 (fail-closed),
+      // and it must do so close to the drain deadline (300ms +
+      // CI overhead) — definitely well below the 5s hard deadline.
+      expect(result.status).toBe(401);
+      expect(result.body.toLowerCase()).toMatch(/signed request rejected.*drain timed out|signed request rejected/);
+      expect(result.elapsedMs).toBeLessThan(2500);
+    } finally {
+      await new Promise<void>(r => slowServer.close(() => r()));
+      if (prevTimeout === undefined) {
+        delete process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS;
+      } else {
+        process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS = prevTimeout;
+      }
+    }
+  });
+
+  it('r30-7: legitimate slow-but-completing chunked request still succeeds (timeout does not kill honest clients)', async () => {
+    // Counterpoint: if the body DOES terminate before the deadline,
+    // the request must succeed. Honest mobile / lossy-link clients
+    // commonly emit chunked bodies with a few hundred ms of inter-
+    // chunk delay; the timeout must not turn them into 401s.
+    const prevTimeout = process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS;
+    process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS = '2000';
+    const slowServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>(r => slowServer.listen(0, '127.0.0.1', r));
+    try {
+      const port = (slowServer.address() as { port: number }).port;
+      const wireBody = '{"slow":true}';
+      const ts = String(Date.now());
+      const nonce = `n-${randomBytes(8).toString('hex')}`;
+      const goodSig = sigFor(VALID, 'POST', '/api/agents', ts, nonce, wireBody);
+
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const sock = createConnection(port, '127.0.0.1');
+        let chunks = '';
+        const ko = setTimeout(() => { sock.destroy(); reject(new Error('hung')); }, 6000);
+        sock.once('error', (err) => { clearTimeout(ko); reject(err); });
+        sock.on('data', (b) => { chunks += b.toString('utf8'); });
+        sock.on('end', () => {
+          clearTimeout(ko);
+          const headerEnd = chunks.indexOf('\r\n\r\n');
+          const statusLine = chunks.slice(0, chunks.indexOf('\r\n'));
+          const body = headerEnd >= 0 ? chunks.slice(headerEnd + 4) : '';
+          const m = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})/);
+          resolve({ status: m ? Number(m[1]) : 0, body });
+        });
+        sock.on('close', () => { clearTimeout(ko); if (!chunks) resolve({ status: 0, body: '' }); });
+        // Send headers + first chunk header, then DELAY before sending
+        // the payload + terminator. Total wall time is well under the
+        // 2s budget but well above zero.
+        sock.write(
+          `POST /api/agents HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          `Authorization: Bearer ${VALID}\r\n` +
+          `Transfer-Encoding: chunked\r\n` +
+          `x-dkg-timestamp: ${ts}\r\n` +
+          `x-dkg-nonce: ${nonce}\r\n` +
+          `x-dkg-signature: ${goodSig}\r\n` +
+          `Connection: close\r\n` +
+          `\r\n`,
+        );
+        setTimeout(() => {
+          // Send a single chunk that contains the body, then terminate.
+          const len = Buffer.byteLength(wireBody).toString(16);
+          sock.write(`${len}\r\n${wireBody}\r\n0\r\n\r\n`);
+        }, 250);
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.body).toContain('"ok":true');
+    } finally {
+      await new Promise<void>(r => slowServer.close(() => r()));
+      if (prevTimeout === undefined) {
+        delete process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS;
+      } else {
+        process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS = prevTimeout;
+      }
+    }
+  });
+
   it('r30-5: a sequence of independent signed POST/empty-body lures using random bodies all fail closed (no flaky timing window survives)', async () => {
     // Run the same scenario back-to-back with fresh nonces and
     // randomly-sized bodies. The previous fast-path bug was timing-

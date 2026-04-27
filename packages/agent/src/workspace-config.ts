@@ -127,8 +127,18 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 // next line whose content matches the close-fence shape. Each char
 // of the input is now visited a bounded number of times — the whole
 // scan is strictly linear and impossible to backtrack.
-const OPEN_FENCE_LINE_RE = /^```(?:\s*(?:yaml|yml|json))?\s*dkg-config\s*$/i;
-const CLOSE_FENCE_LINE_RE = /^```\s*$/;
+// PR #229 bot review (r3148998568 — workspace-config.ts:130). CommonMark
+// allows code-block fences to be indented by up to THREE spaces (anything
+// from four onwards reverts to an indented code block). The strict
+// column-0 anchor rejected legitimate `dkg-config` blocks that lived
+// under a list item, blockquote, or were emitted by a Markdown
+// formatter that normalised indentation. The optional `[ ]{0,3}`
+// prefix (only ASCII spaces, no tabs — same restriction CommonMark
+// uses) accepts the spec-allowed indentation while still rejecting
+// 4+ spaces (which is an indented code block, not a fenced one) and
+// any tab-indented variant.
+const OPEN_FENCE_LINE_RE = /^ {0,3}```(?:\s*(?:yaml|yml|json))?\s*dkg-config\s*$/i;
+const CLOSE_FENCE_LINE_RE = /^ {0,3}```\s*$/;
 
 /**
  * Find the body of the first ```dkg-config``` (or

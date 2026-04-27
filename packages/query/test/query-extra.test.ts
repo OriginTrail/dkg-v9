@@ -1318,6 +1318,123 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings).toEqual([]);
   });
 
+  // ───────────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r3148998562 — dkg-query-engine.ts:848). The literal
+  // scanners only recognised single-line `"…"` and `'…'` literals. SPARQL
+  // 1.1 ALSO supports long-form (triple-quoted) literals — `"""…"""` and
+  // `'''…'''` — which can legally contain raw `"`, `'`, newlines, and any
+  // of the structural chars (`{`, `}`, `#`, `.`) without escaping. When a
+  // chat / markdown / JSON payload is encoded as a long-form literal, the
+  // pre-fix scanners walked into the body of the literal as if it were
+  // SPARQL code, miscounted braces or misclassified `#` as a comment, and
+  // the surrounding rewriters (minTrust injection, wrapWithGraph) all
+  // fail-closed to empty. These tests pin the long-form handling end-to-end.
+  // ───────────────────────────────────────────────────────────────────────
+  it('r30-7: minTrust honors a triple-double-quoted (`"""…"""`) literal containing `{`/`}`/`#`/`.`', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    // Insert a payload whose literal contains every structural char
+    // that the pre-fix scanners misclassified.
+    const payload = '{"k": 1} # not a comment . not a triple terminator';
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', `"${payload.replace(/"/g, '\\"')}"`, consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Use a triple-quoted literal in the query itself. Pre-fix, the
+    // scanner saw the opening `"""` as `"` + `"` + `"` (three single-
+    // line literals: `""`, `""`, …) and then walked into the body.
+    const sparql =
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . ' +
+      `FILTER(STR(?t) = """${payload}""") }`;
+    const result = await engine.query(sparql, {
+      contextGraphId: CG,
+      view: 'verified-memory',
+      minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('r30-7: minTrust honors a triple-single-quoted (`\'\'\'…\'\'\'`) literal containing structural chars', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    const payload = "}{ # not a comment .";
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', `"${payload}"`, consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const sparql =
+      "SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . " +
+      `FILTER(STR(?t) = '''${payload}''') }`;
+    const result = await engine.query(sparql, {
+      contextGraphId: CG,
+      view: 'verified-memory',
+      minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('r30-7: triple-quoted literal containing a SINGLE quote char does not prematurely terminate', async () => {
+    // The scanner must require all THREE terminating quote chars
+    // before treating the literal as closed; a stray `"` inside a
+    // triple-double-quoted literal must not be misread as the close.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    // Payload contains a SINGLE `"` inside the triple-quoted literal.
+    const payload = 'a "lone quote inside" b { } #';
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text',
+        `"${payload.replace(/"/g, '\\"')}"`, consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    const sparql =
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . ' +
+      `FILTER(STR(?t) = """${payload}""") }`;
+    const result = await engine.query(sparql, {
+      contextGraphId: CG,
+      view: 'verified-memory',
+      minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('r30-7: skipSparqlStringLiteral atomicity — directly exercises the centralised lex helper', async () => {
+    // Direct unit test of the exported helper. This is the smallest
+    // reproduction of the bot's concern: every other test exercises
+    // it through the engine, which is integration-shaped. Pin the
+    // contract directly so a regression to per-helper duplication
+    // would surface here even if the integration paths still pass.
+    const { skipSparqlStringLiteral } = await import('../src/dkg-query-engine.js') as unknown as {
+      skipSparqlStringLiteral: (src: string, i: number) => number;
+    };
+
+    // Single-line forms.
+    expect(skipSparqlStringLiteral('"abc"X', 0)).toBe(5);
+    expect(skipSparqlStringLiteral("'abc'X", 0)).toBe(5);
+    // Embedded escape — the `\` consumes the next char.
+    expect(skipSparqlStringLiteral('"a\\"b"X', 0)).toBe(6);
+    // Triple-double-quoted with embedded `"` and `{`/`}`.
+    const tdq = '"""a"b{c}d#e."""TAIL';
+    expect(skipSparqlStringLiteral(tdq, 0)).toBe(tdq.indexOf('TAIL'));
+    // Triple-single-quoted with embedded `'`.
+    const tsq = "'''x'y{z}w#q.'''TAIL";
+    expect(skipSparqlStringLiteral(tsq, 0)).toBe(tsq.indexOf('TAIL'));
+    // Triple-quoted with newlines (long-form spans lines).
+    const multi = '"""line1\nline2\nline3"""TAIL';
+    expect(skipSparqlStringLiteral(multi, 0)).toBe(multi.indexOf('TAIL'));
+    // Non-quote start = no advance.
+    expect(skipSparqlStringLiteral('xyz', 0)).toBe(0);
+    // Unterminated literal consumes the rest (defensive — see helper docs).
+    expect(skipSparqlStringLiteral('"unterminated', 0)).toBe('"unterminated'.length);
+    expect(skipSparqlStringLiteral('"""unterminated', 0)).toBe('"""unterminated'.length);
+  });
+
   it('wrapWithGraph (default-graph filter) survives unbalanced braces inside string literals', async () => {
     // verified-memory route triggers wrapWithGraph to scope to the
     // sub-graph URI. If the brace counter mis-locates the WHERE end,

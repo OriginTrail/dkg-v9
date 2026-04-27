@@ -118,25 +118,86 @@ function loadOrCreatePersistedKey(): Buffer | null {
   // different key files each get THEIR OWN key.
   const cached = persistedKeyByPath.get(path);
   if (cached) return cached;
-  try {
-    if (existsSync(path)) {
-      const raw = readFileSync(path);
-      if (raw.length >= 32) {
-        const key = Buffer.from(raw.subarray(0, 32));
-        persistedKeyByPath.set(path, key);
-        return key;
-      }
+
+  // PR #229 bot review (r3148998566 — private-store.ts:124). The
+  // previous logic had two correctness holes around persistent key
+  // loading:
+  //
+  //   1. If the key file existed but was SHORT (<32 bytes — truncated,
+  //      partial write, FS corruption), the `if (raw.length >= 32)`
+  //      branch silently fell through to the regenerate path below.
+  //      That auto-rotation re-keys the node in place AND overwrites
+  //      the original (possibly recoverable) bytes — every previously
+  //      encrypted private triple is silently stranded with no way for
+  //      the operator to notice.
+  //
+  //   2. The outer `try/catch` swallowed ALL errors (including
+  //      "permission denied", "file is a symlink to /dev/null", etc.)
+  //      and returned `null` so the caller fell back to the global
+  //      deterministic last-resort key. That's a different but related
+  //      stranding: future writes encrypt under last-resort, while
+  //      reads of pre-existing data still need the persisted key, and
+  //      neither side surfaces the problem.
+  //
+  // Fix: TREAT A NON-EMPTY-BUT-INVALID FILE AS A LOUD ERROR. Only
+  // generate a fresh key when the file is genuinely absent. If the
+  // file exists but is short, throw a clear `Error` so the operator
+  // sees the corruption signal at startup. The `DKG_PRIVATE_STORE_KEY`
+  // / `DKG_PRIVATE_STORE_KEY_FILE` env overrides remain available as
+  // an escape hatch for managed-secret deployments. An optional
+  // `DKG_PRIVATE_STORE_KEY_AUTO_RESET=1` lets the operator opt back
+  // into the old auto-regenerate behaviour after they've explicitly
+  // accepted the data-loss trade-off.
+  const fileExists = existsSync(path);
+  if (fileExists) {
+    let raw: Buffer;
+    try {
+      raw = readFileSync(path);
+    } catch (err) {
+      // Read failed entirely (permissions, symlink loop, etc.) —
+      // surface the OS error so the operator can fix it instead of
+      // silently re-keying the node.
+      throw new Error(
+        `[PrivateContentStore] Failed to read persistent private-store key file at ${path}: ` +
+          `${(err as Error).message}. Refusing to fall back to a fresh key (would silently strand existing private triples). ` +
+          'Fix the file, restore from backup, set DKG_PRIVATE_STORE_KEY / DKG_PRIVATE_STORE_KEY_FILE, ' +
+          'or set DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 if you accept losing every previously encrypted private triple.',
+        { cause: err as Error },
+      );
     }
-    // Generate + persist a fresh 32-byte secret. 0o600 so only the
-    // node operator's user account can read it.
+    if (raw.length >= 32) {
+      const key = Buffer.from(raw.subarray(0, 32));
+      persistedKeyByPath.set(path, key);
+      return key;
+    }
+    // File exists but is unusable. Loud error — see commentary above.
+    if (process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET === '1') {
+      console.warn(
+        `[PrivateContentStore] Persistent private-store key file at ${path} is corrupt ` +
+          `(length=${raw.length}, expected >= 32). DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 is set, ` +
+          'so a FRESH key will be generated. Every previously encrypted private triple under the old ' +
+          'key is now PERMANENTLY UNRECOVERABLE.',
+      );
+      // Fall through to the generation path below.
+    } else {
+      throw new Error(
+        `[PrivateContentStore] Persistent private-store key file at ${path} is corrupt ` +
+          `(length=${raw.length}, expected >= 32 bytes for AES-256). ` +
+          'Refusing to auto-regenerate (would silently strand every previously encrypted private triple). ' +
+          'Restore the file from backup, set DKG_PRIVATE_STORE_KEY / DKG_PRIVATE_STORE_KEY_FILE to a known-good secret, ' +
+          'or set DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 to accept losing every previously encrypted private triple ' +
+          'and regenerate a fresh key on next start.',
+      );
+    }
+  }
+
+  // First-run path: file is genuinely absent (or auto-reset opted-in).
+  try {
     const dir = dirname(path);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const fresh = randomBytes(32);
     writeFileSync(path, fresh, { mode: 0o600 });
     try { chmodSync(path, 0o600); } catch { /* non-POSIX FS */ }
-    // r16-3: warn-once PER PATH so multi-node processes see a
-    // separate warning line for each generated key file (signals to
-    // the operator that more than one node is running).
     if (!persistedKeyWarnedPaths.has(path)) {
       persistedKeyWarnedPaths.add(path);
       console.warn(
@@ -149,6 +210,12 @@ function loadOrCreatePersistedKey(): Buffer | null {
     persistedKeyByPath.set(path, fresh);
     return fresh;
   } catch {
+    // Generation failed (read-only FS, unknown home, etc.). Caller
+    // falls through to the deterministic last-resort key under a loud
+    // warning — same behaviour as before this change. We deliberately
+    // do NOT throw here because some test/dev environments cannot
+    // create the file at all and the operator already accepted the
+    // last-resort fallback in those topologies.
     return null;
   }
 }

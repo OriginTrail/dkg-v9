@@ -1199,7 +1199,34 @@ function installSignedRequestResponseGuard(
     (req as IncomingMessage).on('data', onData);
   };
 
-  const waitForRequestEnd = (): Promise<void> =>
+  // PR #229 bot review (r3148998554 — auth.ts:1202). The previous
+  // implementation relied solely on the request emitting `end`/`close`/
+  // `error` to resolve the wait. Under chunked Transfer-Encoding a
+  // misbehaving / malicious client can send an incomplete chunked body
+  // (e.g. an open chunk extension or never-arriving terminating
+  // `0\r\n\r\n`) and stay silent forever. The wait would then never
+  // resolve, the handler's response would stay queued in `queue[]`
+  // forever, and the socket / FD / queued response object would all
+  // remain pinned — a slowloris / FD-exhaustion vector against any
+  // signed route that ignores the body.
+  //
+  // Fix: race the natural-end resolution against an explicit
+  // `SIGNED_REQUEST_DRAIN_TIMEOUT_MS` deadline. On expiry we destroy
+  // the request (releasing the socket) and the surrounding
+  // `deferAndResolve` calls `failClosed` so the queued response is
+  // rewritten to a 401. The default budget of 30s is generous for
+  // legitimate clients on slow links but tight enough to bound any
+  // single misbehaving connection's hold on a worker / socket.
+  const SIGNED_REQUEST_DRAIN_TIMEOUT_MS = (() => {
+    const raw = process.env.DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS;
+    if (typeof raw === 'string' && raw.length > 0) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 30_000;
+  })();
+
+  const waitForRequestEnd = (): Promise<{ timedOut: boolean }> =>
     new Promise((resolve) => {
       const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
       // PR #229 bot review (r3148... — auth.ts:1205). The previous
@@ -1224,13 +1251,44 @@ function installSignedRequestResponseGuard(
       // For the `complete && !readableEnded` case we fall through
       // and call `resume()` so the buffered data flushes through our
       // `data` listener and we then await `end`.
-      if (reqAny.readableEnded) { resolve(); return; }
-      const done = (): void => resolve();
+      if (reqAny.readableEnded) { resolve({ timedOut: false }); return; }
+
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (timedOut: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        // PR #229 bot review (r3148998554 — auth.ts:1202). DO NOT
+        // destroy the request stream here. The caller (`deferAndResolve`)
+        // needs the socket alive for the `failClosed` 401 write to
+        // reach the wire. The caller is responsible for tearing down
+        // the request AFTER the response has been emitted.
+        resolve({ timedOut });
+      };
+      const done = (): void => finish(false);
       req.once('end', done);
       req.once('close', done);
       req.once('error', done);
+      timer = setTimeout(() => finish(true), SIGNED_REQUEST_DRAIN_TIMEOUT_MS);
+      // Allow the process to exit even if a stuck request is mid-wait.
+      if (typeof (timer as { unref?: () => unknown }).unref === 'function') {
+        (timer as { unref: () => unknown }).unref();
+      }
       req.resume();
     });
+
+  // PR #229 bot review (r3148998554). After failClosed has written the
+  // 401, tear down the request stream so the socket is released. This
+  // is what actually closes the slowloris hold — the response is
+  // already on the wire by the time we do this.
+  const destroyStuckRequest = (): void => {
+    try {
+      (req as IncomingMessage).destroy(new Error('signed-request body drain timed out'));
+    } catch {
+      // ignore — best-effort socket teardown.
+    }
+  };
 
   // PR #229 bot review r3146563616 (auth.ts:1170): the prior check
   //   `req.complete || req.readableEnded` && `drainedBytes === 0`
@@ -1333,7 +1391,20 @@ function installSignedRequestResponseGuard(
     void (async () => {
       try {
         attachDrainListeners();
-        await waitForRequestEnd();
+        const waitOutcome = await waitForRequestEnd();
+        if (waitOutcome.timedOut) {
+          // PR #229 bot review (r3148998554 — auth.ts:1202). A signed
+          // request whose body never finishes arriving (e.g. chunked
+          // framing held open by a slowloris attacker) used to keep
+          // the queued response and the socket pinned indefinitely.
+          // We now fail-closed on the explicit drain deadline AND
+          // proactively tear down the still-open request stream so the
+          // socket is released back to the OS even if the client never
+          // sends `end`.
+          failClosed('signed request body drain timed out');
+          destroyStuckRequest();
+          return;
+        }
         if (drainOverflow) { failClosed('request body exceeded maximum drain size'); return; }
         const body = Buffer.concat(drainedChunks);
         const outcome = verifyHttpSignedRequestAfterBody(req, body);

@@ -490,6 +490,84 @@ export class DKGQueryEngine implements QueryEngine {
 }
 
 /**
+ * Skip past a SPARQL string literal starting at `src[i]`, returning the
+ * index immediately AFTER the closing quote.
+ *
+ * Recognises **all four** SPARQL 1.1 literal forms:
+ *
+ *   - `"…"`         single-line, double-quoted (escape: `\\`, `\"`, `\n`, …)
+ *   - `'…'`         single-line, single-quoted (same escape grammar)
+ *   - `"""…"""`     long-form, double-quoted (may span newlines, contains
+ *                   raw `"`, `'`, `{`, `}`, `#`, `.` without escaping)
+ *   - `'''…'''`     long-form, single-quoted (same as above)
+ *
+ * **Caller contract:** `src[i]` MUST be `"` or `'`; otherwise the function
+ * returns `i` (no advance). The cursor returned points to the first byte
+ * AFTER the literal, ready for the caller to resume its own scan.
+ *
+ * If a literal is unterminated (truncated input) the function consumes
+ * the remainder of the string and returns `src.length`. Callers treat
+ * unterminated literals as "the rest of the input is opaque payload",
+ * which is the safe choice for structural scans (brace balancing,
+ * keyword detection): we do NOT want a stray `{` near the end of a
+ * truncated query body to confuse the surrounding scanner.
+ *
+ * PR #229 bot review (r3148998562 — dkg-query-engine.ts:848). The
+ * previous helpers (`stripSparqlLineComments`, `scrubStringsAndComments`,
+ * `findMatchingCloseBrace`, `findWhereBraceStart`, and
+ * `splitTopLevelTripleStatements`) all had their own copy of the
+ * single-line literal scanner and NONE recognised triple-quoted
+ * literals, so a long-form payload like
+ *
+ *     SELECT ?t WHERE { ?s <p> """contains a {brace} and a #comment""" }
+ *
+ * leaked `{`, `}`, `#`, `.`, etc. through the structural scrubber and
+ * the `minTrust` rewriter (and the SPARQL form classifier, and the
+ * triple terminator splitter) misclassified payload as syntax. The
+ * downstream effect was the same fail-closed empty result the
+ * scrubbing was supposed to prevent. Centralising the lex here means
+ * every helper that walks SPARQL source learns triple-quoted handling
+ * in one place.
+ */
+export function skipSparqlStringLiteral(src: string, i: number): number {
+  const n = src.length;
+  if (i >= n) return i;
+  const ch = src[i];
+  if (ch !== '"' && ch !== "'") return i;
+  // Long-form (triple-quoted) literal? Lookahead must match `ch ch ch`.
+  if (i + 2 < n && src[i + 1] === ch && src[i + 2] === ch) {
+    let j = i + 3;
+    while (j < n) {
+      // SPARQL 1.1 long-string grammar (§19.8 STRING_LITERAL_LONG*) allows
+      // `\<x>` style ECHAR escapes — skip the escaped byte so a `\\"` or
+      // a `\\'` does not prematurely terminate. Between escapes, look for
+      // the triple-quote terminator.
+      if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
+      if (
+        src[j] === ch &&
+        j + 2 < n &&
+        src[j + 1] === ch &&
+        src[j + 2] === ch
+      ) {
+        return j + 3;
+      }
+      j++;
+    }
+    return n;
+  }
+  // Short-form (single-line) literal. SPARQL 1.1 STRING_LITERAL1/2 forbid
+  // unescaped newlines, but we still defensively bail on EOL just like
+  // the previous helpers did.
+  let j = i + 1;
+  while (j < n) {
+    if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
+    if (src[j] === ch) { return j + 1; }
+    j++;
+  }
+  return j;
+}
+
+/**
  * Locate the opening `{` of the WHERE clause in a SPARQL query.
  *
  * SPARQL 1.1 (§16) allows the `WHERE` keyword to be omitted from
@@ -621,14 +699,9 @@ function findWhereBraceStart(sparql: string): number {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (sparql[j] === '\\' && j + 1 < n) { j += 2; continue; }
-        if (sparql[j] === quote) { j++; break; }
-        j++;
-      }
-      i = j;
+      // PR #229 bot review (r3148998562 — dkg-query-engine.ts:848).
+      // Centralised triple-quoted-aware skip — see skipSparqlStringLiteral.
+      i = skipSparqlStringLiteral(sparql, i);
       continue;
     }
     if (ch === '{') {
@@ -678,14 +751,8 @@ function findMatchingCloseBrace(sparql: string, openIdx: number): number {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (sparql[j] === '\\' && j + 1 < n) { j += 2; continue; }
-        if (sparql[j] === quote) { j++; break; }
-        j++;
-      }
-      i = j;
+      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      i = skipSparqlStringLiteral(sparql, i);
       continue;
     }
     if (ch === '<') {
@@ -846,13 +913,8 @@ function stripSparqlLineComments(src: string): string {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
-        if (src[j] === quote) { j++; break; }
-        j++;
-      }
+      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      const j = skipSparqlStringLiteral(src, i);
       out += src.slice(i, j);
       i = j;
       continue;
@@ -900,13 +962,8 @@ function scrubStringsAndComments(src: string): string {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
-        if (src[j] === quote) { j++; break; }
-        j++;
-      }
+      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      const j = skipSparqlStringLiteral(src, i);
       for (let k = i; k < j; k++) buf[k] = src[k] === '\n' ? '\n' : ' ';
       i = j;
       continue;
@@ -960,14 +1017,8 @@ function splitTopLevelTripleStatements(body: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      const quote = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (body[j] === '\\' && j + 1 < n) { j += 2; continue; }
-        if (body[j] === quote) { j++; break; }
-        j++;
-      }
-      i = j;
+      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      i = skipSparqlStringLiteral(body, i);
       continue;
     }
     if (ch === '.') {

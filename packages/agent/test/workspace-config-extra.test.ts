@@ -256,6 +256,92 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('after-decoy');
   });
 
+  // ───────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r3148998568 — workspace-config.ts:130). The
+  // pre-fix open/close fence regexes required column-0 anchors, so a
+  // legitimate `dkg-config` block under a list item, a blockquote, or
+  // emitted by a Markdown formatter that normalised indentation was
+  // ignored. CommonMark allows up to 3 leading spaces on fence lines —
+  // anything from 4+ becomes an indented code block, not a fenced one.
+  // These tests pin: (1) 0–3 leading spaces are accepted, (2) 4+ are
+  // still rejected (because they're indented code blocks), (3) a tab-
+  // indented fence is rejected (CommonMark only allows spaces here).
+  // ───────────────────────────────────────────────────────────────────
+  it('r30-7: parses a `dkg-config` fence with 1 leading space (CommonMark indented-fence form)', () => {
+    const md = [
+      '- list item',
+      ' ```dkg-config',
+      ' contextGraph: "indented-1"',
+      ' node: "http://n"',
+      ' ```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('indented-1');
+  });
+
+  it('r30-7: parses a `dkg-config` fence with 2 leading spaces', () => {
+    const md = [
+      '> blockquote',
+      '  ```dkg-config',
+      '  contextGraph: "indented-2"',
+      '  node: "http://n"',
+      '  ```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('indented-2');
+  });
+
+  it('r30-7: parses a `dkg-config` fence with 3 leading spaces (the CommonMark maximum)', () => {
+    const md = [
+      '   ```dkg-config',
+      '   contextGraph: "indented-3"',
+      '   node: "http://n"',
+      '   ```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('indented-3');
+  });
+
+  it('r30-7: REJECTS a `dkg-config` fence with 4 leading spaces (CommonMark indented code block boundary)', () => {
+    // 4+ leading spaces is an indented code block per CommonMark §4.4,
+    // not a fenced one. The loader must NOT match this as a fence.
+    const md = [
+      '# header',
+      '    ```dkg-config',
+      '    contextGraph: "should-not-load"',
+      '    node: "http://n"',
+      '    ```',
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
+  });
+
+  it('r30-7: REJECTS a `dkg-config` fence indented by tabs (CommonMark fence indent grammar is space-only)', () => {
+    const md = [
+      '# header',
+      '\t```dkg-config',
+      '\tcontextGraph: "tab-indent"',
+      '\tnode: "http://n"',
+      '\t```',
+    ].join('\n');
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
+  });
+
+  it('r30-7: still requires the close fence to be present and CommonMark-indented (close fence at column 0 with open at +2 still works)', () => {
+    // Real-world Markdown often has the open fence indented (under a
+    // list / blockquote) and the close fence in column 0 (or vice
+    // versa). The loader must accept ANY 0-3-space indent on EITHER
+    // fence independently.
+    const md = [
+      '- list item',
+      '  ```dkg-config',
+      '  contextGraph: "mixed-indent"',
+      '  node: "http://n"',
+      '```',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('mixed-indent');
+  });
+
   it('PR #229 bugbot: an unterminated dkg-config fence falls through to the "no carrier" error', () => {
     const md = [
       '# header',

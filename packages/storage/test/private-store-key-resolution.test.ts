@@ -361,6 +361,149 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
       cleanup();
     }
   });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r3148998566 — private-store.ts:124). Pre-fix, a
+  // truncated / corrupted persisted key file silently fell through to the
+  // "generate a fresh key" branch, re-keying the node in place and stranding
+  // every previously encrypted private triple under the now-overwritten
+  // original. The new behaviour is fail-loud: throw a clear error so the
+  // operator sees the corruption signal at startup. An explicit
+  // `DKG_PRIVATE_STORE_KEY_AUTO_RESET=1` env opt-in restores the old auto-
+  // regenerate behaviour for operators who explicitly accept the data loss.
+  // ────────────────────────────────────────────────────────────────────────
+  it('r30-7: corrupted persisted key file (length < 32) THROWS instead of silently re-keying the node', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-corrupt-'));
+    const keyFile = join(dir, 'private-store.key');
+    const { store, cleanup } = makeFreshStore();
+    try {
+      // Pre-seed a truncated key file (e.g. partial write, FS corruption).
+      const fs = await import('node:fs');
+      fs.writeFileSync(keyFile, Buffer.from([0xab, 0xcd, 0xef])); // 3 bytes — too short
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      delete process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET;
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-corrupt');
+
+      // Pre-fix: this would have silently regenerated the key. Post-fix:
+      // the constructor (which calls into loadOrCreatePersistedKey) MUST
+      // throw with a corrupt-key error.
+      expect(() => new PrivateContentStore(store, gm)).toThrow(
+        /persistent private-store key file.*corrupt|length=3, expected >= 32/i,
+      );
+
+      // The corruption signal must NOT have been overwritten by an
+      // auto-regenerated key — operators rely on the file contents
+      // surviving as forensic evidence.
+      const onDisk = readFileSync(keyFile);
+      expect(onDisk.length).toBe(3);
+      expect(onDisk.equals(Buffer.from([0xab, 0xcd, 0xef]))).toBe(true);
+    } finally {
+      delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(dir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('r30-7: empty persisted key file (zero bytes — partial write before any data flushed) ALSO throws', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-empty-'));
+    const keyFile = join(dir, 'private-store.key');
+    const { store, cleanup } = makeFreshStore();
+    try {
+      const fs = await import('node:fs');
+      fs.writeFileSync(keyFile, Buffer.alloc(0));
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      delete process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET;
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-empty');
+
+      expect(() => new PrivateContentStore(store, gm)).toThrow(
+        /private-store key file.*corrupt|length=0/i,
+      );
+    } finally {
+      delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(dir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('r30-7: DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 lets the operator opt back into auto-regenerate after explicit acceptance', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-reset-'));
+    const keyFile = join(dir, 'private-store.key');
+    const { store, cleanup } = makeFreshStore();
+    try {
+      const fs = await import('node:fs');
+      fs.writeFileSync(keyFile, Buffer.from([0x01, 0x02])); // truncated
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET = '1';
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-reset');
+
+      // With the explicit opt-in env set, construction succeeds —
+      // a fresh 32-byte key has been generated and persisted.
+      const ps = new PrivateContentStore(store, gm);
+      await ps.storePrivateTriples('cg-reset', 'did:dkg:agent:R', [
+        { subject: 'did:dkg:agent:R', predicate: 'http://example.org/p', object: '"after-reset"', graph: '' },
+      ] as Quad[]);
+      const read = await ps.getPrivateTriples('cg-reset', 'did:dkg:agent:R');
+      expect(read).toHaveLength(1);
+      expect(read[0].object).toBe('"after-reset"');
+
+      // The file is now 32 bytes — the fresh key.
+      const onDisk = readFileSync(keyFile);
+      expect(onDisk.length).toBe(32);
+      // The original 2-byte content has been overwritten — that's the
+      // documented data-loss trade-off the env opt-in accepts.
+      expect(onDisk.subarray(0, 2).equals(Buffer.from([0x01, 0x02]))).toBe(false);
+    } finally {
+      delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+      delete process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET;
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(dir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('r30-7: a HEALTHY persisted key file is still loaded normally (no false positives on the corruption check)', async () => {
+    // Counterpoint: a 32-byte file (or a 33-byte file — the helper
+    // takes the first 32 bytes) must continue to load without
+    // throwing. This pins the normal happy-path against the new
+    // corruption check.
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-healthy-'));
+    const keyFile = join(dir, 'private-store.key');
+    const { store, cleanup } = makeFreshStore();
+    try {
+      const fs = await import('node:fs');
+      const healthyKey = Buffer.alloc(32, 0x42);
+      fs.writeFileSync(keyFile, healthyKey);
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      delete process.env.DKG_PRIVATE_STORE_KEY_AUTO_RESET;
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-healthy');
+
+      const ps = new PrivateContentStore(store, gm);
+      await ps.storePrivateTriples('cg-healthy', 'did:dkg:agent:H', [
+        { subject: 'did:dkg:agent:H', predicate: 'http://example.org/p', object: '"healthy-data"', graph: '' },
+      ] as Quad[]);
+      const read = await ps.getPrivateTriples('cg-healthy', 'did:dkg:agent:H');
+      expect(read).toHaveLength(1);
+      expect(read[0].object).toBe('"healthy-data"');
+
+      // Original key bytes preserved — no spurious rewrite.
+      expect(readFileSync(keyFile).equals(healthyKey)).toBe(true);
+    } finally {
+      delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(dir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
 });
 
 // -------------------------------------------------------------------------

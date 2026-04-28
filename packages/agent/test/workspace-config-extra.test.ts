@@ -35,9 +35,21 @@ const EXTRACTION_POLICIES = new Set([
   'semantic-required',
 ]);
 
+interface WorkspaceConfigNode {
+  api: string;
+  tokenFile?: string;
+  token?: string;
+}
+
 interface WorkspaceConfig {
   contextGraph: string;
-  node: string;
+  // r31-6 (PR #229 bot review — workspace-config.ts:55): the schema now
+  // normalises `node:` to a structured object (`{api, tokenFile?,
+  // token?}`). The bare-string form is still accepted as input (and is
+  // normalised to `{api: <string>}`) so existing configs keep working,
+  // but every consumer must treat `cfg.node` as an object on the way
+  // out. Match the production type exactly so this suite catches drift.
+  node: WorkspaceConfigNode;
   autoShare: boolean;
   extractionPolicy: string;
 }
@@ -71,7 +83,8 @@ describe('A-13: workspace config schema (.dkg/config.yaml)', () => {
     const cfg = parseWorkspaceConfig(yaml.load(src));
     expect(cfg).toEqual({
       contextGraph: 'my-project',
-      node: 'http://127.0.0.1:9201',
+      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      node: { api: 'http://127.0.0.1:9201' },
       autoShare: true,
       extractionPolicy: 'structural-plus-semantic',
     });
@@ -134,7 +147,8 @@ describe('A-13: alternative config locations', () => {
     const cfg = parseWorkspaceConfig(raw);
     expect(cfg).toEqual({
       contextGraph: 'p',
-      node: 'http://n',
+      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      node: { api: 'http://n' },
       autoShare: false,
       extractionPolicy: 'structural-only',
     });
@@ -155,7 +169,8 @@ describe('A-13: alternative config locations', () => {
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('my-project');
-    expect(cfg.node).toBe('http://127.0.0.1:9201');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(cfg.autoShare).toBe(true);
   });
 
@@ -194,7 +209,8 @@ describe('A-13: alternative config locations', () => {
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('fence-only');
-    expect(cfg.node).toBe('http://127.0.0.1:9201');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(cfg.autoShare).toBe(false);
   });
 
@@ -486,7 +502,42 @@ describe('A-13: file-system priority resolution', () => {
     const r = loadWorkspaceConfig(dir);
     expect(r.source.endsWith('AGENTS.md')).toBe(true);
     expect(r.cfg.contextGraph).toBe('fence-only-via-load');
-    expect(r.cfg.node).toBe('http://127.0.0.1:9201');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(r.cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r31-6, workspace-config.ts:55). The pre-fix
+  // schema rejected the canonical `.dkg/config.yaml` shape (`node:` as
+  // an object with `api`/`tokenFile`/...) — exactly the shape that
+  // `mcp-dkg/config.yaml.example` ships and `mcp-dkg/src/config.ts`
+  // reads. Pin: the loader MUST round-trip the canonical file end-to-
+  // end, preserving `tokenFile` so downstream code can resolve auth.
+  // ───────────────────────────────────────────────────────────────────
+  it('r31-6: loadWorkspaceConfig accepts the canonical `.dkg/config.yaml` shape (object node:)', async () => {
+    const { loadWorkspaceConfig } = await import('../src/workspace-config.js');
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ws-r316-'));
+    mkdirSync(join(dir, '.dkg'));
+    writeFileSync(
+      join(dir, '.dkg', 'config.yaml'),
+      [
+        'contextGraph: dkg-code-project',
+        'autoShare: true',
+        '',
+        'node:',
+        '  api: http://localhost:9200',
+        '  tokenFile: ../.devnet/node1/auth.token',
+        '',
+      ].join('\n'),
+    );
+    const r = loadWorkspaceConfig(dir);
+    expect(r.source.endsWith('config.yaml')).toBe(true);
+    expect(r.cfg.contextGraph).toBe('dkg-code-project');
+    expect(r.cfg.node).toEqual({
+      api: 'http://localhost:9200',
+      tokenFile: '../.devnet/node1/auth.token',
+    });
+    expect(r.cfg.autoShare).toBe(true);
   });
 });
 

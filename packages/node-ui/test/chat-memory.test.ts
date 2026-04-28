@@ -529,6 +529,211 @@ describe('ChatMemoryManager', () => {
     ]);
   });
 
+  // -----------------------------------------------------------------------
+  // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+  //
+  // INVERSION CASE for the r31-5 dedupe. When the user-turn write embeds
+  // a PROVISIONAL assistant text (e.g. partial-streaming completion the
+  // host parked on `state.lastAssistantReply` before the final reply
+  // landed) and the later `onAssistantReply` brings DIFFERENT final
+  // text, the writer routes the second write to the headless URI AND
+  // tags it `dkg:supersedesCanonicalAssistant "true"`. The reader must
+  // INVERT its canonical-wins dedupe for that turn key only — drop the
+  // canonical (stale provisional) and surface the headless (fresh
+  // final). Without this inversion chat history would freeze the
+  // provisional text forever.
+  // -----------------------------------------------------------------------
+  it('[r31-6] getSession PREFERS the headless assistant message when it is marked dkg:supersedesCanonicalAssistant "true" (inverts the r31-5 canonical-wins dedupe for that turn key only)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          // Real user message (canonical user-first turn).
+          {
+            m: 'urn:dkg:chat:msg:user:K-sup',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hello"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-sup"',
+          },
+          // Canonical assistant message (PROVISIONAL — written by the
+          // user-turn path with the host's parked `state.lastAssistantReply`).
+          {
+            m: 'urn:dkg:chat:msg:agent:K-sup',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Loading…"',
+            ts: '"2026-01-01T12:00:00.500Z"',
+            turnId: '"K-sup"',
+          },
+          // Headless assistant message (FRESH FINAL — written by the
+          // assistant-reply path with the supersede flag because the
+          // wrapper detected the provisional/final mismatch).
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-sup',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Hello! How can I help?"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"headless:K-sup"',
+            headlessAssistantFlag: '"true"',
+            supersedesCanonicalFlag: '"true"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-6-supersede');
+    expect(session).not.toBeNull();
+    // The headless message MUST surface (it carries the fresh final
+    // reply) and the canonical PROVISIONAL message MUST be dropped.
+    // Pre-fix the canonical would have won and chat history would
+    // have shown "Loading…" forever.
+    const uris = session!.messages.map((m) => m.uri);
+    expect(uris).toEqual([
+      'urn:dkg:chat:msg:user:K-sup',
+      'urn:dkg:chat:msg:agent-headless:K-sup',
+    ]);
+    expect(uris).not.toContain('urn:dkg:chat:msg:agent:K-sup');
+    // Verify the surfaced text is the FRESH final one.
+    const agentMsg = session!.messages.find((m) => m.author === 'agent')!;
+    expect(agentMsg.text).toBe('Hello! How can I help?');
+    // Public message shape MUST NOT leak the internal
+    // `supersedesCanonicalAssistant` discriminator.
+    for (const m of session!.messages) {
+      expect((m as any).supersedesCanonicalAssistant).toBeUndefined();
+    }
+  });
+
+  it('[r31-6] supersede inversion is SCOPED to the matching canonical turn key — a non-superseding headless on a different key does NOT cause unrelated canonical drops', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          // Group A: canonical user + canonical agent (NORMAL flow,
+          // no supersede). Both must surface.
+          {
+            m: 'urn:dkg:chat:msg:user:A',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi A"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"A"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent:A',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"reply A"',
+            ts: '"2026-01-01T12:00:00.500Z"',
+            turnId: '"A"',
+          },
+          // Group B: canonical (provisional) + headless (superseding).
+          // Headless must win.
+          {
+            m: 'urn:dkg:chat:msg:user:B',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi B"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"B"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent:B',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"provisional B"',
+            ts: '"2026-01-01T12:00:01.500Z"',
+            turnId: '"B"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:B',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"final B"',
+            ts: '"2026-01-01T12:00:02Z"',
+            turnId: '"headless:B"',
+            headlessAssistantFlag: '"true"',
+            supersedesCanonicalFlag: '"true"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-6-cross-key-scope');
+    expect(session).not.toBeNull();
+    const uris = session!.messages.map((m) => m.uri);
+    // Group A canonical is UNAFFECTED by group B's supersede.
+    expect(uris).toContain('urn:dkg:chat:msg:user:A');
+    expect(uris).toContain('urn:dkg:chat:msg:agent:A');
+    // Group B canonical agent is dropped; user stays; headless wins.
+    expect(uris).toContain('urn:dkg:chat:msg:user:B');
+    expect(uris).not.toContain('urn:dkg:chat:msg:agent:B');
+    expect(uris).toContain('urn:dkg:chat:msg:agent-headless:B');
+  });
+
+  it('[r31-6] supersede inversion is restricted to ASSISTANT messages — a superseding headless does NOT drop unrelated USER messages on the same turn key (defence-in-depth)', async () => {
+    // The dedupe inverts only on the agent-author message. A canonical
+    // USER message under the same turn key (the matching user-first
+    // turn) MUST stay — otherwise the chat history would lose its
+    // user turn and the conversation would render as agent-only.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K-u',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-u"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent:K-u',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"provisional"',
+            ts: '"2026-01-01T12:00:00.500Z"',
+            turnId: '"K-u"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-u',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"final"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"headless:K-u"',
+            headlessAssistantFlag: '"true"',
+            supersedesCanonicalFlag: '"true"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-6-user-preserved');
+    expect(session).not.toBeNull();
+    const uris = session!.messages.map((m) => m.uri);
+    // User MUST stay (the supersede is agent-scoped only).
+    expect(uris).toContain('urn:dkg:chat:msg:user:K-u');
+    // Canonical agent dropped, headless agent stays.
+    expect(uris).not.toContain('urn:dkg:chat:msg:agent:K-u');
+    expect(uris).toContain('urn:dkg:chat:msg:agent-headless:K-u');
+  });
+
+  it('[r31-6] getSession SPARQL query fetches the dkg:supersedesCanonicalAssistant marker (anti-drift guard for the inversion pass)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:Q',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"Q"',
+          },
+        ],
+      },
+    );
+    await manager.getSession('test-session-r31-6-shape');
+    const queryText = String(mockQuery.calls[1][0]);
+    // Without `?supersedesCanonicalFlag` in the SELECT projection AND
+    // the OPTIONAL pattern, the inversion pass cannot identify
+    // superseding headless messages — the bug would regress to
+    // canonical-wins-always and chat history would freeze on stale
+    // provisional text.
+    expect(queryText).toContain('?supersedesCanonicalFlag');
+    expect(queryText).toMatch(/supersedesCanonicalAssistant>\s+\?supersedesCanonicalFlag/);
+  });
+
   it('getSession returns null when session has no messages', async () => {
     mockQuery.returns.push(
       { bindings: [] },

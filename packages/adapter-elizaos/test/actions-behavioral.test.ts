@@ -1700,6 +1700,151 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-5): headless assistant m
   });
 });
 
+// ===========================================================================
+// PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+//
+// The wrapper sets `assistantSupersedesCanonical: true` on the
+// `persistChatTurnImpl` options bag when the user-turn cache holds a
+// PROVISIONAL assistant text and the follow-up `onAssistantReply` brings
+// DIFFERENT final text. The impl must:
+//   1. Take the headless branch (because the wrapper also flips
+//      `userTurnPersisted` to `false`).
+//   2. Emit `dkg:supersedesCanonicalAssistant "true"` on the headless
+//      assistant message URI so the reader's r31-5 dedupe inverts its
+//      canonical-wins preference for that turn key only.
+//
+// These tests pin that contract at the writer layer.
+// ===========================================================================
+describe('persistChatTurnImpl — PR #229 round 31 (r31-6): supersede-canonical-assistant marker on the headless write', () => {
+  it('headless write with assistantSupersedesCanonical=true tags the message dkg:supersedesCanonicalAssistant "true"', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('final reply', { id: 'asst-r31-6-supersede', roomId: 'r' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'parent-r31-6-supersede',
+        userTurnPersisted: false,
+        assistantSupersedesCanonical: true,
+      } as any,
+    );
+    const quads = publishes[0].quads;
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-6-supersede';
+    const supersedeQuads = quads.filter((q) =>
+      q.subject === asstUri
+      && q.predicate === `${DKG_ONT}supersedesCanonicalAssistant`,
+    );
+    expect(supersedeQuads).toHaveLength(1);
+    expect(supersedeQuads[0].object).toBe('"true"');
+    // Cross-cut: the standard r31-5 headless marker must ALSO be
+    // present (the headless path is unchanged; r31-6 just adds an
+    // additional opt-in marker).
+    const headlessMarker = quads.filter((q) =>
+      q.subject === asstUri
+      && q.predicate === `${DKG_ONT}headlessAssistantMessage`,
+    );
+    expect(headlessMarker).toHaveLength(1);
+  });
+
+  it('headless write WITHOUT assistantSupersedesCanonical (default proactive/recovery path) does NOT carry the supersedesCanonicalAssistant marker', async () => {
+    // Anti-drift control: the marker is OPT-IN. Standard headless
+    // writes (no canonical to override) must NOT carry it, otherwise
+    // the reader would drop legitimate canonical writes on unrelated
+    // turn keys that happen to share a turnKey suffix with the
+    // headless one.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('headless reply', { id: 'asst-r31-6-pure-headless', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-6-pure-headless', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-6-pure-headless';
+    expect(quads.some((q) =>
+      q.subject === asstUri
+      && q.predicate === `${DKG_ONT}supersedesCanonicalAssistant`,
+    )).toBe(false);
+  });
+
+  it('canonical (user-first) assistant write does NOT carry the supersedesCanonicalAssistant marker (the marker is exclusive to the headless override path)', async () => {
+    // Anti-drift control: canonical writes never claim to supersede
+    // anything (they ARE the canonical). The reader-side dedupe
+    // would otherwise misinterpret a canonical write as superseding
+    // a same-key headless that came in earlier.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'user-r31-6-canonical', roomId: 'r' } as any),
+      {} as State,
+      // assistantSupersedesCanonical is ignored in user-turn mode —
+      // the impl only emits the marker on the headless branch (the
+      // option is structurally meaningless for canonical writes
+      // because they're the BASE, not the override).
+      { assistantText: 'reply', assistantSupersedesCanonical: true } as any,
+    );
+    const quads = publishes[0].quads;
+    const canonicalAsstUri = 'urn:dkg:chat:msg:agent:r:user-r31-6-canonical';
+    expect(quads.some((q) =>
+      q.subject === canonicalAsstUri
+      && q.predicate === `${DKG_ONT}supersedesCanonicalAssistant`,
+    )).toBe(false);
+  });
+});
+
+// ===========================================================================
+// PR #229 bot review (r31-6 — adapter-elizaos/src/actions.ts:941).
+//
+// `persistChatTurnImpl` must honour `optsAny.userMessageId` on BOTH the
+// `assistant-reply` AND the `user-turn` paths. Pre-fix the user-turn
+// path silently dropped the pre-minted id and keyed `turnSourceId` off
+// `message.id`, while `onChatTurnHandler` cached the persisted-turn
+// marker under `optsAny.userMessageId ?? message.id`. The cache key
+// then disagreed with the on-disk turn URI — the matching
+// `onAssistantReply` reported a cache hit but wrote `hasAssistantMessage`
+// onto a turn URI that didn't exist.
+// ===========================================================================
+describe('persistChatTurnImpl — PR #229 round 31 (r31-6): user-turn path honours optsAny.userMessageId for turnSourceId', () => {
+  it('user-turn write with explicit userMessageId mints the canonical user URI under userMessageId (NOT message.id)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    // message.id is DELIBERATELY different from userMessageId — this
+    // is the pre-mint pattern (multi-step pipelines that allocate the
+    // turn key before the message lands in ElizaOS memory).
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hello', { id: 'mem-id-DIFFERENT', roomId: 'r' } as any),
+      {} as State,
+      { userMessageId: 'pre-minted-r31-6' } as any,
+    );
+    const quads = publishes[0].quads;
+    // The canonical user URI MUST be keyed by the pre-minted id, NOT
+    // by the message.id (which would be 'mem-id-DIFFERENT'). This is
+    // the cache-key alignment the bot review demanded.
+    const expectedUserUri = 'urn:dkg:chat:msg:user:r:pre-minted-r31-6';
+    const wrongUserUri = 'urn:dkg:chat:msg:user:r:mem-id-DIFFERENT';
+    expect(quads.some((q) => q.subject === expectedUserUri)).toBe(true);
+    expect(quads.some((q) => q.subject === wrongUserUri)).toBe(false);
+  });
+
+  it('user-turn write WITHOUT explicit userMessageId falls back to message.id for turnSourceId (no fabrication, no behaviour change for the standard hook caller)', async () => {
+    // Anti-drift: the fallback chain must remain intact for callers
+    // that don't pre-mint. Pre-fix this WAS the only branch the
+    // user-turn path knew about; r31-6 just added the explicit-id
+    // shortcut without changing the fallback.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hello', { id: 'mem-only-r31-6', roomId: 'r' } as any),
+      {} as State,
+      {} as any,
+    );
+    const quads = publishes[0].quads;
+    const expectedUserUri = 'urn:dkg:chat:msg:user:r:mem-only-r31-6';
+    expect(quads.some((q) => q.subject === expectedUserUri)).toBe(true);
+  });
+});
+
 describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required fields', () => {
   // -------------------------------------------------------------------
   // r13-3: the public `Memory` type previously exposed only

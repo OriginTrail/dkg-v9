@@ -524,6 +524,59 @@ async function onAssistantReplyHandler(
         || '';
       if (incomingReplyText === cachedAssistantText) {
         opts.assistantAlreadyPersisted = true;
+      } else if (incomingReplyText.length > 0) {
+        // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+        //
+        // The cached text disagrees with the incoming reply. Pre-fix the
+        // r31-5 branch above set `assistantAlreadyPersisted` only on a
+        // match and otherwise fell through to
+        // `_dkgServiceLoose.persistChatTurn(...)` with
+        // `userTurnPersisted: true` still in place. The impl then took
+        // the append-only branch and stamped a SECOND
+        // `schema:text` / `schema:dateCreated` / `schema:author`
+        // triple onto the same `msg:agent:${turnKey}` subject the
+        // earlier user-turn write had already populated. The reader
+        // (`ChatMemoryManager.getSession()`) reads those predicates
+        // directly with no `ORDER BY` discipline, so chat history
+        // observed nondeterministic text rather than converging on the
+        // final reply (the bot finding's exact failure mode).
+        //
+        // The contract we want is: the FINAL reply wins. We can't
+        // overwrite the canonical RDF (assertions are append-only), but
+        // we CAN route the conflicting write to a DISTINCT URI — the
+        // headless `msg:agent-headless:${turnKey}` subject — and tag it
+        // `dkg:supersedesCanonicalAssistant "true"`. The reader's r31-5
+        // dedupe (`chat-memory.ts:getSession()`) inverts its
+        // canonical-wins preference for that marker so the headless
+        // (fresh) variant surfaces and the canonical (stale
+        // provisional) is filtered out — bot finding's "version /
+        // replace" remediation, modelled in the graph rather than in
+        // SPARQL DELETE/INSERT.
+        //
+        // Empty-incoming guard: if the second hook fires with no text
+        // (`message.content?.text === ''`) we deliberately do NOT
+        // supersede — the existing canonical reply is at least
+        // SOMETHING the user can read; replacing it with an empty
+        // headless message would be strictly worse. Keep the canonical
+        // and treat the empty payload as a noisy retry.
+        //
+        // We do NOT pre-emptively update `markAssistantPersisted` here
+        // — the existing post-write cache update later in this handler
+        // (~line 691) is the single source of truth for "this text is
+        // now on disk". Updating the cache before
+        // `_dkgServiceLoose.persistChatTurn` returned would corrupt
+        // the idempotence contract on a write failure (a follow-up
+        // retry would short-circuit on a stale cache match while the
+        // RDF still held the provisional text). The post-write update
+        // intentionally reads `optsAny.assistantText` /
+        // `state.lastAssistantReply`, so callers that put the
+        // superseding text ONLY on `message.content.text` won't
+        // re-cache — but that's fine: the next retry would fail the
+        // text-match check against the OLD cached text again and
+        // re-supersede, which is harmless (per-quad idempotence inside
+        // the impl ensures no duplicate triples land).
+        opts.userTurnPersisted = false;
+        opts.assistantSupersedesCanonical = true;
       }
     }
   }

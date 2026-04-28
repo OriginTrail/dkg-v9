@@ -95,7 +95,7 @@ describe('op-wallets — loadOpWallets + generateWallets', () => {
 });
 
 describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => {
-  it('requires contextGraph (string, non-empty) and node (string, non-empty)', () => {
+  it('requires contextGraph (string, non-empty) and node (string-or-{api}, non-empty)', () => {
     expect(() => parseWorkspaceConfig(null)).toThrow(/root must be an object/);
     expect(() => parseWorkspaceConfig('string')).toThrow(/root must be an object/);
     expect(() => parseWorkspaceConfig({ node: 'n' })).toThrow(/`contextGraph` is required/);
@@ -109,6 +109,68 @@ describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => 
     const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'n' });
     expect(out.autoShare).toBe(true);
     expect(out.extractionPolicy).toBe('structural-plus-semantic');
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r31-6, workspace-config.ts:55). The pre-fix
+  // schema required `node:` to be a bare STRING, but the canonical
+  // `.dkg/config.yaml` shape (see `packages/mcp-dkg/config.yaml.example`
+  // and `packages/mcp-dkg/src/config.ts`) declares `node:` as an OBJECT
+  // with `api`, `tokenFile`, etc. As a result `loadWorkspaceConfig()`
+  // threw on every real workspace config and the loader was unusable.
+  //
+  // Pin: BOTH shapes parse, the legacy bare-string form is normalised
+  // to `{api: <string>}` (so consumers can read `cfg.node.api` without
+  // branching), and the canonical object form preserves `tokenFile` /
+  // `token` so downstream code can read them.
+  // ───────────────────────────────────────────────────────────────────
+  it('r31-6: normalises bare-string `node` form to `{ api: <string> }`', () => {
+    const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'http://127.0.0.1:9201' });
+    expect(out.node).toEqual({ api: 'http://127.0.0.1:9201' });
+  });
+
+  it('r31-6: accepts canonical object `node:` shape with `api` + `tokenFile`', () => {
+    const out = parseWorkspaceConfig({
+      contextGraph: 'dkg-code-project',
+      node: {
+        api: 'http://localhost:9200',
+        tokenFile: '../.devnet/node1/auth.token',
+      },
+    });
+    expect(out.node).toEqual({
+      api: 'http://localhost:9200',
+      tokenFile: '../.devnet/node1/auth.token',
+    });
+  });
+
+  it('r31-6: preserves explicit `token` literal on object `node:` shape', () => {
+    const out = parseWorkspaceConfig({
+      contextGraph: 'cg',
+      node: { api: 'http://n', token: 'literal-token' },
+    });
+    expect(out.node).toEqual({ api: 'http://n', token: 'literal-token' });
+  });
+
+  it('r31-6: rejects object `node:` missing `api`', () => {
+    expect(() => parseWorkspaceConfig({
+      contextGraph: 'cg',
+      node: { tokenFile: '../auth.token' },
+    })).toThrow(/`node\.api` is required/);
+  });
+
+  it('r31-6: rejects object `node:` with empty `api`', () => {
+    expect(() => parseWorkspaceConfig({
+      contextGraph: 'cg',
+      node: { api: '' },
+    })).toThrow(/`node\.api` is required/);
+  });
+
+  it('r31-6: drops empty `tokenFile` / `token` strings from the normalised object (no spurious keys)', () => {
+    const out = parseWorkspaceConfig({
+      contextGraph: 'cg',
+      node: { api: 'http://n', tokenFile: '', token: '' },
+    });
+    expect(out.node).toEqual({ api: 'http://n' });
   });
 
   it('rejects non-boolean autoShare', () => {
@@ -150,7 +212,9 @@ dkg:
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg).toEqual({
       contextGraph: 'my-graph',
-      node: 'node-a',
+      // r31-6: bare-string `node:` is normalised to `{ api: <string> }` so
+      // every consumer can read `cfg.node.api` without branching.
+      node: { api: 'node-a' },
       autoShare: true,
       extractionPolicy: 'structural-plus-semantic',
     });
@@ -209,7 +273,8 @@ body
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('from-fence');
-    expect(cfg.node).toBe('n');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(cfg.node).toEqual({ api: 'n' });
   });
 
   // -------------------------------------------------------------------
@@ -239,7 +304,8 @@ body
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg).toEqual({
       contextGraph: 'my-graph',
-      node: 'http://127.0.0.1:9201',
+      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      node: { api: 'http://127.0.0.1:9201' },
       autoShare: false,
       extractionPolicy: 'structural-only',
     });
@@ -265,7 +331,8 @@ body
       '{ "contextGraph": "g", "node": "n" }',
       '```',
     ].join('\n');
-    expect(parseAgentsMdFrontmatter(md).node).toBe('n');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(parseAgentsMdFrontmatter(md).node).toEqual({ api: 'n' });
   });
 
   it('r21-4: frontmatter takes priority over a fenced block when both are present', () => {
@@ -392,7 +459,45 @@ describe('workspace-config — loadWorkspaceConfig priority order (spec §22)', 
     ].join('\n'));
     const loaded = loadWorkspaceConfig(dir);
     expect(loaded.cfg.contextGraph).toBe('plain-md-graph');
-    expect(loaded.cfg.node).toBe('http://127.0.0.1:9201');
+    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    expect(loaded.cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(loaded.source.endsWith('AGENTS.md')).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r31-6, workspace-config.ts:55). End-to-end pin
+  // for the canonical `.dkg/config.yaml` shape (the actual file
+  // `mcp-dkg/config.yaml.example` ships): `node:` is an OBJECT, not a
+  // bare string. Pre-r31-6 `loadWorkspaceConfig()` threw on this shape
+  // and the loader was unusable. This regression locks the loader's
+  // ability to round-trip the canonical file without any error.
+  // ───────────────────────────────────────────────────────────────────
+  it('r31-6: loads the canonical `.dkg/config.yaml` shape (node-as-object) without throwing', () => {
+    mkdirSync(join(dir, '.dkg'));
+    writeFileSync(join(dir, '.dkg', 'config.yaml'), [
+      'contextGraph: dkg-code-project',
+      'autoShare: true',
+      '',
+      'node:',
+      '  api: http://localhost:9200',
+      '  tokenFile: ../.devnet/node1/auth.token',
+      '',
+      'agent:',
+      '  uri: urn:dkg:agent:cursor-bot',
+      '',
+      'capture:',
+      '  subGraph: chat',
+      '  assertion: chat-log',
+      '  privacy: team',
+      '  tool: cursor',
+      '',
+    ].join('\n'));
+    const loaded = loadWorkspaceConfig(dir);
+    expect(loaded.cfg.contextGraph).toBe('dkg-code-project');
+    expect(loaded.cfg.node).toEqual({
+      api: 'http://localhost:9200',
+      tokenFile: '../.devnet/node1/auth.token',
+    });
+    expect(loaded.cfg.autoShare).toBe(true);
   });
 });

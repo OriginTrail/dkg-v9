@@ -26,9 +26,33 @@ const EXTRACTION_POLICIES = new Set([
 
 export type ExtractionPolicy = 'structural-only' | 'structural-plus-semantic' | 'semantic-required';
 
+/**
+ * Normalised shape of the `node:` field in a workspace config.
+ *
+ * The canonical `.dkg/config.yaml` (see `packages/mcp-dkg/config.yaml.example`
+ * and `packages/mcp-dkg/src/config.ts`) declares `node` as an OBJECT with
+ * `api`, `tokenFile`, and friends — that's what every running daemon and the
+ * existing capture-chat hook already consume. The earlier draft of this
+ * loader (PR #229) accepted ONLY a bare-string `node:` field, which made
+ * `loadWorkspaceConfig()` throw on every real workspace config it
+ * encountered (PR #229 bot review r31-6, workspace-config.ts:55).
+ *
+ * We now accept BOTH shapes and always return the structured form so
+ * downstream callers can read `cfg.node.api` / `cfg.node.tokenFile` without
+ * branching:
+ *
+ *   - `node: "http://127.0.0.1:9201"`  → `{ api: "http://127.0.0.1:9201" }`
+ *   - `node: { api: "...", tokenFile: "..." }` → preserved verbatim
+ */
+export interface WorkspaceConfigNode {
+  api: string;
+  tokenFile?: string;
+  token?: string;
+}
+
 export interface WorkspaceConfig {
   contextGraph: string;
-  node: string;
+  node: WorkspaceConfigNode;
   autoShare: boolean;
   extractionPolicy: ExtractionPolicy;
 }
@@ -41,6 +65,14 @@ export interface LoadedWorkspaceConfig {
 /**
  * Validate a raw parsed config object and apply defaults. Throws with a
  * descriptive error if the schema is violated.
+ *
+ * PR #229 bot review (r31-6, workspace-config.ts:55): the spec section §22
+ * pinned `node:` as a bare string, but the canonical
+ * `.dkg/config.yaml` shape that the rest of the toolchain (mcp-dkg loader,
+ * capture-chat hook, README example) consumes uses an OBJECT here — so the
+ * old strict-string check threw on every real workspace config and the
+ * loader was unusable in practice. Accept both forms; normalise to the
+ * structured `WorkspaceConfigNode` shape so consumers don't have to branch.
  */
 export function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
   if (raw == null || typeof raw !== 'object') {
@@ -48,13 +80,10 @@ export function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
   }
   const obj = raw as Record<string, unknown>;
   const contextGraph = obj.contextGraph;
-  const node = obj.node;
   if (typeof contextGraph !== 'string' || contextGraph.length === 0) {
     throw new Error('workspace config: `contextGraph` is required (string)');
   }
-  if (typeof node !== 'string' || node.length === 0) {
-    throw new Error('workspace config: `node` is required (string)');
-  }
+  const node = parseNodeField(obj.node);
   const autoShare = obj.autoShare ?? true;
   if (typeof autoShare !== 'boolean') {
     throw new Error('workspace config: `autoShare` must be boolean');
@@ -71,6 +100,45 @@ export function parseWorkspaceConfig(raw: unknown): WorkspaceConfig {
     autoShare,
     extractionPolicy: extractionPolicy as ExtractionPolicy,
   };
+}
+
+/**
+ * Coerce the user-supplied `node:` field into the normalised
+ * `WorkspaceConfigNode` shape. Accepts:
+ *   - a bare API-URL string  (legacy spec §22 form)
+ *   - an object with `api` + optional `tokenFile` / `token`  (canonical
+ *     `.dkg/config.yaml` form used by mcp-dkg)
+ *
+ * Anything else (numbers, booleans, missing field, empty string, missing
+ * `api` on an object) is rejected with a descriptive message so misshapen
+ * configs surface a real error rather than silently becoming `undefined`
+ * downstream.
+ */
+function parseNodeField(node: unknown): WorkspaceConfigNode {
+  if (typeof node === 'string') {
+    if (node.length === 0) {
+      throw new Error('workspace config: `node` is required (string or {api})');
+    }
+    return { api: node };
+  }
+  if (node && typeof node === 'object') {
+    const n = node as Record<string, unknown>;
+    const api = n.api;
+    if (typeof api !== 'string' || api.length === 0) {
+      throw new Error(
+        'workspace config: `node.api` is required when `node` is an object',
+      );
+    }
+    const out: WorkspaceConfigNode = { api };
+    if (typeof n.tokenFile === 'string' && n.tokenFile.length > 0) {
+      out.tokenFile = n.tokenFile;
+    }
+    if (typeof n.token === 'string' && n.token.length > 0) {
+      out.token = n.token;
+    }
+    return out;
+  }
+  throw new Error('workspace config: `node` is required (string or {api})');
 }
 
 // PR #229 bot review r3131820489 (workspace-config.ts:76):

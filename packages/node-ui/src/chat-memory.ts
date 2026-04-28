@@ -859,7 +859,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason ?headlessAssistantFlag WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason ?headlessAssistantFlag ?supersedesCanonicalFlag WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -867,6 +867,7 @@ export class ChatMemoryManager {
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
           OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL { ?m <${DKG_ONT}headlessAssistantMessage> ?headlessAssistantFlag }
+          OPTIONAL { ?m <${DKG_ONT}supersedesCanonicalAssistant> ?supersedesCanonicalFlag }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
@@ -889,10 +890,12 @@ export class ChatMemoryManager {
         persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped' | undefined;
         failureReason: string | undefined;
         isHeadlessAssistant: boolean;
+        supersedesCanonicalAssistant: boolean;
       };
       const rawMessages: RawMessage[] = bindings.map((mb: any): RawMessage => {
         const turnIdLiteral = stripRdfLiteral(mb.turnId ?? '') || undefined;
         const headlessFlag = stripRdfLiteral(mb.headlessAssistantFlag ?? '').trim();
+        const supersedesFlag = stripRdfLiteral(mb.supersedesCanonicalFlag ?? '').trim();
         return {
           uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
@@ -918,6 +921,15 @@ export class ChatMemoryManager {
           // the proactive/recovery headless reply path, not the
           // canonical user-first turn).
           isHeadlessAssistant: headlessFlag === 'true',
+          // r31-6 (PR #229 bot review — adapter-elizaos/src/index.ts:521):
+          // used ONLY by the dedupe pass below, then stripped from the
+          // public shape. `true` iff the writer tagged the message
+          // `dkg:supersedesCanonicalAssistant "true"` — set on a
+          // headless assistant write that the wrapper specifically
+          // routed to the headless URI to OVERRIDE a stale provisional
+          // canonical reply. Inverts the default canonical-wins
+          // dedupe for that specific turn key only.
+          supersedesCanonicalAssistant: supersedesFlag === 'true',
         };
       });
       // PR #229 bot review (r31-5 — actions.ts:1173): when both a
@@ -933,6 +945,17 @@ export class ChatMemoryManager {
       // replies that have NO canonical counterpart (the standard
       // proactive-agent / recovery case) are kept untouched — dedupe
       // activates only when both variants are present.
+      //
+      // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521):
+      // INVERSION CASE. When the headless variant is marked
+      // `dkg:supersedesCanonicalAssistant "true"`, the writer is
+      // explicitly telling the reader the headless message is the
+      // FRESH final reply that supersedes a stale PROVISIONAL
+      // canonical write (e.g. partial-streaming completion the host
+      // parked on `assistantText` before the real reply landed). Drop
+      // the canonical and surface the headless. Canonical-wins
+      // remains the default for every other case (so the r31-5
+      // duplicate-headless contract still holds).
       const HEADLESS_PREFIX = 'headless:';
       const canonicalTurnKey = (turnId: string | undefined): string | null => {
         if (!turnId) return null;
@@ -941,19 +964,37 @@ export class ChatMemoryManager {
           : turnId;
       };
       const groupHasNonHeadless = new Map<string, boolean>();
+      const groupHasSupersedingHeadless = new Map<string, boolean>();
       for (const m of rawMessages) {
         const key = canonicalTurnKey(m.turnId);
         if (key === null) continue;
         if (!m.isHeadlessAssistant) groupHasNonHeadless.set(key, true);
+        if (m.isHeadlessAssistant && m.supersedesCanonicalAssistant) {
+          groupHasSupersedingHeadless.set(key, true);
+        }
       }
       const dedupedMessages = rawMessages
         .filter((m) => {
-          if (!m.isHeadlessAssistant) return true;
           const key = canonicalTurnKey(m.turnId);
           if (key === null) return true;
-          return !groupHasNonHeadless.get(key);
+          // Inversion (r31-6): headless supersedes canonical for this
+          // assistant turn key — drop the canonical assistant
+          // message (`schema:author` includes "agent"). Non-assistant
+          // messages and unrelated keys are unaffected.
+          if (
+            !m.isHeadlessAssistant
+            && m.author === 'agent'
+            && groupHasSupersedingHeadless.get(key)
+          ) {
+            return false;
+          }
+          if (!m.isHeadlessAssistant) return true;
+          // Default (r31-5): when a non-headless message exists in
+          // the group AND no headless-supersedes marker is present,
+          // drop the duplicate headless variant.
+          return !groupHasNonHeadless.get(key) || groupHasSupersedingHeadless.get(key) === true;
         })
-        .map(({ isHeadlessAssistant: _ignored, ...publicShape }) => publicShape);
+        .map(({ isHeadlessAssistant: _ignored, supersedesCanonicalAssistant: _ignoredS, ...publicShape }) => publicShape);
       return {
         session: sessionId,
         messages: dedupedMessages,

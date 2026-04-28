@@ -938,7 +938,30 @@ export async function persistChatTurnImpl(
   // neither is present so the adapter boundary surfaces the missing
   // upstream contract instead of silently corrupting the chat graph.
   const rawMemoryId = (message as any)?.id;
-  const explicitUserMessageId = mode === 'assistant-reply' ? optsAny.userMessageId : undefined;
+  // PR #229 bot review (r31-6, adapter-elizaos/src/index.ts:596).
+  //
+  // Pre-fix this only honoured `optsAny.userMessageId` on the
+  // `assistant-reply` path. The user-turn path silently dropped any
+  // pre-minted id and keyed `turnSourceId` off `message.id`. The
+  // wrapper (`onChatTurnHandler`) however cached the persisted-turn
+  // marker under `optsAny.userMessageId ?? message.id` (r29-2),
+  // explicitly to support hosts that pre-mint a user-turn id. The
+  // result was a SILENT key mismatch: when a host did pre-mint
+  // `userMessageId`, the cache said the turn existed under
+  // `userMessageId` but the RDF was written under `message.id`, so
+  // the matching `onAssistantReply` looked up the cache hit, took
+  // the append-only path, and wrote `hasAssistantMessage` onto a
+  // turn URI that didn't exist — making the reply unreadable.
+  //
+  // Honour `optsAny.userMessageId` on BOTH paths so the cache key
+  // and the on-disk turn URI converge. The assistant-reply path
+  // semantics are unchanged (it has always required this id); the
+  // user-turn path now respects the pre-mint contract the comment
+  // and the cache key already advertised.
+  const explicitUserMessageId =
+    typeof optsAny.userMessageId === 'string' && (optsAny.userMessageId as string).length > 0
+      ? (optsAny.userMessageId as string)
+      : undefined;
   // PR #229 bot review (post-v10-rc-merge, r21-2): on the
   // append-only assistant path, falling back to `message.id`
   // (the assistant-reply Memory's own id) when `userMessageId`
@@ -1216,6 +1239,37 @@ export async function persistChatTurnImpl(
         object: rdfString('true'),
         graph: '',
       });
+      // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+      //
+      // When the matching user-turn write embedded a PROVISIONAL
+      // assistant string (e.g. partial-streaming completion the host
+      // parked on `assistantText` / `state.lastAssistantReply` before
+      // the final reply landed) and the later `onAssistantReply`
+      // brings DIFFERENT final text, the wrapper sets
+      // `assistantSupersedesCanonical: true` and forces
+      // `userTurnPersisted: false` to route the second write through
+      // THIS branch — onto the distinct `msg:agent-headless:K` URI —
+      // so we never stack a second `schema:text` triple on the
+      // canonical `msg:agent:K` subject (the multi-valued RDF the
+      // bot called out at index.ts:521).
+      //
+      // The marker tells the reader's r31-5 dedupe logic to INVERT
+      // its preference for THIS turn key only: when both variants
+      // exist AND the headless one is marked superseding, drop the
+      // canonical (stale provisional) and surface the headless
+      // (fresh final). Without this marker the dedupe would still
+      // prefer the canonical, freezing stale text in chat history.
+      // Headless-only writes (no canonical present) trivially keep
+      // working — the marker is a no-op when there's no canonical
+      // to suppress.
+      if (optsAny.assistantSupersedesCanonical === true) {
+        assistantQuads.push({
+          subject: headlessAssistantMsgUri,
+          predicate: `${DKG_ONT_NS}supersedesCanonicalAssistant`,
+          object: rdfString('true'),
+          graph: '',
+        });
+      }
       // PR #229 r3131820483: peek-only (no mutation). The cache is
       // promoted to "emitted" AFTER assertion.write() succeeds; if
       // the persist throws we leave the cache untouched so a retry

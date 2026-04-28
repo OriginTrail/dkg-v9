@@ -1449,3 +1449,247 @@ describe('dkgPlugin.hooks — r31-2: hook-surface narrowing + dispatch', () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+//
+// Pre-r31-6: when the user-turn write embedded a PROVISIONAL assistant
+// string (e.g. partial-streaming completion the host parked on
+// `state.lastAssistantReply` before the final reply landed) and the
+// later `onAssistantReply` brought DIFFERENT final text, the wrapper
+// only suppressed the second write on a byte-for-byte match (r31-5
+// invariant), then fell through to `_dkgServiceLoose.persistChatTurn`
+// with `userTurnPersisted: true` STILL in place. The impl took the
+// append-only branch and stamped a SECOND `schema:text` /
+// `schema:dateCreated` / `schema:author` triple on the SAME
+// `msg:agent:${turnKey}` URI as the user-turn write, leaving chat
+// history with multi-valued predicates and nondeterministic LIMIT 1
+// readback.
+//
+// Fix: when the cached text disagrees with the incoming reply AND the
+// incoming reply is non-empty, the wrapper sets
+// `opts.userTurnPersisted = false` AND
+// `opts.assistantSupersedesCanonical = true` so the impl routes the
+// write through the headless branch onto the distinct
+// `msg:agent-headless:${turnKey}` URI. The headless write picks up the
+// `dkg:supersedesCanonicalAssistant "true"` marker so the reader's
+// r31-5 dedupe inverts its canonical-wins preference for that turn key
+// only — fresh headless surfaces, stale provisional canonical is
+// filtered out.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dkgPlugin.hooks — r31-6: assistant text supersede (route to headless when texts differ)', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('cached PROVISIONAL text + DIFFERENT non-empty incoming reply → wrapper sets userTurnPersisted=false AND assistantSupersedesCanonical=true (routes through headless branch with supersede marker)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hello' },
+        id: 'user-r31-6-supersede',
+        userId: 'u',
+        roomId: 'room-r31-6-supersede',
+      } as any;
+      // Provisional partial parked on options/state before the real reply lands.
+      await (dkgPlugin as any).hooks.onChatTurn(
+        runtime, userMsg, { lastAssistantReply: 'Loading…' }, {},
+      );
+      // Final reply with completely different text.
+      const finalReply = {
+        content: { text: 'Hello! How can I help?' },
+        id: 'asst-r31-6-supersede',
+        userId: 'a',
+        roomId: 'room-r31-6-supersede',
+        replyTo: 'user-r31-6-supersede',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, finalReply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // r31-6 invariant: mismatch + non-empty incoming → wrapper
+      // forces the impl onto the headless branch (userTurnPersisted=false)
+      // AND tags the write with the supersede marker. Pre-fix
+      // `userTurnPersisted` would have stayed `true` (from the cache hit),
+      // the impl would have taken the append-only branch, and we'd have
+      // duplicated `schema:text` triples on `msg:agent:K`.
+      expect(replyOpts.userTurnPersisted).toBe(false);
+      expect(replyOpts.assistantSupersedesCanonical).toBe(true);
+      // r31-5 invariant preserved: assistantAlreadyPersisted is NOT set
+      // — the impl must actually write the new (final) reply.
+      expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('cached PROVISIONAL text + EMPTY incoming reply → wrapper does NOT supersede (keeps the canonical reply rather than overwriting with empty)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hello' },
+        id: 'user-r31-6-empty',
+        userId: 'u',
+        roomId: 'room-r31-6-empty',
+      } as any;
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+        assistantText: 'Real provisional reply',
+      });
+      // Empty-content reply (noisy retry, missing payload, etc).
+      const reply = {
+        content: { text: '' },
+        id: 'asst-r31-6-empty',
+        userId: 'a',
+        roomId: 'room-r31-6-empty',
+        replyTo: 'user-r31-6-empty',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Empty-incoming guard: do NOT supersede — the canonical
+      // reply is at least SOMETHING the user can read; replacing
+      // with an empty headless message would be strictly worse.
+      expect(replyOpts.assistantSupersedesCanonical).toBeUndefined();
+      // userTurnPersisted stays as the cache hit dictates (true) so
+      // the existing r31-1 / r31-5 idempotence path runs unchanged.
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('cached MATCHING text + identical incoming reply → wrapper sets assistantAlreadyPersisted=true (NO supersede; r31-5 idempotence still wins)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hello' },
+        id: 'user-r31-6-match',
+        userId: 'u',
+        roomId: 'room-r31-6-match',
+      } as any;
+      const persistedText = 'final reply text — matches both calls';
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+        assistantText: persistedText,
+      });
+      const reply = {
+        content: { text: persistedText },
+        id: 'asst-r31-6-match',
+        userId: 'a',
+        roomId: 'room-r31-6-match',
+        replyTo: 'user-r31-6-match',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Match → r31-5 idempotence wins, supersede is NOT set (would
+      // be wasteful and would litter the graph with a redundant
+      // headless variant of the same text).
+      expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+      expect(replyOpts.assistantSupersedesCanonical).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('NO prior onChatTurn (cache miss) + non-empty incoming reply → wrapper does NOT supersede (no canonical to replace; falls through to standard headless path)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      // Skip onChatTurn entirely — the assistant reply lands
+      // headlessly (proactive-agent / recovery scenario).
+      const reply = {
+        content: { text: 'fresh reply' },
+        id: 'asst-r31-6-headless-only',
+        userId: 'a',
+        roomId: 'room-r31-6-headless-only',
+        replyTo: 'user-r31-6-headless-only',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[0][3] as any;
+      // Cache miss → cachedAssistantText is undefined → the inner
+      // text-match block is skipped entirely → supersede is NOT set,
+      // userTurnPersisted stays as resolved by the precedence chain
+      // (cache miss → false → headless path).
+      expect(replyOpts.assistantSupersedesCanonical).toBeUndefined();
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r31-6 — adapter-elizaos/src/actions.ts:941).
+//
+// Pre-r31-6: `persistChatTurnImpl` only honoured `optsAny.userMessageId`
+// on the `assistant-reply` path. The user-turn path silently dropped
+// any pre-minted id and keyed `turnSourceId` off `message.id`. Meanwhile
+// `onChatTurnHandler` cached the persisted-turn marker under
+// `optsAny.userMessageId ?? message.id` (r29-2). Result: when a host
+// pre-minted `userMessageId` in user-turn mode, the cache said the turn
+// existed under `userMessageId` but the RDF was written under
+// `message.id`. The matching `onAssistantReply` looked up the cache
+// hit, took the append-only path, and wrote `hasAssistantMessage` onto
+// a turn URI that didn't exist — making the reply unreadable.
+//
+// Fix: honour `optsAny.userMessageId` on BOTH paths so the cache key
+// and the on-disk turn URI converge.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dkgPlugin.hooks — r31-6: user-turn path honours optsAny.userMessageId (cache key ↔ RDF key alignment)', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('user-turn write with explicit userMessageId aligns cache key with persistChatTurn turnSourceId, so a follow-up assistant-reply against the SAME userMessageId hits the cache (userTurnPersisted=true)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      // Host pre-mints the user-turn id (multi-step pipeline pattern)
+      // and threads it through onChatTurn via options.
+      const userMsg = {
+        content: { text: 'hello' },
+        id: 'memory-id-DIFFERENT',
+        userId: 'u',
+        roomId: 'room-r31-6-prelink',
+      } as any;
+      const preMintedUserMsgId = 'pre-minted-user-r31-6';
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+        userMessageId: preMintedUserMsgId,
+      });
+
+      // The follow-up assistant reply uses the pre-minted id in `replyTo`
+      // (the canonical ElizaOS field). The cache lookup keyed by
+      // `(roomId, userMessageId)` MUST hit because the user-turn write
+      // was recorded under the SAME id (post-r31-6) — pre-fix it was
+      // recorded under `memory-id-DIFFERENT` and missed.
+      const reply = {
+        content: { text: 'reply' },
+        id: 'asst-r31-6-prelink',
+        userId: 'a',
+        roomId: 'room-r31-6-prelink',
+        replyTo: preMintedUserMsgId,
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // r31-6 invariant: cache key ↔ RDF key alignment means the
+      // assistant-reply path correctly identifies the user-turn as
+      // persisted (so it takes the cheap append-only branch, NOT the
+      // headless full-envelope branch which would emit a stub user
+      // message and a headless turn envelope for a turn the user-turn
+      // write already minted).
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

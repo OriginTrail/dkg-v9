@@ -416,7 +416,7 @@ class DKGMemoryProvider(MemoryProvider):
         self._context_graph = self._config.get("context_graph", "hermes-memory")
 
         # Create HTTP client
-        from plugins.memory.dkg.client import DKGClient
+        from .client import DKGClient
         self._client = DKGClient(
             base_url=self._config.get("daemon_url", "http://127.0.0.1:9200")
         )

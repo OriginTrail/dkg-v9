@@ -1043,6 +1043,7 @@ export interface LocalAgentIntegration {
   name: string;
   framework: string;
   description: string;
+  defaultSessionId?: string;
   chatSupported: boolean;
   chatAttachments: boolean;
   connectSupported: boolean;
@@ -1078,7 +1079,11 @@ export interface LocalAgentHistoryMessage {
 interface LocalAgentSurface {
   connectSupported: boolean;
   chatSupported: boolean;
-  defaultSessionId?: (integrationId: string) => string;
+  defaultSessionId?: (args: {
+    integrationId: string;
+    record?: LocalAgentIntegrationRecord;
+    health?: LocalAgentHealthResponse | null;
+  }) => string;
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
@@ -1098,7 +1103,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   openclaw: {
     connectSupported: true,
     chatSupported: true,
-    defaultSessionId: (integrationId: string) => `${integrationId}:dkg-ui`,
+    defaultSessionId: ({ integrationId }) => `${integrationId}:dkg-ui`,
     resolveChatContext: ({ integrationId, sessionId }) => {
       if (!sessionId) return {};
       const prefix = `${integrationId}:dkg-ui:`;
@@ -1112,7 +1117,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   hermes: {
     connectSupported: true,
     chatSupported: true,
-    defaultSessionId: (integrationId: string) => `${integrationId}:dkg-ui`,
+    defaultSessionId: ({ integrationId, record, health }) => buildHermesDefaultSessionId(integrationId, record, health),
     resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
     fetchHealth: fetchHermesLocalHealth,
     streamChat: streamHermesLocalChat,
@@ -1121,7 +1126,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
 
 export function getDefaultLocalAgentSessionId(integrationId: string): string | null {
   const normalizedId = integrationId.trim().toLowerCase();
-  return LOCAL_AGENT_SURFACES[normalizedId]?.defaultSessionId?.(normalizedId) ?? null;
+  return LOCAL_AGENT_SURFACES[normalizedId]?.defaultSessionId?.({ integrationId: normalizedId }) ?? null;
 }
 
 function resolveLocalAgentHistorySessionId(integrationId: string, sessionId?: string): string | null {
@@ -1186,6 +1191,60 @@ function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boole
     || record.transport?.gatewayUrl
     || record.transport?.healthUrl,
   );
+}
+
+function firstTrimmedString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function sessionSegment(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || stableSessionHash(value);
+}
+
+function stableSessionHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function buildHermesDefaultSessionId(
+  integrationId: string,
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string {
+  const metadata = record?.metadata ?? {};
+  const profile = firstTrimmedString(
+    health?.profile,
+    metadata.profileName,
+    metadata.profile,
+  );
+  const hermesHome = firstTrimmedString(metadata.hermesHome);
+  const transport = record?.transport;
+  const transportSource = [
+    health?.target,
+    transport?.bridgeUrl,
+    transport?.gatewayUrl,
+    transport?.healthUrl,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join('|');
+  const segments = [
+    profile ? `profile-${sessionSegment(profile)}` : hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
+    transportSource ? `transport-${stableSessionHash(transportSource)}` : null,
+  ].filter((value): value is string => value != null);
+  return segments.length
+    ? `${integrationId}:dkg-ui:${segments.join(':')}`
+    : `${integrationId}:dkg-ui`;
 }
 
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
@@ -1277,6 +1336,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     || hasLocalAgentTransportHints(record)
   );
   const hermesRuntimeDetail = hermesDetail(record, health);
+  const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
 
   let status: LocalAgentIntegrationStatus;
   let statusLabel: string;
@@ -1336,6 +1396,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     name: record.name,
     framework: record.name,
     description: record.description,
+    defaultSessionId,
     chatSupported: hasChatBridge,
     chatAttachments,
     connectSupported,

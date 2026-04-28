@@ -62,6 +62,20 @@ export class HermesDkgClient {
     } satisfies HermesLocalAgentIntegrationPayload);
   }
 
+  async disconnectHermesIntegration(): Promise<{ ok?: boolean; integration?: unknown }> {
+    return this.put('/api/local-agent-integrations/hermes', {
+      enabled: false,
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+      metadata: {
+        setupState: 'disconnected',
+      },
+    });
+  }
+
   async getHermesChannelHealth(): Promise<HermesChannelHealthResponse> {
     return this.get('/api/hermes-channel/health');
   }
@@ -113,6 +127,19 @@ export class HermesDkgClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const response = await this.request(path, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...this.authHeaders(),
+      },
+      body: JSON.stringify(body),
+    });
+    return response.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body: unknown): Promise<T> {
+    const response = await this.request(path, {
+      method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',

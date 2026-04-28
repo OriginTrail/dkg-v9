@@ -117,6 +117,9 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
   const explicitGatewayBase = hermesIntegration?.transport.gatewayUrl
     ? trimTrailingSlashes(hermesIntegration.transport.gatewayUrl)
     : undefined;
+  const explicitHealthUrl = hermesIntegration?.transport.healthUrl
+    ? trimTrailingSlashes(hermesIntegration.transport.healthUrl)
+    : undefined;
   const bridgeLooksLikeGateway =
     explicitBridgeBase?.endsWith('/api/hermes-channel') ?? false;
   const standaloneBridgeBase = explicitBridgeBase
@@ -143,7 +146,7 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
       name: 'bridge',
       inboundUrl: `${standaloneBridgeBase}/send`,
       streamUrl: `${standaloneBridgeBase}/stream`,
-      healthUrl: `${standaloneBridgeBase}/health`,
+      healthUrl: explicitHealthUrl ?? `${standaloneBridgeBase}/health`,
     });
   }
 
@@ -153,7 +156,7 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
       name: 'gateway',
       inboundUrl: `${normalizedGatewayBase}/send`,
       streamUrl: `${normalizedGatewayBase}/stream`,
-      healthUrl: `${normalizedGatewayBase}/health`,
+      healthUrl: explicitHealthUrl ?? `${normalizedGatewayBase}/health`,
     });
   }
 
@@ -164,11 +167,12 @@ export function buildHermesChannelHeaders(
   target: HermesChannelTarget,
   bridgeAuthToken: string | undefined,
   baseHeaders: Record<string, string> = {},
+  requestUrl = target.inboundUrl,
 ): Record<string, string> {
   if (
     target.name !== 'bridge' ||
     !bridgeAuthToken ||
-    !isHermesLoopbackUrl(target.inboundUrl)
+    !isHermesLoopbackUrl(requestUrl)
   ) {
     return baseHeaders;
   }
@@ -228,7 +232,7 @@ export async function probeHermesChannelHealth(
 
     try {
       const healthRes = await fetch(target.healthUrl, {
-        headers: buildHermesChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+        headers: buildHermesChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }, target.healthUrl),
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await healthRes.text().catch(() => '');
@@ -278,7 +282,7 @@ export async function ensureHermesBridgeAvailable(
 
   try {
     const healthRes = await fetch(target.healthUrl, {
-      headers: buildHermesChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+      headers: buildHermesChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }, target.healthUrl),
       signal: AbortSignal.timeout(3_000),
     });
     const body = await healthRes.text().catch(() => '');

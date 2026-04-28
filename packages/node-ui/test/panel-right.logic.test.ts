@@ -127,6 +127,29 @@ describe('PanelRight logic helpers', () => {
     })).toBe(false);
   });
 
+  it('does not preserve an old generated Hermes default session after profile changes', () => {
+    const integrations = [
+      integration(),
+      integration({
+        id: 'hermes',
+        name: 'Hermes',
+        persistentChat: true,
+        defaultSessionId: 'hermes:dkg-ui:profile-new-profile:transport-new',
+      }),
+    ];
+
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:dkg-ui:profile-old-profile:transport-old',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:manual-thread',
+      integrations,
+    })).toBe(true);
+  });
+
   it('resolves local agent selection state from saved sessions and message history', () => {
     const integrations = [integration(), integration({ id: 'hermes', name: 'Hermes', persistentChat: false })];
     const state = resolveLocalAgentSelectionState({

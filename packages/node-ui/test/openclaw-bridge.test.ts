@@ -671,7 +671,7 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
-  it('Hermes registers a default local-agent session id', async () => {
+  it('Hermes keeps a static fallback session id when no profile or transport is known', async () => {
     const { getDefaultLocalAgentSessionId } = await import('../src/ui/api.js');
     expect(getDefaultLocalAgentSessionId('hermes')).toBe('hermes:dkg-ui');
   });
@@ -797,6 +797,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       });
       expect(hermes?.chatReady).toBe(false);
       expect(hermes?.bridgeOnline).toBe(false);
+      expect(hermes?.defaultSessionId).toContain('hermes:dkg-ui:profile-dkg-smoke:transport-');
+      expect(hermes?.defaultSessionId).not.toBe('hermes:dkg-ui');
       expect(hermes?.detail).toContain('profile dkg-smoke');
       expect(hermes?.detail).toContain('memory provider conflict');
     } finally {
@@ -848,6 +850,53 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: false,
       });
       expect(hermes?.detail).toContain('daemon auth failed');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations separates Hermes default sessions by profile and transport', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              transport: {
+                kind: 'hermes-channel',
+                bridgeUrl: 'http://127.0.0.1:9202',
+                healthUrl: 'http://127.0.0.1:9202/health',
+              },
+              metadata: {
+                profileName: 'dkg-smoke',
+                hermesHome: '/home/alice/.hermes/profiles/dkg-smoke',
+              },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'bridge',
+          bridge: { ok: true, profile: 'dkg-smoke' },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:transport-[a-z0-9]+$/);
     } finally {
       globalThis.fetch = original;
     }

@@ -10,9 +10,11 @@ import {
   disconnectHermesProfile,
   planHermesSetup,
   runDoctor,
+  runDisconnect,
   runReconnect,
   resolveHermesProfile,
   runSetup,
+  runUninstall,
   runVerify,
   setupHermesProfile,
   uninstallHermesProfile,
@@ -86,6 +88,7 @@ function trackingRes() {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('HermesAdapterPlugin', () => {
@@ -384,6 +387,32 @@ describe('HermesDkgClient', () => {
     await expect(client.getHermesChannelHealth()).rejects.not.toThrow('secret-token');
     expect(redact('Authorization: Bearer secret-token', 'secret-token')).not.toContain('secret-token');
   });
+
+  it('marks Hermes disconnected through the local-agent integration route', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true, integration: { id: 'hermes', enabled: false } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const client = new HermesDkgClient({
+      baseUrl: 'http://127.0.0.1:9200/',
+      apiToken: 'secret-token',
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await client.disconnectHermesIntegration();
+
+    expect(calls[0].url).toBe('http://127.0.0.1:9200/api/local-agent-integrations/hermes');
+    expect(calls[0].init.method).toBe('PUT');
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer secret-token');
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.enabled).toBe(false);
+    expect(body.runtime.status).toBe('disconnected');
+    expect(body.runtime.ready).toBe(false);
+  });
 });
 
 describe('Hermes profile setup helpers', () => {
@@ -428,6 +457,8 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: dkg');
     expect(readFileSync(join(hermesHome, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toContain('Managed by @origintrail-official/dkg-adapter-hermes');
     expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '__init__.py'), 'utf-8')).toContain('DKGMemoryProvider');
+    expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '__init__.py'), 'utf-8')).toContain('from .client import DKGClient');
+    expect(readFileSync(join(hermesHome, 'plugins', 'dkg', 'cli.py'), 'utf-8')).not.toContain('plugins.memory.dkg');
     expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '.dkg-adapter-hermes-owner.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
   });
 
@@ -540,6 +571,57 @@ describe('Hermes profile setup helpers', () => {
     expect((config.match(/^memory:/gm) ?? [])).toHaveLength(1);
     expect(config).toContain('  provider: dkg');
     expect(config).toContain('  retrieval_k: 8');
+  });
+
+  it('marks an existing dkg provider line so verify and disconnect own it', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'model: gpt-5\nmemory:\n  provider: dkg\n  retrieval_k: 8\n');
+
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    const config = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    const verify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+    expect(verify.ok).toBe(true);
+    expect(config).toContain('BEGIN DKG ADAPTER HERMES MANAGED');
+    expect(config).toContain('  retrieval_k: 8');
+    expect((config.match(/provider: dkg/g) ?? [])).toHaveLength(1);
+
+    disconnectHermesProfile({ hermesHome });
+
+    const disconnectedConfig = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    expect(disconnectedConfig).not.toContain('provider: dkg');
+    expect(disconnectedConfig).not.toContain('BEGIN DKG ADAPTER HERMES MANAGED');
+    expect(disconnectedConfig).toContain('  retrieval_k: 8');
+  });
+
+  it('best-effort disables the daemon registry during disconnect and uninstall', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    await runDisconnect({ hermesHome, daemonUrl: 'http://127.0.0.1:9200' });
+    await runUninstall({ hermesHome, daemonUrl: 'http://127.0.0.1:9200' });
+
+    const disconnectCalls = calls.filter((call) =>
+      call.url === 'http://127.0.0.1:9200/api/local-agent-integrations/hermes'
+      && call.init.method === 'PUT');
+    expect(disconnectCalls).toHaveLength(2);
+    for (const call of disconnectCalls) {
+      const body = JSON.parse(String(call.init.body));
+      expect(body.enabled).toBe(false);
+      expect(body.runtime.status).toBe('disconnected');
+    }
   });
 
   it('removes the managed provider block when switching to tools-only mode', () => {

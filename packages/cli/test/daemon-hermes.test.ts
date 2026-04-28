@@ -148,6 +148,41 @@ describe('Hermes channel helpers', () => {
     ]);
   });
 
+  it('prefers a stored Hermes transport healthUrl over derived health endpoints', () => {
+    expect(getHermesChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9202',
+            healthUrl: 'http://127.0.0.1:9300/custom-health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9202/send',
+        streamUrl: 'http://127.0.0.1:9202/stream',
+        healthUrl: 'http://127.0.0.1:9300/custom-health',
+      },
+    ]);
+
+    expect(getHermesChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            gatewayUrl: 'https://hermes.example.com',
+            healthUrl: 'https://hermes.example.com/custom-health',
+          },
+        },
+      },
+    }))[0]?.healthUrl).toBe('https://hermes.example.com/custom-health');
+  });
+
   it('ignores non-loopback bridge URLs and requires gatewayUrl for remote transports', () => {
     expect(getHermesChannelTargets(makeConfig({
       localAgentIntegrations: {
@@ -203,6 +238,13 @@ describe('Hermes channel helpers', () => {
       'secret-token',
       { 'Content-Type': 'application/json' },
     )).toEqual({ 'Content-Type': 'application/json' });
+
+    expect(buildHermesChannelHeaders(
+      { name: 'bridge', inboundUrl: 'http://127.0.0.1:9202/send', healthUrl: 'https://hermes.example.com/health' },
+      'secret-token',
+      { Accept: 'application/json' },
+      'https://hermes.example.com/health',
+    )).toEqual({ Accept: 'application/json' });
   });
 
   it('normalizes profileName aliases for send and persist payloads', () => {

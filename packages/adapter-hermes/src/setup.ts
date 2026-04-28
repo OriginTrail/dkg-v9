@@ -325,8 +325,12 @@ export async function runDoctor(options: HermesCliOptions = {}): Promise<void> {
 }
 
 export async function runDisconnect(options: HermesCliOptions = {}): Promise<void> {
-  const plan = disconnectHermesProfile(toSetupOptions(options));
+  const setupOptions = toSetupOptions(options);
+  const plan = disconnectHermesProfile(setupOptions);
   printPlan('Hermes disconnect', plan);
+  if (!plan.dryRun) {
+    await disconnectDaemonBestEffort(setupOptions.daemonUrl);
+  }
 }
 
 export async function runReconnect(options: HermesCliOptions = {}): Promise<void> {
@@ -334,8 +338,12 @@ export async function runReconnect(options: HermesCliOptions = {}): Promise<void
 }
 
 export async function runUninstall(options: HermesCliOptions = {}): Promise<void> {
-  const plan = uninstallHermesProfile(toSetupOptions(options));
+  const setupOptions = toSetupOptions(options);
+  const plan = uninstallHermesProfile(setupOptions);
   printPlan('Hermes uninstall', plan);
+  if (!plan.dryRun) {
+    await disconnectDaemonBestEffort(setupOptions.daemonUrl);
+  }
 }
 
 export const setup = runSetup;
@@ -432,6 +440,20 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
     });
   } catch (err: any) {
     console.warn(`Hermes local-agent registration skipped: ${redact(err?.message ?? String(err), apiToken)}`);
+  }
+}
+
+async function disconnectDaemonBestEffort(daemonUrl: string | undefined): Promise<void> {
+  const apiToken = loadDkgAuthToken();
+  const client = new HermesDkgClient({
+    baseUrl: daemonUrl,
+    apiToken,
+    timeoutMs: 3_000,
+  });
+  try {
+    await client.disconnectHermesIntegration();
+  } catch (err: any) {
+    console.warn(`Hermes local-agent registry disconnect skipped: ${redact(err?.message ?? String(err), apiToken)}`);
   }
 }
 
@@ -538,6 +560,7 @@ function ensureManagedProviderBlock(configPath: string): void {
   const existing = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
   const configuredProvider = findConfiguredMemoryProvider(existing);
   if (!existing.includes(CONFIG_BEGIN) && configuredProvider === 'dkg') {
+    writeOwnedText(configPath, markExistingDkgProvider(existing), false);
     return;
   }
   if (configuredProvider && configuredProvider !== 'dkg') {
@@ -549,6 +572,49 @@ function ensureManagedProviderBlock(configPath: string): void {
     ? insertManagedProviderIntoMemoryBlock(unmanaged)
     : appendManagedMemoryBlock(unmanaged);
   writeOwnedText(configPath, next, false);
+}
+
+function markExistingDkgProvider(raw: string): string {
+  const lines = raw.split(/\r?\n/);
+  const next: string[] = [];
+  let inMemory = false;
+  let marked = false;
+
+  for (const line of lines) {
+    if (!marked) {
+      const inline = line.match(/^(\s*)memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      if (inline?.[2] === 'dkg') {
+        next.push(`${inline[1]}${CONFIG_BEGIN}`);
+        next.push(line);
+        next.push(`${inline[1]}${CONFIG_END}`);
+        marked = true;
+        continue;
+      }
+    }
+
+    if (/^\s*memory\s*:\s*$/.test(line)) {
+      inMemory = true;
+      next.push(line);
+      continue;
+    }
+    if (inMemory && /^\S/.test(line)) {
+      inMemory = false;
+    }
+    if (!marked && inMemory) {
+      const match = line.match(/^(\s+)provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      if (match?.[2] === 'dkg') {
+        next.push(`${match[1]}${CONFIG_BEGIN}`);
+        next.push(line);
+        next.push(`${match[1]}${CONFIG_END}`);
+        marked = true;
+        continue;
+      }
+    }
+    next.push(line);
+  }
+
+  if (marked) return next.join('\n');
+  return appendManagedMemoryBlock(raw);
 }
 
 function removeManagedProviderBlock(configPath: string): void {

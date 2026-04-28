@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createHash, randomUUID } from "crypto";
+import { createHash } from "crypto";
 
 interface Logger {
   info?: (...args: unknown[]) => void;
@@ -724,7 +724,17 @@ export class ChatTurnWriter {
         //   turn are vanishingly rare in that path).
         const w4bInflight = this.w4bInflightKey(ev, userText, assistantText);
         if (this.markTurnIdSeen(sessionId, w4bInflight)) return; // concurrent W4b dispatch
-        const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
+        // T33 — Mix the gateway-provided `messageId` (or the
+        // monotonic fallback) into the daemon-facing turnId so
+        // restarts after a successful POST find the SAME RDF
+        // subject URI on the daemon and overwrite-idempotently
+        // instead of duplicating the turn. messageId is durable
+        // (the gateway's outbound log persists it), so this hash
+        // is stable across process boundaries. Two LEGITIMATE same-
+        // content turns within a session still get distinct ids
+        // because their messageIds differ.
+        const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev);
+        const turnId = this.deterministicTurnId(sessionId, userText, assistantText, w4bDiscriminator);
         // T10 — Reserve cross-path in-flight on W4b-origin BEFORE
         // persistOne so a concurrent W4a `agent_end` fire's
         // `peekCrossPathInflight` catches the race and skips. Cleared
@@ -1236,6 +1246,32 @@ export class ChatTurnWriter {
     this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
     return `w4b-inflight::seq::${this.w4bInflightSeq}::${this.contentHash(user, assistant)}`;
   }
+
+  /**
+   * T33 — Discriminator mixed into the W4b daemon-facing turnId so the
+   * resulting hash is unique per logical turn AND durable across process
+   * restart. Prefers `messageId` (durable: the gateway persists outbound
+   * delivery records keyed by it). Falls back to a sequence counter for
+   * messageId-less envelopes — the fallback is NOT durable across
+   * restart, but in practice OpenClaw's outbound path always carries
+   * messageId; the fallback exists only so test fixtures and pathological
+   * envelopes don't crash here.
+   *
+   * Distinct from `w4bInflightKey`'s sequence fallback, which intentionally
+   * always varies per-call (own-path concurrent dispatch dedup). The
+   * daemon-id fallback can collide on same-content same-session same-
+   * fallback-counter — but the messageId path is the production case
+   * and is unambiguously stable.
+   */
+  private w4bDaemonTurnIdDiscriminator(ev: InternalMessageEvent): string {
+    const messageId = (ev as any)?.context?.messageId;
+    if (typeof messageId === "string" && messageId.length > 0) {
+      return `msg::${messageId}`;
+    }
+    // Reuse the same monotonic counter — fallback is rare and best-effort.
+    this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
+    return `seq::${this.w4bInflightSeq}`;
+  }
   /**
    * @deprecated Kept temporarily for tests that inspect the dedup-map key
    * shape; new code should use `w4aOriginKey` / `w4bOriginKey`.
@@ -1251,9 +1287,25 @@ export class ChatTurnWriter {
    * `(sessionId="s:1", user="u")` and `(sessionId="s", user="1:u")` both
    * hashed to `"s:1:u:..."`. `JSON.stringify` quotes each segment.
    */
-  private deterministicTurnId(sessionId: string, user: string, assistant: string, pairIndex?: number): string {
+  private deterministicTurnId(
+    sessionId: string,
+    user: string,
+    assistant: string,
+    discriminator?: number | string,
+  ): string {
     const parts: unknown[] = [sessionId, user, assistant];
-    if (typeof pairIndex === "number") parts.push(pairIndex);
+    // T33 — Accepts a string discriminator (W4b passes the gateway-
+    // provided `messageId`) in addition to the pair-index number that
+    // W4a uses. Mixing the discriminator into the hash makes the
+    // resulting turnId DURABLE across process restart: a crash after
+    // a successful daemon write but before the watermark hits disk
+    // produces the SAME id on retry, so the daemon's RDF subject URI
+    // (built from the caller-supplied turnId) is identical and the
+    // restart's POST is an idempotent overwrite — not a duplicate
+    // ChatTurn subject. Pre-fix, persistOne's per-invocation
+    // `randomUUID()` only made retries WITHIN the same process
+    // idempotent; restart still duplicated.
+    if (discriminator !== undefined) parts.push(discriminator);
     return createHash("sha256")
       .update(JSON.stringify(parts))
       .digest("hex")
@@ -1410,31 +1462,35 @@ export class ChatTurnWriter {
     turnId: string,
     opts?: { pairIndex?: number }
   ): Promise<void> {
-    // T29 — Generate a per-INVOCATION request id BEFORE the retry loop
-    // so all retries pass the same id to the daemon. The daemon's
-    // `/api/openclaw-channel/persist-turn` route accepts a caller-
-    // supplied `turnId` and uses it to mint the RDF subject URI. Pre-
-    // fix we passed nothing and the daemon minted a fresh UUID per
-    // call — a transient timeout after the first POST committed
-    // produced a duplicate chat turn on the retry. Now retries are
-    // idempotent on the daemon side.
+    // T29 / T33 — Use the caller's deterministic `turnId` as the
+    // daemon-facing request id (NOT a per-invocation random UUID).
+    // The daemon's `/api/openclaw-channel/persist-turn` route accepts
+    // a caller-supplied `turnId` and uses it to mint the RDF subject
+    // URI; passing the SAME id on every retry — including across
+    // process restart — keeps the RDF subject stable so a successful
+    // POST followed by an unexpected crash (before the watermark
+    // debounce flushes) and replay produces an idempotent overwrite,
+    // not a duplicate ChatTurn subject.
     //
-    // Why a fresh UUID rather than the in-process `turnId` parameter:
-    //   * W4a's `turnId` is content+pairIndex (unique per logical
-    //     turn — would also work).
-    //   * W4b's `turnId` is content-only (would COLLIDE on legitimately-
-    //     repeated same-content turns within a session and merge them
-    //     into one RDF subject).
-    // A fresh UUID per persistOne call is unique per logical turn for
-    // both paths and stable across this call's retries — the simplest
-    // invariant. The in-process `turnId` parameter is still used for
-    // cross-path dedup (recentTurnIds + crossPathStamps) and the debug
-    // log; only the daemon-facing id is the fresh UUID.
-    const requestId = randomUUID();
+    // Both paths now feed `persistOne` a turnId that's both unique-
+    // per-logical-turn AND durable across restart:
+    //   * W4a — `deterministicTurnId(sessionId, user, assistant, pairIndex)`.
+    //     pairIndex is recomputable from `messages` on restart, so the
+    //     same pair re-derives the same hash.
+    //   * W4b — `deterministicTurnId(sessionId, user, assistant, "msg::" + messageId)`.
+    //     messageId is persisted by the gateway's outbound delivery
+    //     log (`openclaw/src/infra/outbound/deliver.ts`), so a replay
+    //     of the same `message:sent` event re-derives the same hash.
+    //
+    // Pre-T33 the implementation generated a fresh UUID once per
+    // `persistOne` invocation, which made retries WITHIN a process
+    // idempotent but not across restart. The daemon was free to mint
+    // two distinct subject URIs (one per UUID) for the same logical
+    // turn whenever we crashed mid-flush.
     let attempt = 0;
     while (attempt < 2) {
       try {
-        await this.client.storeChatTurn(sessionId, user, assistant, { turnId: requestId });
+        await this.client.storeChatTurn(sessionId, user, assistant, { turnId });
         // Watermark advance:
         //   - W4a passes `pairIndex` (the position of the persisted pair
         //     in the messages array). We set the watermark to MAX of

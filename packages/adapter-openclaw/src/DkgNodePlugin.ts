@@ -126,6 +126,26 @@ export class DkgNodePlugin {
    * destroys them all together.
    */
   private allHookSurfaces: Set<HookSurface> = new Set();
+  /**
+   * T34 — Install timestamp per surface. Used by `evictStaleHookSurfaces`
+   * to bound the surface set's growth in long-lived processes that get
+   * many `apiChanged` re-registrations: surfaces that have lived past a
+   * grace window without firing are presumed orphaned by the gateway and
+   * are destroyed + dropped. The latest surface (`this.hookSurface`) is
+   * always preserved regardless of age. WeakMap so a destroyed surface
+   * that escapes our explicit `delete` can still be GC'd via natural
+   * reachability rules.
+   */
+  private hookSurfaceInstalledAt: WeakMap<HookSurface, number> = new WeakMap();
+  /**
+   * Grace window before a never-fired surface becomes evictable. Long
+   * enough that a slow gateway dispatch path doesn't trigger spurious
+   * eviction (typed `before_prompt_build` typically fires within seconds
+   * of register; 5 minutes is a 60×+ safety margin), short enough that
+   * a process re-registered hundreds of times still bounds the set's
+   * memory footprint within an hour.
+   */
+  private static readonly HOOK_SURFACE_STALE_THRESHOLD_MS = 5 * 60_000;
   // T11 — Idempotency flag for `registerMemoryPromptSection`. The first
   // register() call under setup-runtime skips the install (`isFullMode`
   // is false); on a same-api `setup-runtime → full` upgrade the retry
@@ -683,17 +703,30 @@ export class DkgNodePlugin {
       }
     }
 
-    // T31 — Track whether THIS is the first surface. Internal hooks
-    // (`message:received` / `message:sent`) live in a process-global
-    // Map<event, HookHandler[]> and would double-fire if every surface
-    // pushed its own wrapper. The first surface owns the global
-    // registration; subsequent surfaces only install api-bound typed/
-    // legacy hooks (which DO need to be installed per-api so the
-    // gateway's per-api dispatch reaches them).
-    const isFirstSurface = this.allHookSurfaces.size === 0;
+    // T34 — Reap any surfaces that have lived past the stale grace
+    // window without firing. Long-lived processes that get many
+    // `apiChanged` re-registrations would otherwise grow this set
+    // unbounded. Runs at every register, before adding the new
+    // surface, so eviction work is bounded to the multi-phase init
+    // cadence (no separate timer / no event-loop pressure).
+    this.evictStaleHookSurfaces();
+    // T31 — Internal hooks (`message:received` / `message:sent`) live
+    // in a process-global Map<event, HookHandler[]> and would double-
+    // fire if every surface pushed its own wrapper. T32 — but gating
+    // on "first surface only" breaks the retry path: if the FIRST
+    // register fired before `globalThis[…internalHookHandlers]` was
+    // created (e.g., gateway boot order), surface #1 records
+    // `installedVia: 'none'` and surface #2's `size !== 0` skip would
+    // leave W4b persistence permanently disabled. Gate instead on
+    // "has any prior surface SUCCESSFULLY installed internal hooks"
+    // (`installedVia === 'globalThis'`). If yes, skip — already live.
+    // If no, retry on the new surface; the global map may have
+    // appeared between the prior register and this one.
+    const internalHooksAlreadyLive = this.internalHooksAreLive();
     this.hookSurface = new HookSurface(api, api.logger);
     this.hookSurfaceApi = api;
     this.allHookSurfaces.add(this.hookSurface);
+    this.hookSurfaceInstalledAt.set(this.hookSurface, Date.now());
     // T7 — Route `session_end` through HookSurface instead of calling
     // `api.registerHook` directly. `api.registerHook` has no unsubscribe
     // primitive, so the prior direct-registration path accumulated
@@ -728,11 +761,11 @@ export class DkgNodePlugin {
     // into the same `HookHandler[]` for that event. With the multi-phase
     // init re-bind fix above, each subsequent surface would push a new
     // wrapper and every internal event would fire 2× / 3× / Nx where N is
-    // the number of surfaces ever built. Only the FIRST surface installs
-    // internal hooks; subsequent surfaces inherit the global registration
-    // (it's process-scoped, not api-scoped, so it survives api swaps
-    // independently).
-    if (isFirstSurface) {
+    // the number of surfaces ever built. T32 — gate on "any prior surface
+    // already succeeded" rather than "first surface" so a failed initial
+    // install (globalThis hook map not yet created at first-register time)
+    // still gets retried on the next surface.
+    if (!internalHooksAlreadyLive) {
       this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
       this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
     }
@@ -809,6 +842,67 @@ export class DkgNodePlugin {
       try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
       return this.chatTurnWriter!.onMessageSent(ev);
     };
+  }
+
+  /**
+   * T32 — True if any prior hook surface has SUCCESSFULLY installed an
+   * internal hook (`installedVia: 'globalThis'`). Used by the
+   * `installHooksIfNeeded` rebuild path to gate internal-hook re-install
+   * on actual past success rather than "is this the first surface" —
+   * the prior gate broke the retry path when surface #1 itself failed
+   * to install (e.g., because `globalThis[…internalHookHandlers]` was
+   * absent at first-register time).
+   */
+  private internalHooksAreLive(): boolean {
+    for (const surface of this.allHookSurfaces) {
+      const stats = surface.getDispatchStats();
+      if (stats['internal:message:received']?.installedVia === 'globalThis') return true;
+      if (stats['internal:message:sent']?.installedVia === 'globalThis') return true;
+    }
+    return false;
+  }
+
+  /**
+   * T34 — Bounded-retention eviction for `allHookSurfaces`. Multi-phase
+   * init can hand the plugin a fresh `api` on every inbound turn, so
+   * over hours a long-lived process accumulates surface objects that the
+   * gateway will never dispatch against again. Eviction policy:
+   *
+   *   * NEVER evict the latest surface (`this.hookSurface`) — even if
+   *     idle for now, it's the most recent target the gateway might
+   *     have switched to and we don't want to disable freshly-installed
+   *     handlers.
+   *   * For older surfaces: evict if `installedAt` is more than
+   *     `HOOK_SURFACE_STALE_THRESHOLD_MS` ago AND aggregate `fireCount`
+   *     across all events on that surface is 0. A surface that has
+   *     fired even once might still be a live dispatch target (the
+   *     gateway can keep dispatching against an api long after we got
+   *     a new one, depending on internal routing); preserving it costs
+   *     a few closures and is the safer default.
+   *
+   * The grace window is wide enough that legitimate slow first-fires
+   * (e.g., a setup-runtime → full transition where typed hooks only
+   * dispatch after the first non-trivial inbound turn) won't trigger
+   * spurious eviction. Surfaces that NEVER fire over multiple minutes
+   * are presumed orphaned by the gateway and reclaimed.
+   */
+  private evictStaleHookSurfaces(): void {
+    const now = Date.now();
+    for (const surface of this.allHookSurfaces) {
+      if (surface === this.hookSurface) continue;
+      const installedAt = this.hookSurfaceInstalledAt.get(surface) ?? now;
+      if (now - installedAt < DkgNodePlugin.HOOK_SURFACE_STALE_THRESHOLD_MS) continue;
+      const stats = surface.getDispatchStats();
+      let totalFires = 0;
+      for (const stat of Object.values(stats)) {
+        totalFires += stat.fireCount ?? 0;
+      }
+      if (totalFires === 0) {
+        try { surface.destroy(); } catch { /* best effort */ }
+        this.allHookSurfaces.delete(surface);
+        this.hookSurfaceInstalledAt.delete(surface);
+      }
+    }
   }
 
   /**

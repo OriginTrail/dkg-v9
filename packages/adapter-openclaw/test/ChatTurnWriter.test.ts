@@ -87,9 +87,12 @@ describe("ChatTurnWriter", () => {
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flushMicrotasks();
-    // T29 — A stable per-invocation `turnId` is now passed to the daemon
-    // so retries are idempotent on the RDF-subject URI. The id is a
-    // fresh UUID generated once per persistOne call.
+    // T29 / T33 — A deterministic, content+discriminator-derived `turnId`
+    // is now passed to the daemon. W4a's id includes pairIndex; W4b's
+    // includes messageId. The id is restart-durable: a crash mid-flush
+    // followed by replay computes the same hash and writes to the same
+    // RDF subject URI on the daemon (idempotent overwrite, not a
+    // duplicate ChatTurn subject).
     expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
       "openclaw:ch:::sk",
       "hello world",
@@ -102,8 +105,8 @@ describe("ChatTurnWriter", () => {
     // Regression for T29: pre-fix `persistOne` passed no turnId, so a
     // transient daemon timeout after the first POST committed produced
     // a duplicate chat turn on the retry (the daemon minted a fresh
-    // UUID per call). Post-fix, all retries within one persistOne
-    // invocation share the same caller-supplied UUID.
+    // UUID per call). Post-fix retries within one persistOne invocation
+    // share the same caller-supplied id.
     let callCount = 0;
     const turnIds: Array<string | undefined> = [];
     mockClient.storeChatTurn = vi.fn().mockImplementation(async (_sid, _u, _a, opts) => {
@@ -126,6 +129,46 @@ describe("ChatTurnWriter", () => {
     expect(callCount).toBe(2);
     expect(turnIds[0]).toBeDefined();
     expect(turnIds[1]).toBe(turnIds[0]); // same id across retry
+  });
+
+  it("T33 — daemon turnId is deterministic across writer instances (restart-idempotent)", async () => {
+    // Regression for T33: pre-fix the daemon-facing id was a fresh
+    // randomUUID per persistOne invocation, which made retries
+    // idempotent only WITHIN the current process. A crash after a
+    // successful POST but before the watermark debounce flushed to
+    // disk produced a NEW UUID on restart and therefore a duplicate
+    // ChatTurn subject on the daemon. Post-fix the id is a hash of
+    // the deterministic identity (sessionId + user + assistant +
+    // pairIndex for W4a), so a fresh writer instance computing the
+    // SAME inputs produces the SAME hash — the daemon receives the
+    // POST under the same subject URI and overwrites idempotently.
+    const seenIds: string[] = [];
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async (_sid, _u, _a, opts) => {
+      seenIds.push(opts?.turnId);
+    });
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "deterministic-user-1" },
+        { role: "assistant", content: "deterministic-assistant-1" },
+      ],
+    };
+    // First writer instance.
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Simulate process restart: fresh writer, same inputs.
+    const stateDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t33-"));
+    try {
+      const writer2 = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir: stateDir2 });
+      writer2.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+      await flushMicrotasks();
+      writer2.flushSync();
+    } finally {
+      try { fs.rmSync(stateDir2, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    expect(seenIds.length).toBe(2);
+    expect(seenIds[0]).toBe(seenIds[1]); // restart-idempotent
   });
 
   it("extracts text from array content", async () => {

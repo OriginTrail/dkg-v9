@@ -258,7 +258,7 @@ export async function writePendingUpdateState(
  * Write `data` to `path` via temp file + POSIX rename so a crash mid-write
  * never leaves a partially-written file at `path`. Used for bookkeeping files
  * that the daemon reads on startup or compares against — `.current-commit`,
- * `.current-version`, `.update-pending.json`, `.update-status.json`.
+ * `.current-version`, `.update-pending.json`.
  *
  * Witnessed corruption that motivates this: on dkg-v9-relay-01 we found
  * `.current-commit` containing the same 40-char SHA written end-to-end with
@@ -608,10 +608,6 @@ export async function checkForNewCommitWithStatus(
   const gitEnv = gitCommandEnv(au);
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
-    // Record the failure too, otherwise alerting based on `lastCheck.status`
-    // keeps showing the previous healthy poll while the node is silently
-    // misconfigured (no remote check ever happens past this point).
-    await recordCheck({ ref, status: 'error' });
     return { status: "error" };
   }
 
@@ -622,54 +618,14 @@ export async function checkForNewCommitWithStatus(
       log,
       gitEnv,
     );
-    if (!latestCommit) {
-      await recordCheck({ ref, status: 'error' });
-      return { status: "error" };
-    }
-    if (latestCommit === currentCommit) {
-      await recordCheck({ ref, status: 'up-to-date', remoteCommit: latestCommit });
-      return { status: "up-to-date" };
-    }
-    await recordCheck({ ref, status: 'available', remoteCommit: latestCommit });
+    if (!latestCommit) return { status: "error" };
+    if (latestCommit === currentCommit) return { status: "up-to-date" };
     return { status: "available", commit: latestCommit };
   } catch (err: any) {
     log(
       `Auto-update: failed to check for new commit (${err?.message ?? String(err)})`,
     );
-    await recordCheck({ ref, status: 'error' });
     return { status: "error" };
-  }
-}
-
-async function recordCheck(args: { ref: string; status: 'available' | 'up-to-date' | 'error'; remoteCommit?: string }): Promise<void> {
-  try {
-    await withStatusMutex(async () => {
-      const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
-      // A clean `up-to-date` poll means the remote was reachable AND the
-      // local commit matches it — i.e. the node is currently healthy. Clear
-      // the failure counter so the documented `consecutiveFailures >= 3`
-      // alert resolves itself after a manual remediation (or a remote
-      // rollback that brings the upstream tip back to our local commit),
-      // without requiring a fresh successful build/swap to happen first.
-      //
-      // We deliberately do NOT clear on `available` (an attempt is about to
-      // run; let `recordAttempt` reflect its true outcome) or on `error`
-      // (transient or persistent — preserve the signal so the alert keeps
-      // firing if the remote stays unreachable).
-      const next: AutoUpdateStatusFile = {
-        ...prev,
-        lastCheck: {
-          at: new Date().toISOString(),
-          ref: args.ref,
-          status: args.status,
-          ...(args.remoteCommit ? { remoteCommit: args.remoteCommit } : {}),
-        },
-        ...(args.status === 'up-to-date' ? { consecutiveFailures: 0 } : {}),
-      };
-      await writeAutoUpdateStatus(next);
-    });
-  } catch {
-    /* observability-only */
   }
 }
 
@@ -1017,130 +973,6 @@ async function shouldRebuildContracts(args: {
   return changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
 }
 
-// ─── Persisted update outcome ──────────────────────────────────────────
-
-/**
- * Single-row history file at `<DKG_HOME>/.update-status.json`. Operators (and
- * the dashboard / Graylog alerting) read this to detect stuck nodes without
- * needing to scrape the daemon log. `consecutiveFailures >= 3` is a good
- * alert threshold given a 30-min check interval.
- */
-export interface AutoUpdateStatusFile {
-  /** Last check (regardless of outcome). */
-  lastCheck?: { at: string; ref: string; remoteCommit?: string; status: 'available' | 'up-to-date' | 'error' };
-  /** Last attempted update (i.e. a remote commit was newer than local). */
-  lastAttempt?: {
-    at: string;
-    ref: string;
-    fromCommit: string;
-    toCommit?: string;
-    status: UpdateStatus;
-    errorMessage?: string;
-    elapsedMs: number;
-  };
-  /** Last successful update. */
-  lastSuccess?: { at: string; ref: string; fromCommit: string; toCommit: string; version?: string };
-  /** Consecutive failed attempts since the last `updated` outcome. */
-  consecutiveFailures: number;
-}
-
-const STATUS_FILE_NAME = '.update-status.json';
-
-/**
- * In-process mutex for `.update-status.json` read-modify-write sequences.
- *
- * `recordCheck()` runs on every poll (no update lock held). `recordAttempt()`
- * runs inside the update lock. Both do read → mutate → write of the same
- * file via `await`-points; without serialization, an interleaving like:
- *     recordCheck:   read prev (consecutiveFailures=2)
- *     recordAttempt: read prev (consecutiveFailures=2), write (=3)
- *     recordCheck:   write merged-from-stale (=0)
- * silently erases the newer state.
- *
- * The daemon is single-process, so a Promise-chain mutex is sufficient.
- * Cross-process serialization is delegated to whoever holds the update lock
- * (only the daemon writes this file in normal operation; CLI commands read).
- */
-let _statusWriteChain: Promise<void> = Promise.resolve();
-async function withStatusMutex<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = _statusWriteChain;
-  let release!: () => void;
-  _statusWriteChain = new Promise<void>((resolve) => { release = resolve; });
-  try { await prev; } catch { /* prior holder errored — proceed */ }
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
-export async function readAutoUpdateStatus(): Promise<AutoUpdateStatusFile | null> {
-  const { dkgDir, readFile } = _autoUpdateIo;
-  try {
-    const raw = await readFile(join(dkgDir(), STATUS_FILE_NAME), 'utf-8');
-    const parsed = JSON.parse(raw) as AutoUpdateStatusFile;
-    if (typeof parsed?.consecutiveFailures !== 'number') return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-async function writeAutoUpdateStatus(status: AutoUpdateStatusFile): Promise<void> {
-  try {
-    await writeFileAtomic(
-      join(_autoUpdateIo.dkgDir(), STATUS_FILE_NAME),
-      JSON.stringify(status, null, 2),
-    );
-  } catch {
-    /* status file is observability-only; never break update flow */
-  }
-}
-
-async function recordAttempt(args: {
-  ref: string;
-  fromCommit: string;
-  toCommit?: string;
-  status: UpdateStatus;
-  errorMessage?: string;
-  startedAt: number;
-  version?: string;
-}): Promise<void> {
-  await withStatusMutex(async () => {
-    const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
-    const nowIso = new Date().toISOString();
-    const elapsedMs = Date.now() - args.startedAt;
-    const next: AutoUpdateStatusFile = {
-      ...prev,
-      lastAttempt: {
-        at: nowIso,
-        ref: args.ref,
-        fromCommit: args.fromCommit,
-        ...(args.toCommit ? { toCommit: args.toCommit } : {}),
-        status: args.status,
-        ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
-        elapsedMs,
-      },
-      // Caller guards `up-to-date` so it never reaches here; only `updated`
-      // resets the counter, every other terminal status (failed/error) bumps it.
-      consecutiveFailures:
-        args.status === 'updated'
-          ? 0
-          : (prev.consecutiveFailures ?? 0) + 1,
-    };
-    if (args.status === 'updated' && args.toCommit) {
-      next.lastSuccess = {
-        at: nowIso,
-        ref: args.ref,
-        fromCommit: args.fromCommit,
-        toCommit: args.toCommit,
-        ...(args.version ? { version: args.version } : {}),
-      };
-    }
-    await writeAutoUpdateStatus(next);
-  });
-}
-
 /**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
@@ -1184,52 +1016,9 @@ export async function performUpdateWithStatus(
     _updateInProgress = false;
     return "failed";
   }
-  const startedAt = Date.now();
-  let status: UpdateStatus = "failed";
-  let errorMessage: string | undefined;
-  // Allocate the capture object up-front so we still have whatever metadata
-  // `_performUpdateInner` filled in (notably `fromCommit`) even if the inner
-  // function throws — those exceptional paths are exactly what the persisted
-  // status file is meant to surface.
-  const outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } = {
-    fromCommit: '',
-    ref: (opts.refOverride ?? au.branch) || 'main',
-  };
   try {
-    status = await _performUpdateInner(au, log, opts, outcome);
-    return status;
-  } catch (err: any) {
-    errorMessage = err?.message ?? String(err);
-    throw err;
+    return await _performUpdateInner(au, log, opts);
   } finally {
-    // Persist the attempt BEFORE releasing the update lock. The status file
-    // is the alerting source of truth and is read-modify-write; if we
-    // unlocked first, another daemon/CLI could acquire the lock, write a
-    // newer status, and then this late write would clobber it. Doing the
-    // status write inside the lock makes it serialized w.r.t. any other
-    // status writer that respects the same lock.
-    //
-    // Only persist when we got far enough to know the current commit;
-    // otherwise the attempt is uninteresting (slots not initialized, etc.)
-    // and would just pollute consecutiveFailures. Also skip "up-to-date"
-    // outcomes — those are no-ops, not attempts, and recording them as
-    // attempts would pollute `lastAttempt` history. The counter for healthy
-    // idle polls is cleared via `recordCheck('up-to-date')` instead.
-    if (outcome.fromCommit && status !== 'up-to-date') {
-      try {
-        await recordAttempt({
-          ref: outcome.ref,
-          fromCommit: outcome.fromCommit,
-          toCommit: outcome.toCommit,
-          status,
-          ...(errorMessage ? { errorMessage } : {}),
-          startedAt,
-          ...(outcome.version ? { version: outcome.version } : {}),
-        });
-      } catch {
-        /* status persistence is observability-only */
-      }
-    }
     await releaseUpdateLock();
     _updateInProgress = false;
   }
@@ -1239,7 +1028,6 @@ async function _performUpdateInner(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   opts: PerformUpdateOptions,
-  captured?: { fromCommit: string; toCommit?: string; version?: string; ref: string },
 ): Promise<UpdateStatus> {
   const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
@@ -1292,8 +1080,6 @@ async function _performUpdateInner(
     }
   }
 
-  if (captured) captured.fromCommit = currentCommit;
-
   const pending = await readPendingUpdateState();
   if (pending) {
     const active = await activeSlot();
@@ -1302,7 +1088,6 @@ async function _performUpdateInner(
       if (pending.version) await writeFileAtomic(versionFile, pending.version);
       await clearPendingUpdateState();
       currentCommit = pending.commit || currentCommit;
-      if (captured) captured.fromCommit = currentCommit;
       log(
         `Auto-update: recovered pending update state for slot ${pending.target}.`,
       );
@@ -1642,10 +1427,6 @@ async function _performUpdateInner(
     log(
       `Auto-update: swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
     );
-    if (captured) {
-      captured.toCommit = checkedOutCommit;
-      if (nextVersion) captured.version = nextVersion;
-    }
   } catch (swapErr: any) {
     await clearPendingUpdateState();
     log(`Auto-update: symlink swap failed — ${swapErr.message}`);

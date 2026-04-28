@@ -213,12 +213,16 @@ async function main() {
   const daemonUp = await probeDaemon();
   if (!daemonUp) {
     if (AUTO_MODE) {
-      // Stay quiet on postinstall — this is the common case and not an error
+      // Stay quiet on postinstall — this is the common path. The MCP
+      // server will auto-create the paranet on first connect (see
+      // ensureContextGraph in packages/mcp-dkg/src/index.ts), so the
+      // user genuinely doesn't need to re-run anything after starting
+      // the daemon — they can just open Cursor and chat.
       if (cfgResult.created) {
-        log('daemon not reachable; start it with `dkg start`, then re-run `pnpm scope:setup` to create the dev-coordination paranet.');
+        log(`daemon not reachable yet — fine, the MCP server will create "${CONTEXT_GRAPH_ID}" on its first connect after \`dkg start\`.`);
       }
     } else {
-      warn(`daemon not reachable at ${DAEMON_API} — start it with \`dkg start\` and re-run.`);
+      warn(`daemon not reachable at ${DAEMON_API} — start it with \`dkg start\` and re-run, OR just chat in Cursor (the MCP auto-creates "${CONTEXT_GRAPH_ID}" on first connect).`);
     }
     return 0;
   }

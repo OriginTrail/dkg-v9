@@ -60,30 +60,39 @@ written without your OK.
 
 ## Onboarding (new clone)
 
-The intended flow for a coworker who just cloned the repo:
+The intended flow for a coworker who just cloned the repo — that's it,
+no extra commands:
 
 ```bash
-pnpm install                      # postinstall auto-runs scope-setup
+pnpm install                      # postinstall writes .dkg/config.yaml
 pnpm build                        # builds packages/mcp-dkg/dist/index.js
 dkg start                         # in another terminal, leave running
 # open Cursor → chat normally
 ```
 
-What the postinstall step does for you (`scripts/scope-setup.mjs`):
+Two pieces of automation make that work:
 
-1. **Writes `.dkg/config.yaml`** if it doesn't exist, with sensible
-   defaults (`http://localhost:9200`, `~/.dkg/auth.token`,
+1. **`scripts/scope-setup.mjs`** runs from the root `postinstall` and
+   writes `.dkg/config.yaml` with sensible defaults
+   (`http://localhost:9200`, `~/.dkg/auth.token`,
    `contextGraph: dev-coordination`) and a per-machine agent URI
-   auto-derived as `urn:dkg:agent:cursor-${user}-${hostname}`.
-2. **Creates the `dev-coordination` paranet** on your local DKG daemon
-   if it isn't there yet (skipped silently if the daemon isn't up — the
-   next manual `pnpm scope:setup` will pick it up).
+   auto-derived as `urn:dkg:agent:cursor-${user}-${hostname}`. It also
+   tries to create the `dev-coordination` paranet on the daemon — but
+   the daemon is usually still down at install time, so this part is
+   best-effort.
+2. **The MCP server itself auto-provisions the paranet on first
+   connect.** When Cursor/Claude Code spawns
+   `packages/mcp-dkg/dist/index.js` and your daemon is up, the server
+   checks whether the configured `contextGraph` exists and, if not,
+   creates it before serving any tools. So the very first `dkg_*`
+   tool call from the agent always lands in a live graph — coworkers
+   never have to run `pnpm scope:setup` manually after starting the
+   daemon.
 
-If postinstall hooks make you nervous you can run it explicitly any
-time:
+If you want to peek at it manually:
 
 ```bash
-pnpm scope:setup                  # idempotent, safe to re-run
+pnpm scope:setup                  # rerun the postinstall step
 pnpm scope:check-agent            # verify Cursor / Claude Code are wired
 ```
 

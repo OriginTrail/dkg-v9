@@ -241,10 +241,40 @@ export class ChatTurnWriter {
     const oldWatermarkFilePath = this.watermarkFilePath;
     this.stateDir = newStateDir;
     this.watermarkFilePath = newWatermarkFilePath;
-    const newDir = path.dirname(newWatermarkFilePath);
-    if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
-    this.writeWatermarkFile();
-    try { fs.unlinkSync(oldWatermarkFilePath); } catch { /* best effort */ }
+    let wrote = false;
+    try {
+      const newDir = path.dirname(newWatermarkFilePath);
+      if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+      wrote = this.writeWatermarkFile();
+    } catch (err) {
+      // T23 — Surface BOTH mkdirSync failures (ENOTDIR / ENOENT on
+      // an unwritable parent) AND writeWatermarkFile failures
+      // through the same `wrote` boolean so the old-file delete
+      // below is gated on confirmed success at the new location.
+      this.logger.error?.(
+        "[ChatTurnWriter.setStateDir] Failed to write watermark file at new path",
+        { err, newWatermarkFilePath },
+      );
+      wrote = false;
+    }
+    // T23 — Only remove the OLD file if the write at the NEW path
+    // succeeded. If the new location is unwritable (permissions,
+    // full disk, ENOSPC), `writeWatermarkFile` swallows the error
+    // and returns false — deleting the old file in that case would
+    // leave NO valid watermark anywhere, and the next restart would
+    // backfill every previously-persisted turn as new (daemon
+    // duplicate writes). On write failure the old file is preserved
+    // and the writer's internal `watermarkFilePath` already points
+    // at the new (failed) location, so future writes also try the
+    // new path. Operators see the logged error and can intervene.
+    if (wrote) {
+      try { fs.unlinkSync(oldWatermarkFilePath); } catch { /* best effort */ }
+    } else {
+      this.logger.warn?.(
+        "[ChatTurnWriter.setStateDir] Skipping old-file delete because the write at the new path failed; preserving old file as recovery source",
+        { oldWatermarkFilePath, newWatermarkFilePath },
+      );
+    }
   }
 
   private initFromFile(): void {
@@ -1417,7 +1447,7 @@ export class ChatTurnWriter {
     }
   }
 
-  private writeWatermarkFile(): void {
+  private writeWatermarkFile(): boolean {
     try {
       // T17 — Emit the new `{ w: <watermark>, b: <w4bCount> }` shape so
       // the W4b session count is preserved across process restarts.
@@ -1439,8 +1469,15 @@ export class ChatTurnWriter {
       const tmpPath = `${this.watermarkFilePath}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
       fs.renameSync(tmpPath, this.watermarkFilePath);
+      // T23 — Return true so callers (notably `setStateDir`) can gate
+      // destructive follow-up actions like deleting the OLD file on
+      // a confirmed-successful write at the new path. Without this,
+      // a swallowed write failure would let the migration delete
+      // the only valid watermark file.
+      return true;
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter] Failed to write watermark file", { err });
+      return false;
     }
   }
 }

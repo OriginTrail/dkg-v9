@@ -1976,6 +1976,40 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T23 — setStateDir does NOT delete the old file when the write at the new path fails", async () => {
+    // Regression for T23: pre-fix, `setStateDir` unconditionally
+    // unlinked the OLD file after calling `writeWatermarkFile()`,
+    // which silently swallows errors. If the new location was
+    // unwritable (permissions, ENOSPC, ENOENT on parent), the
+    // migration would delete the only valid watermark file —
+    // restart would backfill every previously-persisted turn as
+    // new (daemon duplicate writes). Post-fix, the old file is
+    // preserved when the new write fails.
+    // Seed and persist some state at the old path so we have a file
+    // to protect across the migration.
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk", 5);
+    // Write directly via the private helper — `flushSync()` is a no-op
+    // when there are no pending debounce timers.
+    dkw.writeWatermarkFile();
+    const oldFile = path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    expect(fs.existsSync(oldFile)).toBe(true);
+
+    // Make the new destination unwritable: point setStateDir at a path
+    // where the parent ITSELF is a file, not a directory. The internal
+    // `mkdirSync(dir, { recursive: true })` call will throw ENOTDIR on
+    // the file ancestor, the catch in writeWatermarkFile returns false,
+    // and the old file deletion must be skipped.
+    const blockingFile = path.join(stateDir, "blocker.txt");
+    fs.writeFileSync(blockingFile, "blocker");
+    const newStateDir = path.join(blockingFile, "nested-not-a-dir");
+
+    await writer.setStateDir(newStateDir);
+    // The old file MUST still exist — preserved as recovery source
+    // because the write at the new path failed.
+    expect(fs.existsSync(oldFile)).toBe(true);
+  });
+
   it("T22 — setStateDir merges destination state via max(w)/max(b) instead of overwriting (no rollback)", async () => {
     // Regression for T22: the earlier T18 migration used
     // `fs.copyFileSync` unconditionally, which rolled back any newer

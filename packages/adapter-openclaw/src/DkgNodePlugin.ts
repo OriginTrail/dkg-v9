@@ -134,6 +134,14 @@ export class DkgNodePlugin {
   // when a better (workspace-scoped) path becomes available and rebuild
   // the writer at the upgraded location.
   private chatTurnWriterStateDir: string | null = null;
+  // T24 — Tracks the target stateDir of an in-flight async migration.
+  // The migration is fire-and-forget from `register()` so we need a
+  // separate flag from `chatTurnWriterStateDir` (which only flips on
+  // SUCCESS) to suppress re-trigger on concurrent register() calls.
+  // Cleared on success or failure of the migration's `setStateDir`
+  // promise. If the migration fails, `chatTurnWriterStateDir` stays
+  // at the old value, so a future register() can retry.
+  private chatTurnWriterMigrationTarget: string | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -284,13 +292,16 @@ export class DkgNodePlugin {
    * register() call when DKG_PROBE_REGISTRATION_MODE=1 for sequencing logs.
    */
   private probeRegisterCallCount = 0;
-  // Track which `api` registries have already had probe handlers
-  // installed. Multi-phase init (e.g. `setup-runtime` → `full`) hands a
-  // fresh registry on each call; we want to install once per registry,
-  // not once per plugin instance, otherwise the probe never observes
-  // the upgraded full-mode hooks. WeakSet so we don't pin the api in
-  // memory after the gateway tears it down.
-  private probeRegisteredApis = new WeakSet<OpenClawPluginApi>();
+  // Track which (api, mechanism, event) tuples have already had probe
+  // handlers installed. Per-mechanism granularity is load-bearing: same-
+  // object setup-runtime → full upgrades flip `api.on` from `undefined`
+  // to a function on the second call, and a per-api-only gate would
+  // miss the typed-hook surface that became available post-upgrade
+  // (T25 regression fix). The api registries themselves are still
+  // referenced by WeakMap keys so map entries collect when the gateway
+  // tears down an api. Per-event Sets inside each entry let us install
+  // only the mechanism+event tuples not already bound on this api.
+  private probeApiInstalls = new WeakMap<OpenClawPluginApi, { typed: Set<string>; hooks: Set<string> }>();
   // R15.4 — Track which internal events have already had a probe handler
   // pushed into the process-global `globalThis.openclaw.internalHookHandlers`
   // map. The map outlives any individual `api` registry, so the per-`api`
@@ -451,6 +462,12 @@ export class DkgNodePlugin {
       // Only upgrade fallback → workspace-scoped; never the other
       // direction. Same-path is a no-op.
       if (this.chatTurnWriterStateDir === stateDir) return;
+      // T24 — Suppress re-trigger when an async migration to this
+      // exact stateDir is already in flight. Without this, two
+      // concurrent register() calls before the migration settles
+      // would launch two `setStateDir` promises racing on the same
+      // writer state.
+      if (this.chatTurnWriterMigrationTarget === stateDir) return;
       const wasFallback = this.chatTurnWriterStateDir === homeDir;
       const isUpgrade = wasFallback && stateDir !== homeDir;
       if (!isUpgrade) return; // Don't downgrade or sidestep.
@@ -464,16 +481,28 @@ export class DkgNodePlugin {
       // destination state per-session via max(w)/max(b) instead of
       // overwriting (T22 regression fix — pre-fix the migration
       // unconditionally copied, which rolled back newer workspace
-      // state from a prior run). Fire-and-forget — we mark the new
-      // stateDir immediately so the next register() call doesn't
-      // re-trigger this branch, and the writer continues to function
-      // at the OLD path until the merge lands. Errors are logged at
-      // warn but never thrown — register() must remain side-effect-
-      // safe to gateway init.
-      this.chatTurnWriterStateDir = stateDir;
-      this.chatTurnWriter.setStateDir(stateDir).catch((err: any) => {
-        api.logger.warn?.(`[dkg] ChatTurnWriter stateDir migration failed: ${err?.message ?? err}`);
-      });
+      // state from a prior run). Fire-and-forget — register() must
+      // remain side-effect-safe to gateway init, so we cannot await.
+      // T24 — `chatTurnWriterStateDir` is updated ONLY on success.
+      // On failure, `chatTurnWriterMigrationTarget` is cleared and
+      // `chatTurnWriterStateDir` stays at the fallback so a future
+      // register() can retry the migration. Without this, a
+      // transient migration failure (e.g., destination disk full)
+      // would suppress all future retries because the field would
+      // already match the desired target.
+      this.chatTurnWriterMigrationTarget = stateDir;
+      this.chatTurnWriter.setStateDir(stateDir).then(
+        () => {
+          this.chatTurnWriterStateDir = stateDir;
+          this.chatTurnWriterMigrationTarget = null;
+        },
+        (err: any) => {
+          api.logger.warn?.(`[dkg] ChatTurnWriter stateDir migration failed: ${err?.message ?? err}`);
+          this.chatTurnWriterMigrationTarget = null;
+          // Leave chatTurnWriterStateDir untouched so a future
+          // register() with the same target re-attempts the migration.
+        },
+      );
       return;
     }
 
@@ -2505,22 +2534,21 @@ export class DkgNodePlugin {
       'globalThis-hook-map=' + (hasGlobalHookMap ? 'present' : 'absent'),
     );
 
-    // Per-API gating: install probe handlers ONCE per `api` registry,
-    // not globally once per plugin instance. Multi-phase init hands a
-    // fresh registry on the second call (setup-runtime → full), and the
-    // probe is meant to OBSERVE that transition — globally suppressing
-    // later installs would mean we never bind to the full-mode registry
-    // and the diagnostic misses the very thing it's supposed to catch.
-    // WeakSet keeps memory tidy: when the gateway tears down an old api
-    // the entry collects.
-    if (this.probeRegisteredApis.has(api)) {
-      api.logger.debug?.(
-        '[dkg-probe] skipping handler registration on re-entry for SAME api (call#=' +
-          this.probeRegisterCallCount + ')',
-      );
-      return;
+    // T25 — Per-api per-(mechanism, event) gating. Multi-phase init
+    // hands either a fresh registry (setup-runtime → full with new api)
+    // OR the SAME api with `api.on` flipped from undefined to a function
+    // (in-place upgrade). Pre-fix the probe gated on api identity alone
+    // and short-circuited the second case — typed-hook installs that
+    // saw `hasOn === false` on call 1 stayed permanently un-installed
+    // even when the upgraded api exposed `api.on` on call 2. The
+    // installs map below tracks WHICH mechanism/event tuples have
+    // already been bound on each api so the install loop below can
+    // retry the missing tuples on later calls.
+    let installs = this.probeApiInstalls.get(api);
+    if (!installs) {
+      installs = { typed: new Set(), hooks: new Set() };
+      this.probeApiInstalls.set(api, installs);
     }
-    this.probeRegisteredApis.add(api);
 
     // Helper to make a probe handler factory.
     // R21.3 — Read api+mode from `this.probeCurrent` at fire time
@@ -2553,18 +2581,24 @@ export class DkgNodePlugin {
     const internalEvents = ['message:received', 'message:sent'];
 
     for (const eventName of typedEvents) {
-      if (hasOn) {
+      // T25 — Skip mechanism+event tuples already bound on this api
+      // (don't double-install on re-entry). Install only what's missing,
+      // which lets the second call after a setup-runtime → full upgrade
+      // bind the typed-hook surface that was unavailable on call 1.
+      if (hasOn && !installs.typed.has(eventName)) {
         try {
           (api as any).on(eventName, makeProbeHandler(eventName, 'api.on'));
+          installs.typed.add(eventName);
         } catch (err: any) {
           api.logger.debug?.(
             '[dkg-probe] api.on(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),
           );
         }
       }
-      if (hasRegisterHook) {
+      if (hasRegisterHook && !installs.hooks.has(eventName)) {
         try {
           (api as any).registerHook(eventName, makeProbeHandler(eventName, 'api.registerHook'), { name: 'dkg-probe-' + eventName });
+          installs.hooks.add(eventName);
         } catch (err: any) {
           api.logger.debug?.(
             '[dkg-probe] api.registerHook(' + eventName + ') threw: ' + (err?.message ?? 'unknown error'),

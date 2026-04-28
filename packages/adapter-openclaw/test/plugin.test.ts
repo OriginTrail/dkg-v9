@@ -2809,6 +2809,79 @@ describe('DkgNodePlugin', () => {
     await plugin.stop();
   });
 
+  it('T24 — chatTurnWriterStateDir is updated ONLY on successful migration; failure leaves state at fallback so future register() retries', async () => {
+    // Regression for T24: pre-fix, `chatTurnWriterStateDir = stateDir`
+    // was set BEFORE the async migration completed. If `setStateDir`
+    // failed (e.g., transient FS error), the field was already updated
+    // and the next register() with the same target stateDir
+    // short-circuited under the "same path" guard — never retrying.
+    // Post-fix the field flips ONLY on success; failure clears the
+    // separate `chatTurnWriterMigrationTarget` flag and leaves
+    // `chatTurnWriterStateDir` at the old value.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const tmpRoot = require('os').tmpdir();
+    const workspaceDir = path.join(tmpRoot, `dkg-t24-workspace-${Date.now()}`);
+    const homeDir = `${require('os').homedir()}/.openclaw`;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiFallback: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiFallback);
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+
+      // Force setStateDir to fail.
+      const writer = (plugin as any).chatTurnWriter;
+      const originalSetStateDir = writer.setStateDir.bind(writer);
+      writer.setStateDir = vi.fn().mockRejectedValue(new Error('simulated migration failure'));
+
+      const apiBetter: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiBetter);
+
+      // Wait for the fire-and-forget setStateDir to reject.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Failure: migration target cleared, but stateDir stays at fallback.
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
+
+      // A second register() with the SAME apiBetter MUST re-trigger the
+      // migration (proves the failure didn't poison the retry path).
+      writer.setStateDir = vi.fn().mockImplementation(originalSetStateDir);
+      plugin.register(apiBetter);
+      // The migration was triggered again — `chatTurnWriterMigrationTarget`
+      // should be set during the in-flight async work.
+      const target = (plugin as any).chatTurnWriterMigrationTarget;
+      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.openclaw');
+      // Wait for retry to settle.
+      await new Promise((r) => setTimeout(r, 50));
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T18/T21 — ensureChatTurnWriter migrates writer in-place via setStateDir when a better stateDir becomes available', async () => {
     // Regression for T18: pre-fix, once `chatTurnWriter` was constructed
     // with the home-dir fallback (because setup-runtime register had
@@ -2856,13 +2929,20 @@ describe('DkgNodePlugin', () => {
       const writer2 = (plugin as any).chatTurnWriter;
       // SAME instance — migration is in-place (preserves in-flight state).
       expect(writer2).toBe(writer1);
-      // chatTurnWriterStateDir tracking flips immediately so subsequent
-      // registers don't re-trigger.
-      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+      // T24 — `chatTurnWriterStateDir` is updated ONLY on successful
+      // migration. While the async `setStateDir` is in flight,
+      // `chatTurnWriterMigrationTarget` reflects the target.
+      expect((plugin as any).chatTurnWriterMigrationTarget?.replace(/\\/g, '/')).toBe(
         workspaceDir.replace(/\\/g, '/') + '/.openclaw',
       );
       // Wait for the fire-and-forget setStateDir to complete.
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 100));
+      // After success, chatTurnWriterStateDir flips and migration
+      // target clears.
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+      expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
       const path2 = (writer2 as any).watermarkFilePath as string;
       expect(path2.replace(/\\/g, '/')).toContain(
         workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',

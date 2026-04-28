@@ -103,7 +103,16 @@ describe('DkgNodePlugin registration-mode probe', () => {
     expect(registerHookSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
   });
 
-  it('per-api gating: re-registers on a NEW api instance, skips on the SAME api (R11.3)', () => {
+  it('per-api gating: re-registers on a NEW api instance, does NOT double-install on the SAME api (R11.3 / T25)', () => {
+    // T25 — Pre-fix the probe gated on api identity alone and would
+    // wholesale-skip re-entry. Post-fix it tracks per-(api,mechanism,
+    // event) so:
+    //   * NEW api: full install runs (covered by other tests).
+    //   * SAME api with no hook-surface change: no double-install of
+    //     already-bound mechanism+event tuples.
+    //   * SAME api with hook surface upgraded (api.on flips from
+    //     undefined → function): the missing typed-hook tuples DO
+    //     install on the second call. (Asserted in a separate test.)
     process.env.DKG_PROBE_REGISTRATION_MODE = '1';
 
     const apiSetup = makeMockApi({ registrationMode: 'setup-runtime' });
@@ -114,10 +123,7 @@ describe('DkgNodePlugin registration-mode probe', () => {
     plugin.register(apiSetup);
     plugin.register(apiFull);
 
-    // Both APIs must have received the probe's "register() called" log —
-    // proves the probe handler-registration flow ran for each, not just
-    // the first call. Without per-api gating, the second call would have
-    // hit the `> 1` global guard and skipped everything.
+    // Both APIs must have received the probe's "register() called" log.
     const setupRegLogs = (apiSetup.logger.info as any).mock.calls
       .map((c: any[]) => c[0])
       .filter((m: string) => typeof m === 'string' && m.includes('[dkg-probe] register() called'));
@@ -127,13 +133,58 @@ describe('DkgNodePlugin registration-mode probe', () => {
     expect(setupRegLogs.length).toBe(1);
     expect(fullRegLogs.length).toBe(1);
 
-    // Now hit apiSetup AGAIN — same api as call #1. The probe must log
-    // a "skipping" debug line, NOT a fresh registration.
+    // Snapshot the PROBE-specific registerHook calls before the
+    // re-entry. Filtering by `dkg-probe-` name isolates the probe's
+    // installs from the adapter's own hook installs (which DO retry
+    // by design via T6-style mechanism on the same api).
+    const probeNamesBefore = (apiSetup.registerHook as any).mock.calls
+      .filter((c: any[]) => c[2]?.name?.startsWith?.('dkg-probe-'))
+      .length;
+
+    // Re-enter with the SAME apiSetup. With unchanged hook surface
+    // (same api.on / api.registerHook availability) the probe must
+    // NOT double-install any mechanism+event tuple.
     plugin.register(apiSetup);
-    const skipLogs = (apiSetup.logger.debug as any).mock.calls
-      .map((c: any[]) => c[0])
-      .filter((m: string) => typeof m === 'string' && m.includes('[dkg-probe] skipping handler registration'));
-    expect(skipLogs.length).toBeGreaterThanOrEqual(1);
+
+    const probeNamesAfter = (apiSetup.registerHook as any).mock.calls
+      .filter((c: any[]) => c[2]?.name?.startsWith?.('dkg-probe-'))
+      .length;
+    expect(probeNamesAfter).toBe(probeNamesBefore);
+  });
+
+  it('per-api per-mechanism gating: api.on flips from undefined to function across calls; missing typed-hook tuples bind on the upgrade (T25)', () => {
+    // Regression for T25: pre-fix the per-api WeakSet caused a wholesale
+    // skip on the second register() call, so a `setup-runtime → full`
+    // upgrade on the SAME api object that flipped `api.on` from
+    // undefined → function never bound the typed-hook surface that
+    // became available. Post-fix the per-(mechanism, event) tracking
+    // installs only the missing tuples.
+    process.env.DKG_PROBE_REGISTRATION_MODE = '1';
+
+    // Mutable api: api.on starts undefined, becomes a function on call 2.
+    const onSpy = vi.fn();
+    const api: any = {
+      ...makeMockApi(),
+      registrationMode: 'setup-runtime',
+      on: undefined,
+    };
+    const plugin = new DkgNodePlugin();
+    plugin.register(api);
+
+    // Call 1: api.on absent → no typed-hook installs via api.on.
+    expect(onSpy).not.toHaveBeenCalled();
+
+    // Flip the surface: api.on becomes available, mode upgrades.
+    api.on = onSpy;
+    api.registrationMode = 'full';
+    plugin.register(api);
+
+    // Probe MUST have called api.on for each typed event on the second
+    // call — the per-mechanism gate let the upgrade install bind the
+    // newly-available surface.
+    const events = onSpy.mock.calls.map((c) => c[0]);
+    expect(events).toContain('before_prompt_build');
+    expect(events).toContain('agent_end');
   });
 
   it('probe gracefully handles missing globalThis internal-hook map', () => {

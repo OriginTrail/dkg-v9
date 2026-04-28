@@ -1007,7 +1007,15 @@ describe('best-effort semantic enqueue helper', () => {
         'x-dkg-bridge-token': 'node-token',
       },
       socket: { remoteAddress: '127.0.0.1' },
-    } as any, 'openclaw', authOpts)).toBe(false);
+    } as any, 'openclaw', authOpts)).toBe(true);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(makeConfig(), {
+      headers: {
+        'x-dkg-local-agent-integration': 'hermes',
+        'x-dkg-bridge-token': 'node-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'hermes', authOpts)).toBe(false);
   });
 
   it('uses the same resolved default agent address as assertion writes for chat-turn semantic URIs', () => {
@@ -1474,6 +1482,35 @@ describe('best-effort semantic enqueue helper', () => {
 
     expect(count).toBe(1);
     expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('leaves queued semantic events pending when OpenClaw capability false is only an interim reconnect state', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn(),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: false,
+            },
+            runtime: {
+              status: 'connecting',
+              ready: false,
+            },
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
   });
 
   it('saves config before reconciling OpenClaw semantic availability', async () => {

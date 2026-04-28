@@ -259,8 +259,13 @@ export function isAuthorizedLocalAgentSemanticWorkerRequest(
 ): boolean {
   const normalizedIntegrationId = normalizeIntegrationId(integrationId);
   if (!normalizedIntegrationId) return false;
-  const stored = getLocalAgentIntegration(config, normalizedIntegrationId);
-  if (!stored?.enabled) return false;
+  const storedConfig = getStoredLocalAgentIntegrations(config)[normalizedIntegrationId];
+  const integration = getLocalAgentIntegration(config, normalizedIntegrationId);
+  if (storedConfig) {
+    if (integration?.enabled !== true) return false;
+  } else if (normalizedIntegrationId !== 'openclaw') {
+    return false;
+  }
   const headerIntegrationId = normalizeIntegrationId(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
   );
@@ -286,6 +291,7 @@ export function reconcileOpenClawSemanticAvailability(
   const stored = getStoredLocalAgentIntegrations(config).openclaw;
   if (!stored) return 0;
   if (stored.enabled === true && stored.capabilities?.semanticEnrichment !== false) return 0;
+  if (stored.enabled === true && !isOpenClawSemanticCapabilityTerminallyUnavailable(stored)) return 0;
   if (stored.enabled !== true && !isOpenClawExplicitlyDisconnected(stored)) return 0;
   return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
 }
@@ -394,6 +400,11 @@ function isOpenClawExplicitlyDisconnected(stored: LocalAgentIntegrationConfig): 
     && stored.enabled === false
     && stored.runtime?.status === 'disconnected',
   );
+}
+
+function isOpenClawSemanticCapabilityTerminallyUnavailable(stored: LocalAgentIntegrationConfig): boolean {
+  if (stored.capabilities?.semanticEnrichment !== false) return false;
+  return stored.runtime?.status === 'degraded' || stored.runtime?.status === 'error';
 }
 
 function refreshExtractionStatusSemanticDescriptor(

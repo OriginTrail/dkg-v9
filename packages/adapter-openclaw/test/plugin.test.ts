@@ -888,17 +888,19 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).not.toContain('did:dkg:agent:');
     });
 
-    it('dkg_query falls back to nodePeerId when agent_address is omitted on no-keystore nodes (T57)', async () => {
-      // T57 — Pre-fix the handler defaulted ONLY to `nodeAgentAddress`
-      // when `agent_address` was omitted, mirroring T31 keystore-
-      // present semantics. On no-keystore deployments that errored
-      // even though the daemon would have served the peerId-keyed
-      // WM. Match T56's resolver fallback shape: try eth, then
-      // peerId, then error.
+    it('dkg_query falls back to nodePeerId when agent_address is omitted on no-keystore nodes (T57/T60)', async () => {
+      // T57 — handler default for omitted agent_address must mirror
+      // the resolver's `nodeAgentAddress ?? nodePeerId` priority.
+      // T60 — fallback gates on `localKeystoreCheckedAndAbsent` so
+      // remote-daemon (probe-skipped) doesn't silently route to
+      // gateway's local peerId.
       const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
-      // No keystore → nodeAgentAddress stays undefined. Pre-seed peerId.
       (plugin as any).nodeAgentAddress = undefined;
       (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
+      // T60 — explicitly mark the local-keystore-confirmed-absent
+      // state. Without this the resolver returns undefined on
+      // remote-daemon paths.
+      (plugin as any).localKeystoreCheckedAndAbsent = true;
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
@@ -909,6 +911,33 @@ describe('DkgNodePlugin', () => {
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
       expect(body.view).toBe('working-memory');
       expect(body.agentAddress).toBe('12D3KooWNoKeystorePeer');
+    });
+
+    it('dkg_query refuses to fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
+      // T60 — On remote daemonUrl, `probeNodeAgentAddressOnce()`
+      // intentionally skips the keystore read (T38), so
+      // `nodeAgentAddress` stays undefined AND
+      // `localKeystoreCheckedAndAbsent` stays false. The fallback
+      // to gateway's local peerId would silently scope WM to a
+      // namespace the remote daemon has never heard of. Handler
+      // MUST error in that case so the operator sees the
+      // recovery knobs surfaced.
+      const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
+      (plugin as any).nodeAgentAddress = undefined;
+      (plugin as any).nodePeerId = '12D3KooWGatewayLocal';
+      (plugin as any).localKeystoreCheckedAndAbsent = false;  // remote-daemon: probe skipped
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const text = result.content[0].text;
+      expect(text).toContain('working-memory');
+      expect(text).toContain('agent identity');
+      // Error names the recovery knobs operators should reach for.
+      expect(text).toContain('DKG_AGENT_ADDRESS');
+      expect(text).toContain('dkgHome');
     });
 
     it('dkg_query forwards peerId-form WM agent_address verbatim (T48/T53 — daemon accepts as self-alias on no-keystore nodes)', async () => {
@@ -4104,14 +4133,13 @@ describe('DkgNodePlugin', () => {
       }
     });
 
-    it('falls back to nodePeerId when nodeAgentAddress is unresolved (T56 — no-keystore deployments)', async () => {
+    it('falls back to nodePeerId when nodeAgentAddress is unresolved on confirmed-local-no-keystore (T56/T60)', async () => {
       // T56 — On fresh / auth-disabled / no-keystore nodes, the
       // daemon's writer-side falls back to peerId via
-      // `defaultAgentAddress ?? peerId`. Adapter resolver MUST mirror
-      // that priority so `memory_search` / auto-recall / `dkg_query
-      // (view: WM)` keep working in those deployments. Empty keystore
-      // dir → nodeAgentAddress stays undefined → resolver should
-      // surface peerId.
+      // `defaultAgentAddress ?? peerId`. Adapter resolver mirrors
+      // that priority. T60 — fallback gates on
+      // `localKeystoreCheckedAndAbsent`, set by `probeNodeAgentAddressOnce`
+      // when a localhost-gated probe legitimately found no keystore.
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
         memory: { enabled: true },
@@ -4119,13 +4147,43 @@ describe('DkgNodePlugin', () => {
       });
       try {
         plugin.register(makeMockApi());
+        // Drive the probe — empty tempDir yields no keystore →
+        // probe sets `localKeystoreCheckedAndAbsent = true`.
         await (plugin as any).ensureNodeAgentAddress();
         expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        // Pre-seed the peerId field so we don't depend on /api/status.
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
         (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
         const resolver = (plugin as any).memorySessionResolver;
         expect(resolver.getDefaultAgentAddress()).toBe('12D3KooWNoKeystorePeer');
         expect(resolver.getSession(undefined)?.agentAddress).toBe('12D3KooWNoKeystorePeer');
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('does NOT fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
+      // T60 — `probeNodeAgentAddressOnce` skips the keystore read
+      // for non-localhost daemonUrl. `localKeystoreCheckedAndAbsent`
+      // stays false → resolver returns undefined even though
+      // nodePeerId is populated. Without the gate, remote-daemon
+      // recall would silently scope WM to gateway's local peerId
+      // (which the remote daemon has never heard of) instead of
+      // surfacing the actual misconfiguration via the "backend
+      // not ready" path.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        (plugin as any).nodePeerId = '12D3KooWGatewayLocalPeer';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        expect(resolver.getSession(undefined)?.agentAddress).toBeUndefined();
       } finally {
         await plugin.stop();
       }

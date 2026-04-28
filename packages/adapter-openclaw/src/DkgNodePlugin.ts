@@ -242,6 +242,17 @@ export class DkgNodePlugin {
    * `peerIdProbeInFlight` pattern. Null when no read is running.
    */
   private agentAddressProbeInFlight: Promise<void> | null = null;
+  // T60 — Set true ONLY after a localhost-gated keystore probe
+  // legitimately turns up empty (no keystore file, empty `{}`, or no
+  // valid eth keys). Distinguishes "co-located daemon writes WM under
+  // peerId via `defaultAgentAddress ?? peerId`" (peerId fallback OK)
+  // from "remote daemon — keystore probe intentionally skipped"
+  // (peerId fallback NOT ok; gateway's local peerId doesn't match the
+  // remote daemon's writer-side identity). Multi-agent and other
+  // refuse-to-guess paths leave this false so the resolver returns
+  // undefined → operator sees "not ready" with the recovery knobs
+  // surfaced instead of silently scoping queries to the wrong namespace.
+  private localKeystoreCheckedAndAbsent: boolean = false;
   /**
    * Timer for the one-shot deferred retry after a failed initial probe
    * at register time. Belt-and-suspenders with `ensureNodePeerId`: the
@@ -285,25 +296,28 @@ export class DkgNodePlugin {
       }
       return {
         projectContextGraphId,
-        // T56 — Match the daemon's writer-side priority
+        // T56/T60 — Mirror the daemon's writer-side priority
         // (`packages/cli/src/daemon/lifecycle.ts:346`,
-        // `agent.getDefaultAgentAddress() ?? agent.peerId`): when the
-        // keystore yields an eth address use it; on fresh / auth-
-        // disabled / no-keystore nodes fall back to peerId. The daemon
-        // accepts both as valid self-aliases per `agent.query()` at
-        // `dkg-agent.ts:2647-2696`. Without the fallback,
-        // `memory_search` / auto-recall / `dkg_query(view: WM)` all
-        // dead-end on no-keystore deployments even though the
-        // documented contract says they should work.
-        agentAddress: this.nodeAgentAddress ?? this.nodePeerId,
+        // `agent.getDefaultAgentAddress() ?? agent.peerId`), but ONLY
+        // fall back to peerId when we've CONFIRMED via a localhost-
+        // gated keystore probe that no eth identity exists at the
+        // daemon's home dir. For remote daemons (T38 — probe
+        // intentionally skipped) and multi-agent keystores (refuse-
+        // to-guess), `localKeystoreCheckedAndAbsent` stays false so
+        // the resolver returns undefined and the operator gets the
+        // "backend not ready" path with the recovery knobs surfaced.
+        // Without the gate, remote-daemon recall would silently scope
+        // WM to the gateway's local peerId (which the remote daemon
+        // has never heard of) and return empty bindings instead of
+        // surfacing the actual misconfiguration.
+        agentAddress: this.resolveDefaultAgentAddress(),
       };
     },
     getDefaultAgentAddress: () => {
       if (this.nodeAgentAddress === undefined) {
         void this.ensureNodeAgentAddress();
       }
-      // T56 — same fallback as `getSession.agentAddress` above.
-      return this.nodeAgentAddress ?? this.nodePeerId;
+      return this.resolveDefaultAgentAddress();
     },
     // B17 + B23: The cache is populated fire-and-forget from
     // `refreshMemoryResolverState` at register time. Two failure modes
@@ -1706,6 +1720,13 @@ export class DkgNodePlugin {
         this.nodeAgentAddress = address;
         return;
       }
+      // T60 — Confirmed local-no-keystore case. The daemon at this
+      // host writes WM under `defaultAgentAddress ?? peerId`, so its
+      // peerId IS the right scope key. The resolver's
+      // `nodeAgentAddress ?? nodePeerId` fallback can safely activate
+      // — gate it on this flag so remote-daemon (probe-skipped) and
+      // multi-agent (refuse-to-guess) cases stay at undefined.
+      this.localKeystoreCheckedAndAbsent = true;
       const homeLabel = dkgHomeOverride
         ? `\`${dkgHomeOverride}/agent-keystore.json\``
         : '`<DKG_HOME>/agent-keystore.json`';
@@ -1761,6 +1782,27 @@ export class DkgNodePlugin {
    * Localhost set: 127.0.0.0/8, ::1, 0.0.0.0, 'localhost'. URL parse
    * failures default to `false` (treat as remote / unsafe).
    */
+  /**
+   * T56/T60 — Resolve the WM identifier for default-agent self-reads.
+   * Returns:
+   *   - `nodeAgentAddress` (eth) when the keystore yielded one.
+   *   - `nodePeerId` ONLY when a localhost-gated keystore probe
+   *     legitimately found nothing (`localKeystoreCheckedAndAbsent`).
+   *     Mirrors the daemon's writer-side `defaultAgentAddress ??
+   *     peerId` priority on no-keystore deployments where writes go
+   *     to peerId.
+   *   - `undefined` for every other unresolved state (remote-daemon
+   *     probe skipped, multi-agent refuse-to-guess, probe in flight).
+   *     Lets the existing "backend not ready" error surface with the
+   *     recovery knobs instead of silently scoping queries to the
+   *     wrong namespace.
+   */
+  private resolveDefaultAgentAddress(): string | undefined {
+    if (this.nodeAgentAddress !== undefined) return this.nodeAgentAddress;
+    if (this.localKeystoreCheckedAndAbsent) return this.nodePeerId;
+    return undefined;
+  }
+
   private daemonIsLocalhost(): boolean {
     const url = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     try {
@@ -2781,25 +2823,30 @@ export class DkgNodePlugin {
       if (view === 'working-memory' && agentAddress === undefined) {
         // T31 — Keystore-present deployments scope WM by the daemon's
         // writer-side eth address.
-        // T57 — No-keystore deployments fall back to peerId, matching
-        // the daemon's writer-side `defaultAgentAddress ?? peerId`
-        // priority (`packages/cli/src/daemon/lifecycle.ts:346`) and
-        // the same fallback the resolver applies (T56). Pre-fix this
-        // handler defaulted to ONLY `nodeAgentAddress`, so on fresh /
-        // auth-disabled / no-keystore nodes `dkg_query(view: WM)`
-        // errored even though the daemon would have served the
-        // peerId-keyed namespace.
+        // T57/T60 — No-keystore deployments fall back to peerId,
+        // matching the daemon's writer-side `defaultAgentAddress ??
+        // peerId` priority. The fallback is ONLY safe when a
+        // localhost-gated probe confirmed no keystore exists
+        // (`localKeystoreCheckedAndAbsent`) — for remote daemons
+        // (T38 — probe skipped) and multi-agent (refuse-to-guess),
+        // peerId would be the gateway's local libp2p ID, which the
+        // remote daemon has never heard of, and the query would
+        // silently scope to a non-existent namespace. Use the
+        // shared `resolveDefaultAgentAddress` helper so the handler
+        // and resolver stay in lockstep.
         if (this.nodeAgentAddress === undefined) {
           await this.ensureNodeAgentAddress().catch(() => {});
         }
-        if (this.nodeAgentAddress === undefined && this.nodePeerId === undefined) {
+        if (this.localKeystoreCheckedAndAbsent && this.nodePeerId === undefined) {
           await this.ensureNodePeerId().catch(() => {});
         }
-        agentAddress = this.nodeAgentAddress ?? this.nodePeerId;
+        agentAddress = this.resolveDefaultAgentAddress();
         if (agentAddress === undefined) {
           return this.error(
             '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
-              "or retry once the node's agent address (or peer ID) is available.",
+              "or retry once the node's agent address (or peer ID) is available. " +
+              "For remote daemons set DKG_AGENT_ADDRESS env; for daemons started with " +
+              "`dkg start --home /custom/path` set the adapter `dkgHome` config or DKG_HOME env.",
           );
         }
       }

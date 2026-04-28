@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { homedir } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -2607,6 +2607,65 @@ describe('DkgNodePlugin', () => {
     expect(events).toContain('agent_end');
   });
 
+  it('T31 — multi-phase init re-bind: typed hooks installed on EVERY api so emit-against-old-api still fires', async () => {
+    // Regression for T31 Bug B: pre-fix, the apiChanged branch destroyed
+    // the old hook surface and rebuilt against the new api. The gateway
+    // re-registers our plugin on each inbound turn against fresh api
+    // objects but doesn't always dispatch against the latest one — orphan
+    // handlers had `installedVia=on, fireCount=0` after multiple chats.
+    // Post-fix, every surface stays live; whichever api the gateway emits
+    // against has a bound handler.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+
+    // Two distinct api objects, each with its own `on` registry.
+    const onSpy1 = vi.fn();
+    const api1 = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy1,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const onSpy2 = vi.fn();
+    const api2 = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy2,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(api1);
+    // api1 received typed-hook installs.
+    const events1 = onSpy1.mock.calls.map((c: any) => c[0]);
+    expect(events1).toContain('before_prompt_build');
+    expect(events1).toContain('agent_end');
+
+    // Multi-phase init: gateway hands a NEW api on the next register.
+    plugin.register(api2);
+    // api2 ALSO received typed-hook installs (not just the latest — both
+    // are now live so whichever api the gateway dispatches against has
+    // a bound wrapper).
+    const events2 = onSpy2.mock.calls.map((c: any) => c[0]);
+    expect(events2).toContain('before_prompt_build');
+    expect(events2).toContain('agent_end');
+
+    // Critically: api1's handlers were NOT torn down. The `allHookSurfaces`
+    // set tracks both surfaces; a future emit against api1 would still
+    // reach a live handler. We don't have an emit primitive in the mock
+    // here, but the surface count is the load-bearing invariant.
+    expect((plugin as any).allHookSurfaces.size).toBe(2);
+  });
+
   it('T7 — session_end goes through HookSurface so stop() → register() does NOT accumulate handlers', async () => {
     // Regression for T7: pre-fix, `session_end` was registered via
     // direct `api.registerHook(...)` on every install. After
@@ -2761,7 +2820,8 @@ describe('DkgNodePlugin', () => {
     });
     const releaseQueries = () => { while (pendingResolvers.length) pendingResolvers.shift()!(); };
     // Give the manager a peer ID so the recall preflight doesn't early-return.
-    (plugin as any).nodePeerId = '12D3KooWTestSingleFlight';
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
 
     const event = { messages: [{ role: 'user', content: 'find something interesting' }] };
     const ctx = { sessionKey: 'test-session-1' };
@@ -2830,7 +2890,8 @@ describe('DkgNodePlugin', () => {
       await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
       return { results: { bindings: [] } };
     });
-    (plugin as any).nodePeerId = '12D3KooWTestT20';
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
 
     // Stub the resolver so we can flip the resolved project mid-test.
     let currentProject = 'project-A';
@@ -3043,7 +3104,8 @@ describe('DkgNodePlugin', () => {
       await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
       return { results: { bindings: [] } };
     });
-    (plugin as any).nodePeerId = '12D3KooWTestT14';
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
 
     const event = { messages: [{ role: 'user', content: 'find something' }] };
     // Two ctx values share the SAME sessionKey but differ on
@@ -3524,13 +3586,16 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       expect(registeredCapability).not.toBeNull();
 
-      // Let the best-effort probes kicked off inside register() flush so
-      // nodePeerId is populated before we exercise the runtime path below.
-      // Codex B59: without this, the peer-ID probe is still pending and
-      // getMemorySearchManager returns { manager: null, error } — and the
-      // original `toBeDefined()` assertion passed only because `null` is
-      // "defined" in vitest's loose sense, silently masking the real
-      // B12 null-manager fallback path.
+      // T31 — The resolver now returns `nodeAgentAddress` (eth address from
+      // keystore) instead of `nodePeerId`. This dispatch-context test
+      // doesn't care about how the address is sourced, just that the
+      // resolver hands back A non-undefined address so getMemorySearchManager
+      // hits the manager-construction path (Codex B12 null-manager
+      // fallback otherwise). Directly seed the field; the keystore-load
+      // mechanics are tested in the dedicated B9-style tests below.
+      (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
+
+      // Let the best-effort probes kicked off inside register() flush.
       await new Promise((resolve) => setImmediate(resolve));
 
       // Before any dispatch: resolver returns no projectContextGraphId for
@@ -3626,9 +3691,16 @@ describe('DkgNodePlugin', () => {
       }
     };
 
+    // T31 — These four tests exercise `ensureNodePeerId` directly. They
+    // used to drive the lazy re-probe via `resolver.getDefaultAgentAddress()`,
+    // which now feeds `nodeAgentAddress` (keystore-driven) instead. The
+    // peerId machinery itself still exists for libp2p uses (relay/transport
+    // metadata) and the lazy-recovery semantic is still worth pinning, so
+    // these tests now drive `ensureNodePeerId()` directly. A separate
+    // `node agent address keystore (T31)` describe-block below covers the
+    // keystore-based equivalent that feeds the resolver.
+
     it('lazily re-probes peer ID when the register-time probe failed', async () => {
-      // First /api/status fire rejects (daemon not ready). Second fire
-      // (triggered lazily by a resolver call) succeeds.
       const { fetchFn, statusCalls } = makeFetchStub((idx) => {
         if (idx === 0) {
           return new Response('daemon starting', { status: 503 });
@@ -3648,21 +3720,17 @@ describe('DkgNodePlugin', () => {
       });
       try {
         plugin.register(makeMockApi());
-        // Drain the register-time probe (it fires-and-forgets).
         await flushMicrotasks();
-        // Register-time probe saw a 503, so peerId is still undefined and
-        // any call to getDefaultAgentAddress reflects that.
         expect((plugin as any).nodePeerId).toBeUndefined();
-        const resolver = (plugin as any).memorySessionResolver;
-        const firstCall = resolver.getDefaultAgentAddress();
-        expect(firstCall).toBeUndefined();
-        // That call triggered a lazy re-probe. Let it complete.
+        // Direct lazy re-probe — the resolver no longer triggers this
+        // (it now feeds `nodeAgentAddress`) but the recovery contract
+        // remains relevant for libp2p uses.
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
-        // Now the cached peer ID is populated; subsequent resolver calls
-        // see it immediately, no further fetch fire.
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:test-peer');
         const statusCallsBefore = statusCalls.length;
-        const secondCall = resolver.getDefaultAgentAddress();
-        expect(secondCall).toBe('did:dkg:agent:test-peer');
+        // Subsequent calls are no-ops once cached.
+        await (plugin as any).ensureNodePeerId();
         expect(statusCalls.length).toBe(statusCallsBefore);
       } finally {
         await plugin.stop();
@@ -3670,11 +3738,7 @@ describe('DkgNodePlugin', () => {
       }
     });
 
-    it('debounces concurrent resolver fires to a single in-flight probe', async () => {
-      // All /api/status fires succeed. But a single burst of 10 resolver
-      // calls before any drain must produce exactly ONE fetch to
-      // /api/status (1 from register + 0 from the burst, since the
-      // register-time probe is in flight and the burst should await it).
+    it('debounces concurrent ensureNodePeerId fires to a single in-flight probe', async () => {
       let resolveStatus: (() => void) | null = null;
       const gate = new Promise<void>((resolve) => {
         resolveStatus = resolve;
@@ -3697,23 +3761,14 @@ describe('DkgNodePlugin', () => {
       try {
         plugin.register(makeMockApi());
         await flushMicrotasks();
-        // The register-time probe has already started and is parked on
-        // the gate. 10 resolver calls in a burst must NOT each fire a
-        // new /api/status because the in-flight probe guard collapses
-        // them onto the same pending promise.
-        const resolver = (plugin as any).memorySessionResolver;
+        // 10 concurrent direct calls — must collapse to one in-flight probe.
         for (let i = 0; i < 10; i++) {
-          resolver.getDefaultAgentAddress();
+          void (plugin as any).ensureNodePeerId();
         }
-        // Only one /api/status call fired (the register-time one).
         expect(statusCalls.length).toBe(1);
-        // Release the gate; drain; probe completes.
         resolveStatus!();
         await flushMicrotasks();
-        // After drain, the cache is populated; a new resolver call returns
-        // the peerId without firing a third /api/status.
-        const finalCall = resolver.getDefaultAgentAddress();
-        expect(finalCall).toBe('did:dkg:agent:debounced');
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:debounced');
         expect(statusCalls.length).toBe(1);
       } finally {
         await plugin.stop();
@@ -3722,10 +3777,6 @@ describe('DkgNodePlugin', () => {
     });
 
     it('recovers on every subsequent call when /api/status keeps failing', async () => {
-      // Permanent failure. Every resolver call returns undefined (so B2's
-      // retryable clarification surfaces to the caller), and every call
-      // triggers a re-probe attempt — but the in-flight debounce means
-      // bursts within a single drain window collapse to one fetch fire.
       const { fetchFn, statusCalls } = makeFetchStub(() => {
         return new Response('daemon down', { status: 503 });
       });
@@ -3740,27 +3791,19 @@ describe('DkgNodePlugin', () => {
       try {
         plugin.register(makeMockApi());
         await flushMicrotasks();
-        // One call from register-time probe (that saw the 503).
         const initialCalls = statusCalls.length;
         expect(initialCalls).toBeGreaterThanOrEqual(1);
 
-        const resolver = (plugin as any).memorySessionResolver;
-
-        // Call the resolver, let its probe resolve (to 503), call again.
-        // Each cycle should trigger ONE new /api/status call — not
-        // zero (previous "soft-brick" behavior), not ten.
-        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
+        expect((plugin as any).nodePeerId).toBeUndefined();
         const afterFirstLazy = statusCalls.length;
         expect(afterFirstLazy).toBe(initialCalls + 1);
 
-        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
         const afterSecondLazy = statusCalls.length;
         expect(afterSecondLazy).toBe(initialCalls + 2);
-
-        // Never throws, never loops forever. Just keeps returning
-        // undefined and keeps re-probing on demand.
       } finally {
         await plugin.stop();
         globalThis.fetch = originalFetch;
@@ -3768,9 +3811,6 @@ describe('DkgNodePlugin', () => {
     });
 
     it('does NOT re-probe when the register-time probe already succeeded', async () => {
-      // Register-time probe hits /api/status once and resolves. Burst of
-      // resolver calls afterwards hits exactly ZERO additional /api/status
-      // fires, because `nodePeerId` is cached.
       const { fetchFn, statusCalls } = makeFetchStub(() => {
         return new Response(JSON.stringify({ peerId: 'did:dkg:agent:happy-path' }), {
           status: 200,
@@ -3790,14 +3830,153 @@ describe('DkgNodePlugin', () => {
         await flushMicrotasks();
         expect((plugin as any).nodePeerId).toBe('did:dkg:agent:happy-path');
         const baselineCalls = statusCalls.length;
-        const resolver = (plugin as any).memorySessionResolver;
         for (let i = 0; i < 20; i++) {
-          expect(resolver.getDefaultAgentAddress()).toBe('did:dkg:agent:happy-path');
+          await (plugin as any).ensureNodePeerId();
         }
         expect(statusCalls.length).toBe(baselineCalls);
       } finally {
         await plugin.stop();
         globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe('node agent address keystore (T31)', () => {
+    // T31 — The resolver returns `nodeAgentAddress` (eth address from
+    // `<DKG_HOME>/agent-keystore.json`) instead of `nodePeerId` (libp2p
+    // from `/api/status`). These tests exercise the new lazy-read pattern
+    // by setting DKG_HOME to a tmpdir and writing/mutating the keystore
+    // file mid-test. Mirrors the previous B9 lazy re-probe semantics for
+    // the keystore source.
+    const ETH_PRIMARY = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+    const ETH_SECONDARY = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
+
+    function makeMockApi(): OpenClawPluginApi {
+      return {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registrationMode: 'full' as const,
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: () => {},
+        on: () => {},
+        logger: { info: () => {}, warn: vi.fn(), debug: () => {} },
+      } as unknown as OpenClawPluginApi;
+    }
+
+    let tempHome: string;
+    let prevDkgHome: string | undefined;
+    let prevAgentEnv: string | undefined;
+
+    beforeEach(() => {
+      tempHome = path.join(require('os').tmpdir(), `dkg-node-keystore-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      fs.mkdirSync(tempHome, { recursive: true });
+      prevDkgHome = process.env.DKG_HOME;
+      prevAgentEnv = process.env.DKG_AGENT_ADDRESS;
+      process.env.DKG_HOME = tempHome;
+      delete process.env.DKG_AGENT_ADDRESS;
+    });
+
+    afterEach(() => {
+      if (prevDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = prevDkgHome;
+      if (prevAgentEnv === undefined) delete process.env.DKG_AGENT_ADDRESS;
+      else process.env.DKG_AGENT_ADDRESS = prevAgentEnv;
+      try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+
+    function writeKeystore(addresses: string[]): void {
+      const payload: Record<string, unknown> = {};
+      for (const addr of addresses) payload[addr] = { authToken: 'tok' };
+      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), JSON.stringify(payload));
+    }
+
+    it('resolver.getDefaultAgentAddress returns the eth address from keystore (regression for the live-test bug)', async () => {
+      writeKeystore([ETH_PRIMARY]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Drain the register-time probe.
+        await new Promise((r) => setImmediate(r));
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
+        // SPARQL query path: `agentAddress` plumbed into client.query is
+        // the eth address (matches the daemon's writer-side identifier),
+        // NOT the libp2p peerId.
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('lazily re-reads keystore when the register-time read found no file', async () => {
+      // Keystore absent at register; appears later (e.g. daemon provisions
+      // identity after gateway start).
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await new Promise((r) => setImmediate(r));
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+
+        // Keystore appears.
+        writeKeystore([ETH_PRIMARY]);
+        // Lazy re-read — fired implicitly by the resolver on next call.
+        resolver.getDefaultAgentAddress();
+        await new Promise((r) => setImmediate(r));
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('multi-agent keystore without DKG_AGENT_ADDRESS fails loud (refuses to guess)', async () => {
+      writeKeystore([ETH_PRIMARY, ETH_SECONDARY]);
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        // Drive the probe directly — `refreshMemoryResolverState` is
+        // fire-and-forget at register-time and the keystore read may
+        // not have landed by the time the test reaches this point.
+        await (plugin as any).ensureNodeAgentAddress();
+        // Refused — `nodeAgentAddress` stays undefined, NOT silently
+        // picked from one of the two keys.
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        // Operator-visible warn fired.
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('Multi-agent keystore detected'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('DKG_AGENT_ADDRESS env disambiguates a multi-agent keystore', async () => {
+      writeKeystore([ETH_PRIMARY, ETH_SECONDARY]);
+      process.env.DKG_AGENT_ADDRESS = ETH_SECONDARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_SECONDARY);
+      } finally {
+        await plugin.stop();
       }
     });
   });

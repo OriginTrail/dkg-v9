@@ -3,7 +3,7 @@ import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
-import { dkgHomeDir, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync } from '../src/dkg-home.js';
+import { dkgHomeDir, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentEthAddressSync, loadAgentEthAddress, MultipleAgentsError } from '../src/dkg-home.js';
 
 describe('dkgHomeDir', () => {
   const originalEnv = process.env.DKG_HOME;
@@ -194,5 +194,129 @@ describe('loadAuthToken / loadAuthTokenSync', () => {
     await writeFile(join(tempDir, 'auth.token'), '# comment only\n');
     expect(await loadAuthToken(tempDir)).toBeUndefined();
     expect(loadAuthTokenSync(tempDir)).toBeUndefined();
+  });
+});
+
+describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
+  let tempDir: string;
+  const ETH_A = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+  const ETH_B = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `dkg-test-keystore-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tempDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns the single eth address from a single-agent keystore (sync + async)', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'tok', privateKey: '0xpk' } }),
+    );
+    expect(loadAgentEthAddressSync(tempDir)).toBe(ETH_A);
+    expect(await loadAgentEthAddress(tempDir)).toBe(ETH_A);
+  });
+
+  it('lowercases mixed-case eth address keys', async () => {
+    const mixed = '0x26C9b05a30138B35E84e60A5B778D580065ffbb8';
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [mixed]: { authToken: 'tok' } }),
+    );
+    expect(loadAgentEthAddressSync(tempDir)).toBe(ETH_A);
+  });
+
+  it('returns undefined when keystore file does not exist', async () => {
+    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
+    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+  });
+
+  it('returns undefined for an empty object keystore', async () => {
+    await writeFile(join(tempDir, 'agent-keystore.json'), '{}');
+    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
+    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+  });
+
+  it('returns undefined for keystore with only non-eth-shaped keys', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ 'not-an-eth-key': { authToken: 'tok' }, '12D3KooWPeerLike': {} }),
+    );
+    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
+  });
+
+  it('returns undefined for malformed JSON (treat as missing, do not throw)', async () => {
+    await writeFile(join(tempDir, 'agent-keystore.json'), '{ this is not json');
+    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
+    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+  });
+
+  it('throws MultipleAgentsError when keystore has multiple eth keys', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'a' }, [ETH_B]: { authToken: 'b' } }),
+    );
+    expect(() => loadAgentEthAddressSync(tempDir)).toThrow(MultipleAgentsError);
+    await expect(loadAgentEthAddress(tempDir)).rejects.toBeInstanceOf(MultipleAgentsError);
+  });
+
+  it('MultipleAgentsError exposes the conflicting addresses (lowercased)', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A.toUpperCase()]: {}, [ETH_B]: {} }),
+    );
+    try {
+      loadAgentEthAddressSync(tempDir);
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(MultipleAgentsError);
+      const e = err as MultipleAgentsError;
+      expect(e.addresses).toContain(ETH_A);
+      expect(e.addresses).toContain(ETH_B);
+    }
+  });
+
+  it('honors explicitAddress override (skips keystore read)', async () => {
+    // No keystore file at all — override still resolves.
+    expect(
+      loadAgentEthAddressSync(tempDir, { explicitAddress: ETH_A }),
+    ).toBe(ETH_A);
+    expect(
+      await loadAgentEthAddress(tempDir, { explicitAddress: ETH_A }),
+    ).toBe(ETH_A);
+  });
+
+  it('explicit override lowercases mixed-case input', () => {
+    expect(
+      loadAgentEthAddressSync(tempDir, { explicitAddress: '0x26C9B05A30138b35E84E60A5b778d580065FFBB8' }),
+    ).toBe(ETH_A);
+  });
+
+  it('explicit override is ignored when not eth-shaped (falls through to keystore)', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'tok' } }),
+    );
+    // Garbage override → fall through to keystore → returns ETH_A.
+    expect(
+      loadAgentEthAddressSync(tempDir, { explicitAddress: 'not-an-address' }),
+    ).toBe(ETH_A);
+    // Empty / whitespace override → same.
+    expect(loadAgentEthAddressSync(tempDir, { explicitAddress: '   ' })).toBe(ETH_A);
+  });
+
+  it('explicit override disambiguates a multi-agent keystore', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: {}, [ETH_B]: {} }),
+    );
+    expect(
+      loadAgentEthAddressSync(tempDir, { explicitAddress: ETH_B }),
+    ).toBe(ETH_B);
+    // Without override → throw.
+    expect(() => loadAgentEthAddressSync(tempDir)).toThrow(MultipleAgentsError);
   });
 });

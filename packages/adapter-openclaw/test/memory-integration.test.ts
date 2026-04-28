@@ -66,7 +66,8 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
     });
     client.query = mockQuery;
     // Give the manager a peer ID so B28 preflight doesn't early-return.
-    (plugin as any).nodePeerId = '12D3KooWTestPeerIdRoundTrip';
+    // T31 — Resolver returns `nodeAgentAddress` (eth) for WM scoping.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
   });
 
   describe('Phase 1 — canonical write contract', () => {

@@ -15,7 +15,12 @@
  *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
-import { GET_VIEWS, type GetView } from '@origintrail-official/dkg-core';
+import {
+  GET_VIEWS,
+  type GetView,
+  loadAgentEthAddressSync,
+  MultipleAgentsError,
+} from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
@@ -106,6 +111,21 @@ export class DkgNodePlugin {
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
+  /**
+   * T31 — Every HookSurface this plugin has built across its lifetime,
+   * keyed only by insertion (Set, not WeakSet — explicit `stop()` is
+   * the lifecycle anchor). Multi-phase init can hand the plugin a new
+   * `api` registry on every inbound turn (`Re-registering plugin
+   * surfaces … into new registry` in operator logs); the gateway then
+   * dispatches `before_prompt_build` against whichever registry it
+   * decides to use, which is not necessarily the latest one we hold.
+   * Destroying the old surface on `apiChanged` (the previous behavior)
+   * orphaned all handlers bound to the prior api — `fireCount=0` even
+   * after multiple chats. Now we keep every surface live so whichever
+   * api the gateway emits against has a bound handler; `stop()`
+   * destroys them all together.
+   */
+  private allHookSurfaces: Set<HookSurface> = new Set();
   // T11 — Idempotency flag for `registerMemoryPromptSection`. The first
   // register() call under setup-runtime skips the install (`isFullMode`
   // is false); on a same-api `setup-runtime → full` upgrade the retry
@@ -174,6 +194,26 @@ export class DkgNodePlugin {
    */
   private peerIdProbeInFlight: Promise<void> | null = null;
   /**
+   * Node agent eth address, sourced from `~/.dkg-dev/agent-keystore.json` (or
+   * `$DKG_HOME/agent-keystore.json` more generally). The daemon files chat-
+   * turn assertions and per-agent WM under this same eth address — see
+   * `packages/agent/src/dkg-agent.ts:resolveAgentAddress`, which prefers the
+   * keystore-derived `defaultAgentAddress` over the libp2p peerId. Reads in
+   * the daemon's query engine (`packages/query/src/dkg-query-engine.ts:60-72`)
+   * splice this string verbatim into the WM graph URI prefix
+   * `did:dkg:context-graph:${cg}/assertion/${agentAddress}/`, so the adapter
+   * MUST send the same identifier the daemon used for the write — otherwise
+   * recall scopes to a graph that holds zero triples while data lives at a
+   * different URI prefix (the live PR #264 testing bug).
+   */
+  private nodeAgentAddress: string | undefined;
+  /**
+   * Debounces concurrent `ensureNodeAgentAddress` calls so a burst of
+   * resolver fires collapses to one keystore read. Mirrors the
+   * `peerIdProbeInFlight` pattern. Null when no read is running.
+   */
+  private agentAddressProbeInFlight: Promise<void> | null = null;
+  /**
    * Timer for the one-shot deferred retry after a failed initial probe
    * at register time. Belt-and-suspenders with `ensureNodePeerId`: the
    * lazy re-probe is the primary recovery path, but the deferred retry
@@ -203,19 +243,27 @@ export class DkgNodePlugin {
   private readonly memorySessionResolver: DkgMemorySessionResolver = {
     getSession: (sessionKey: string | undefined): DkgMemorySession | undefined => {
       const projectContextGraphId = this.channelPlugin?.getSessionProjectContextGraphId(sessionKey);
-      if (this.nodePeerId === undefined) {
-        void this.ensureNodePeerId();
+      // T31 — `agentAddress` is the daemon's WRITER-side identifier (eth
+      // address from agent-keystore.json), NOT the libp2p peerId from
+      // /api/status. The daemon files chat-turns under the eth address;
+      // sending the peerId here scopes WM reads to a graph URI prefix
+      // that holds zero triples (PR #264 live-test bug). Lazy re-read
+      // mirrors `ensureNodePeerId` so a keystore that appears mid-
+      // session (daemon provisioned identity after gateway start) self-
+      // heals without requiring a gateway restart.
+      if (this.nodeAgentAddress === undefined) {
+        void this.ensureNodeAgentAddress();
       }
       return {
         projectContextGraphId,
-        agentAddress: this.nodePeerId,
+        agentAddress: this.nodeAgentAddress,
       };
     },
     getDefaultAgentAddress: () => {
-      if (this.nodePeerId === undefined) {
-        void this.ensureNodePeerId();
+      if (this.nodeAgentAddress === undefined) {
+        void this.ensureNodeAgentAddress();
       }
-      return this.nodePeerId;
+      return this.nodeAgentAddress;
     },
     // B17 + B23: The cache is populated fire-and-forget from
     // `refreshMemoryResolverState` at register time. Two failure modes
@@ -551,9 +599,15 @@ export class DkgNodePlugin {
       const stats = this.hookSurface.getDispatchStats();
       const apiChanged = this.hookSurfaceApi !== api;
       if (apiChanged) {
-        // New api instance — typed hooks bound to the old api won't fire
-        // against it. Destroy and rebuild everything.
-        this.hookSurface.destroy();
+        // T31 — DO NOT destroy the old surface. Multi-phase init dispatches
+        // typed events against an arbitrary api in the chain (not always
+        // the latest), and our prior destroy-and-rebuild left every old
+        // wrapper orphaned. Build a NEW surface for the new api below
+        // (fall through), and keep the old one live so whichever api the
+        // gateway picks for emit, a wrapped handler is reachable. R21.1
+        // soft-destroyed flag still gates post-`stop()` dispatch — we
+        // destroy ALL surfaces in `stop()`. The `allHookSurfaces` set
+        // owns the lifecycle.
         this.hookSurface = null;
         this.hookSurfaceApi = null;
         // T12 — Prompt section was registered against the old api;
@@ -629,8 +683,17 @@ export class DkgNodePlugin {
       }
     }
 
+    // T31 — Track whether THIS is the first surface. Internal hooks
+    // (`message:received` / `message:sent`) live in a process-global
+    // Map<event, HookHandler[]> and would double-fire if every surface
+    // pushed its own wrapper. The first surface owns the global
+    // registration; subsequent surfaces only install api-bound typed/
+    // legacy hooks (which DO need to be installed per-api so the
+    // gateway's per-api dispatch reaches them).
+    const isFirstSurface = this.allHookSurfaces.size === 0;
     this.hookSurface = new HookSurface(api, api.logger);
     this.hookSurfaceApi = api;
+    this.allHookSurfaces.add(this.hookSurface);
     // T7 — Route `session_end` through HookSurface instead of calling
     // `api.registerHook` directly. `api.registerHook` has no unsubscribe
     // primitive, so the prior direct-registration path accumulated
@@ -658,8 +721,21 @@ export class DkgNodePlugin {
     // ownership anchor. Cheap (one property assignment) and keeps the slot
     // honest even when `before_prompt_build` (full-only) and the
     // `memory_search` tool path don't run.
-    this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
-    this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
+    //
+    // T31 — Internal hooks live in the process-global
+    // `globalThis[Symbol.for('openclaw.internalHookHandlers')]` map; every
+    // surface that calls `install('internal', …)` pushes ANOTHER wrapper
+    // into the same `HookHandler[]` for that event. With the multi-phase
+    // init re-bind fix above, each subsequent surface would push a new
+    // wrapper and every internal event would fire 2× / 3× / Nx where N is
+    // the number of surfaces ever built. Only the FIRST surface installs
+    // internal hooks; subsequent surfaces inherit the global registration
+    // (it's process-scoped, not api-scoped, so it survives api swaps
+    // independently).
+    if (isFirstSurface) {
+      this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
+      this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
+    }
 
     // I8 — tool-selection guidance injected into the system prompt every turn.
     // Reaches the agent model directly (unlike SKILL.md which only reaches
@@ -1105,7 +1181,20 @@ export class DkgNodePlugin {
     // it. By destroying the hook surface first, no NEW handler
     // invocations dispatch; the loop in `flush()` then waits out the
     // handlers that were already in flight when `destroy()` ran.
-    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
+    // T31 — Destroy ALL surfaces (multi-phase init may have built one
+    // per api). The original `hookSurface` field tracks the latest, but
+    // the `allHookSurfaces` set holds every surface ever built since
+    // last `stop()`. Destroying just the latest would leave older
+    // surfaces' typed-hook wrappers reachable from the old api objects
+    // (until those apis themselves get garbage-collected by the
+    // gateway), and their internal-hook globalThis-map entries (only
+    // the FIRST surface's, but still) would survive. The R21.1 / R23.1
+    // soft-destroyed flag short-circuits late dispatches against any
+    // destroyed surface.
+    for (const surface of this.allHookSurfaces) {
+      try { surface.destroy(); } catch { /* best effort */ }
+    }
+    this.allHookSurfaces.clear();
     // R23.2 — Null out the hook-surface refs after destroy. Without this,
     // a later `register()` on the same plugin instance with the same `api`
     // object hits the existing-surface fast path in `installHooksIfNeeded()`
@@ -1178,6 +1267,13 @@ export class DkgNodePlugin {
         // the same tick) will await the same peer-ID promise instead
         // of firing a duplicate /api/status call. Codex Bug B9.
         await this.ensureNodePeerId();
+        // T31 — Read the agent eth address from the keystore. Same
+        // debouncing pattern; runs in parallel with the peer-ID
+        // probe but neither blocks the other (different sources).
+        // The keystore read is sync filesystem I/O — fast enough to
+        // sit in this register-time bootstrap without warranting a
+        // separate timeout/retry harness.
+        await this.ensureNodeAgentAddress();
         try {
           const result = await this.client.listContextGraphs();
           const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
@@ -1341,6 +1437,77 @@ export class DkgNodePlugin {
       this.peerIdProbeInFlight = null;
     });
     this.peerIdProbeInFlight = probe;
+    return probe;
+  }
+
+  /**
+   * T31 — Single-shot read of the node agent eth address from
+   * `<DKG_HOME>/agent-keystore.json` via the dkg-core helper. Honors
+   * `DKG_AGENT_ADDRESS` env override for multi-agent deployments. Multi-
+   * agent keystores without an explicit override log an error and leave
+   * `nodeAgentAddress` undefined — the existing "peer ID not yet
+   * available" warn-and-no-op path in `DkgMemoryPlugin.search` covers
+   * the disabled-recall case until operators set the env var.
+   *
+   * Does NOT debounce — caller (`ensureNodeAgentAddress`) handles
+   * concurrent-call dedup via the in-flight promise guard.
+   */
+  private async probeNodeAgentAddressOnce(api: OpenClawPluginApi): Promise<void> {
+    try {
+      const address = loadAgentEthAddressSync(undefined, {
+        explicitAddress: process.env.DKG_AGENT_ADDRESS,
+      });
+      if (address) {
+        this.nodeAgentAddress = address;
+        return;
+      }
+      api.logger.warn?.(
+        '[dkg-memory] Agent eth address not found — `<DKG_HOME>/agent-keystore.json` is missing or empty. ' +
+        'Working-memory reads and writes will return needs_clarification until the daemon provisions an identity. ' +
+        'If running with a non-default DKG_HOME, ensure it points at the live daemon home.',
+      );
+    } catch (err: any) {
+      if (err instanceof MultipleAgentsError) {
+        // No `error` channel on the typed logger surface (only info / warn /
+        // debug); a multi-agent guardrail miss is operationally an error
+        // condition but plumbed through `warn` so it surfaces at default
+        // log levels.
+        api.logger.warn?.(
+          `[dkg-memory] Multi-agent keystore detected (addresses: ${err.addresses.join(', ')}). ` +
+          'Adapter refuses to guess which identity to scope WM queries against. ' +
+          'Set DKG_AGENT_ADDRESS env to disambiguate; recall and search will return needs_clarification until then.',
+        );
+        return;
+      }
+      api.logger.warn?.(
+        `[dkg-memory] Agent eth address probe threw unexpectedly: ${err?.message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * T31 — On-demand best-effort re-read of the node agent eth address,
+   * fired by the memory resolver when a caller asks for the default
+   * agent address and the cached value is still undefined. Mirrors
+   * `ensureNodePeerId`'s shape: debounced via `agentAddressProbeInFlight`,
+   * concurrent callers share one in-flight promise.
+   *
+   * Returns immediately without firing if:
+   * - `nodeAgentAddress` is already populated (no-op),
+   * - the memory resolver API was never cached (register() hasn't run or
+   *   memory module was disabled — nothing to log against),
+   * - a probe is already in flight.
+   */
+  private ensureNodeAgentAddress(): Promise<void> {
+    if (this.nodeAgentAddress !== undefined) return Promise.resolve();
+    const api = this.memoryResolverApi;
+    if (!api) return Promise.resolve();
+    if (this.agentAddressProbeInFlight) return this.agentAddressProbeInFlight;
+
+    const probe = this.probeNodeAgentAddressOnce(api).finally(() => {
+      this.agentAddressProbeInFlight = null;
+    });
+    this.agentAddressProbeInFlight = probe;
     return probe;
   }
 
@@ -1983,6 +2150,18 @@ export class DkgNodePlugin {
     event: any,
     ctx: any,
   ): Promise<{ appendSystemContext: string } | undefined> {
+    // T31 (Bug B diagnostic) — Distinguish "hook never fires" from "hook
+    // fires but exits early." Logged at info so it's visible without
+    // bumping default log levels; quiet in absolute terms (one line per
+    // turn). If this line appears in operator logs but the agent still
+    // sees no recall, the bug is downstream (gate, missing keystore,
+    // empty hits). If this line is ABSENT despite turn traffic, the
+    // hook isn't bound to the dispatch surface the gateway uses — fall
+    // through to the multi-phase-init re-binding fix in
+    // `installHooksIfNeeded`'s apiChanged branch.
+    this.memoryResolverApi?.logger.info?.(
+      `[dkg] before_prompt_build fired (sessionKey=${ctx?.sessionKey ?? '∅'})`,
+    );
     // Gate on slot ownership — without this, the hook would inject DKG
     // recall on every turn even when another plugin owns
     // `plugins.slots.memory`, silently bypassing the elected provider
@@ -2302,10 +2481,15 @@ export class DkgNodePlugin {
         ? args.agent_address.trim()
         : undefined;
       if (view === 'working-memory' && agentAddress === undefined) {
-        if (this.nodePeerId === undefined) {
-          await this.ensureNodePeerId().catch(() => {});
+        // T31 — `working-memory` reads scope by the daemon's WRITER-side
+        // identifier (eth address from agent-keystore.json), not the
+        // libp2p peerId. Use `nodeAgentAddress` and its lazy re-read
+        // mirror; falls back to the existing "agent identity not yet
+        // available" error if the keystore is missing/empty/multi-agent.
+        if (this.nodeAgentAddress === undefined) {
+          await this.ensureNodeAgentAddress().catch(() => {});
         }
-        agentAddress = this.nodePeerId;
+        agentAddress = this.nodeAgentAddress;
         if (agentAddress === undefined) {
           return this.error(
             '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
@@ -2314,6 +2498,10 @@ export class DkgNodePlugin {
         }
       }
       if (view === 'working-memory' && agentAddress !== undefined) {
+        // `toAgentPeerId` strips the legacy `did:dkg:agent:` prefix if
+        // present; for raw eth addresses (the canonical shape now)
+        // it's a pass-through. Kept for backwards-compatibility with
+        // callers that still pass a DID-prefixed address explicitly.
         agentAddress = toAgentPeerId(agentAddress);
       }
       const result = await this.client.query(sparql, {

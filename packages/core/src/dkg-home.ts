@@ -102,3 +102,126 @@ export async function loadAuthToken(dkgHome?: string): Promise<string | undefine
   } catch { /* unreadable */ }
   return undefined;
 }
+
+const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
+
+/**
+ * Thrown by `loadAgentEthAddress*` when the keystore contains more than one
+ * eth-address top-level key and no `explicitAddress` override was provided.
+ *
+ * The single-agent path is the common gateway/dev shape; multi-agent
+ * deployments must explicitly disambiguate (typically via the
+ * `DKG_AGENT_ADDRESS` env var) so the WM-view scope can never silently route
+ * memory writes to one identity and reads to another.
+ */
+export class MultipleAgentsError extends Error {
+  readonly addresses: readonly string[];
+  constructor(addresses: readonly string[]) {
+    super(
+      `agent-keystore.json contains ${addresses.length} agent identities (${addresses.join(', ')}); ` +
+      `set DKG_AGENT_ADDRESS to disambiguate.`,
+    );
+    this.name = 'MultipleAgentsError';
+    this.addresses = addresses;
+  }
+}
+
+/**
+ * Filter and lowercase eth-address keys from the keystore JSON. Non-eth-shaped
+ * keys are dropped (defensive against future schema mixins / corrupted files).
+ */
+function extractEthAddressKeys(parsed: unknown): string[] {
+  if (!parsed || typeof parsed !== 'object') return [];
+  return Object.keys(parsed as Record<string, unknown>)
+    .map((k) => k.toLowerCase())
+    .filter((k) => ETH_ADDR_RE.test(k));
+}
+
+/**
+ * Resolve an explicit override (typically `process.env.DKG_AGENT_ADDRESS`)
+ * against the eth-address shape. Lowercased for stable comparison with the
+ * daemon's keystore-write normalization (`packages/agent/src/dkg-agent.ts`
+ * uses `.toLowerCase()` on every store).
+ *
+ * Returns `undefined` if the override is absent or not a valid eth address —
+ * the helper's caller then falls through to the keystore read path.
+ */
+function resolveExplicitAddress(explicit: string | undefined): string | undefined {
+  if (typeof explicit !== 'string') return undefined;
+  const t = explicit.trim().toLowerCase();
+  if (!ETH_ADDR_RE.test(t)) return undefined;
+  return t;
+}
+
+/**
+ * Load the agent's eth address from `<DKG_HOME>/agent-keystore.json`.
+ *
+ * The keystore is written by `packages/agent/src/dkg-agent.ts:saveToKeystore`
+ * as a map of lowercase eth address → `{ authToken, privateKey? }`. The
+ * daemon resolves its own writer-side identifier (`defaultAgentAddress`) from
+ * the first registered agent in the same store, so the adapter must read
+ * from the same source for read-side WM SPARQL `agentAddress` to align with
+ * write-side graph URIs (otherwise the daemon's query engine scopes WM to
+ * `…/assertion/<peerId>/` while data lives at `…/assertion/<eth>/`).
+ *
+ * Returns `undefined` if the keystore is missing, unreadable, malformed, or
+ * empty. Throws `MultipleAgentsError` if the keystore has more than one eth
+ * key and no `explicitAddress` override is provided — refusing to guess in
+ * the multi-agent case is intentional: silent mis-routing across identities
+ * is a security/correctness footgun.
+ *
+ * `opts.explicitAddress` (typically `process.env.DKG_AGENT_ADDRESS`) is
+ * checked first so operators can disambiguate multi-agent setups without
+ * touching the keystore file.
+ */
+export function loadAgentEthAddressSync(
+  dkgHome?: string,
+  opts?: { explicitAddress?: string },
+): string | undefined {
+  const explicit = resolveExplicitAddress(opts?.explicitAddress);
+  if (explicit) return explicit;
+
+  const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
+  if (!existsSync(filePath)) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    // Unreadable / malformed JSON / EACCES — treat as missing. The caller's
+    // existing "agent identity not yet provisioned" path already handles
+    // a missing identity gracefully (search returns []), and operators see
+    // the gap via the existing `[dkg-memory] DkgMemorySearchManager.search
+    // skipped: peer ID not yet available` warn.
+    return undefined;
+  }
+
+  const keys = extractEthAddressKeys(parsed);
+  if (keys.length === 0) return undefined;
+  if (keys.length > 1) throw new MultipleAgentsError(keys);
+  return keys[0];
+}
+
+/** Async variant of `loadAgentEthAddressSync`. */
+export async function loadAgentEthAddress(
+  dkgHome?: string,
+  opts?: { explicitAddress?: string },
+): Promise<string | undefined> {
+  const explicit = resolveExplicitAddress(opts?.explicitAddress);
+  if (explicit) return explicit;
+
+  const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
+  if (!existsSync(filePath)) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(filePath, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+
+  const keys = extractEthAddressKeys(parsed);
+  if (keys.length === 0) return undefined;
+  if (keys.length > 1) throw new MultipleAgentsError(keys);
+  return keys[0];
+}

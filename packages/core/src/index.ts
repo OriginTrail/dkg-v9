@@ -44,6 +44,9 @@ export {
   readDkgApiPort,
   loadAuthTokenSync,
   loadAuthToken,
+  loadAgentEthAddressSync,
+  loadAgentEthAddress,
+  MultipleAgentsError,
 } from './dkg-home.js';
 export {
   type Quad as ExtractionQuad,

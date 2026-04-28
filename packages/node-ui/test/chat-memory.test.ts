@@ -968,6 +968,10 @@ describe('ChatMemoryManager', () => {
       { bindings: [{ c: '10' }] },
       { bindings: [{ c: '3' }] },
       { bindings: [{ c: '6' }] },
+      // PR #229 r31-12 (JNLL): new dedupe-pair correction query —
+      // returns 0 here so the test asserts unchanged behaviour when
+      // no canonical/headless duplicates exist.
+      { bindings: [{ c: '0' }] },
       { bindings: [{ c: '8' }] },
       { bindings: [{ c: '1' }] },
     );
@@ -1785,19 +1789,29 @@ describe('ChatMemoryManager', () => {
       { bindings: [{ previousTurnId: '"t1"' }] },
       // Turn-index sanity probe.
       { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
-      // Turn-messages projection — pulls msg URIs OFF the HEADLESS turn,
-      // not the canonical one. The fact that this binding returns is
-      // what proves the impl bound the headless URI here.
+      // Turn-messages projection — under r31-12 (JNLF) the SELECT
+      // splits resolution: ?user is bound from the CANONICAL turn URI
+      // (so we get the real `msg:user:K`, NOT the synthetic stub the
+      // headless writer emits), and ?assistant is bound from the
+      // HEADLESS turn URI (so we get the FRESH `msg:agent-headless:K`
+      // reply text). This binding shape mirrors that — `user-c`
+      // canonical, `agent-h` headless.
       {
         bindings: [
-          { user: 'urn:dkg:chat:msg:user-h', assistant: 'urn:dkg:chat:msg:agent-h' },
+          { user: 'urn:dkg:chat:msg:user-c', assistant: 'urn:dkg:chat:msg:agent-h' },
         ],
       },
       // Related subjects.
-      { bindings: [{ s: 'urn:dkg:chat:msg:user-h' }, { s: 'urn:dkg:chat:msg:agent-h' }] },
-      // CONSTRUCT — returns triples scoped to the HEADLESS turn URI.
+      { bindings: [{ s: 'urn:dkg:chat:msg:user-c' }, { s: 'urn:dkg:chat:msg:agent-h' }] },
+      // CONSTRUCT — returns triples for both the canonical user message
+      // and the headless assistant message + envelope.
       {
         quads: [
+          {
+            subject: 'urn:dkg:chat:msg:user-c',
+            predicate: 'http://schema.org/text',
+            object: '"What was the original user question?"',
+          },
           {
             subject: 'urn:dkg:chat:headless-turn:t2',
             predicate: 'http://dkg.io/ontology/turnId',
@@ -1817,12 +1831,18 @@ describe('ChatMemoryManager', () => {
     // Watermark logic stays on the canonical id — delta callers chain
     // off the same id space they passed in.
     expect(delta.turnId).toBe('t2');
-    // The CONSTRUCT projection MUST have used the HEADLESS turn URI
-    // (the fix's whole purpose) — pin it via the SPARQL inspection.
+    // PR #229 r31-12 (JNLF): the CONSTRUCT projection MUST seed BOTH
+    // turn URIs — canonical for the user side (so the real
+    // `msg:user:K` text is pulled, NOT the synthetic `msg:user-stub:K`
+    // the headless writer emits to satisfy the "both edges resolve"
+    // contract) AND the headless turn URI for the fresh assistant
+    // reply provenance. Pre-r31-12 the test asserted the canonical
+    // turn URI was ABSENT, which was the actual bug — the user text
+    // would be lost.
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
     const constructQuery = allSparql[allSparql.length - 1];
     expect(constructQuery).toContain('<urn:dkg:chat:headless-turn:t2>');
-    expect(constructQuery).not.toContain('<urn:dkg:chat:turn:t2>');
+    expect(constructQuery).toContain('<urn:dkg:chat:turn:t2>');
     // The CONSTRUCT result includes the FRESH headless reply text.
     const text = delta.triples.find(
       (t) => t.subject === 'urn:dkg:chat:msg:agent-h'
@@ -1926,6 +1946,573 @@ describe('ChatMemoryManager', () => {
       && q.includes('"headless:headless:t2"'),
     );
     expect(supersedeProbeIssued).toBe(false);
+  });
+
+  // PR #229 bot review (r31-12 — chat-memory.ts:1419, JNLF).
+  //
+  // Bot's exact concern: "When effectiveTurnUri points at a
+  // superseding headless turn, this query now resolves ?user from the
+  // headless envelope as well as ?assistant. In the writer, that
+  // hasUserMessage edge targets the synthetic stub, not the real
+  // canonical user message, so the delta payload drops the user's
+  // actual text and can regress incremental consumers to a blank /
+  // system-authored user node. Keep the canonical turn's user
+  // message and only swap the assistant side."
+  it('r31-12 (JNLF): canonical hit + superseding headless twin → SELECT splits ?user from canonical, ?assistant from headless (real user text preserved)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Bare canonical lookup HITS.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t-jnlf',
+            ts: '"2026-04-28T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // Supersede probe HITS — fix must split SELECT shape on next call.
+      { bindings: [{ marker: '"true"' }] },
+      // Headless re-resolve.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:headless-turn:t-jnlf',
+            ts: '"2026-04-28T10:00:11Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // Watermark probes — canonical id.
+      {
+        bindings: [
+          {
+            latestTurnId: '"t-jnlf"',
+            latestTs: '"2026-04-28T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t-prev"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Turn-messages SELECT — the JNLF fix asserts a SPLIT lookup.
+      // Mock returns the REAL canonical user URI plus the FRESH
+      // headless assistant URI, mirroring what production would yield.
+      {
+        bindings: [
+          { user: 'urn:dkg:chat:msg:user:t-jnlf', assistant: 'urn:dkg:chat:msg:agent-headless:t-jnlf' },
+        ],
+      },
+      // Related subjects + CONSTRUCT.
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:msg:user:t-jnlf' },
+          { s: 'urn:dkg:chat:msg:agent-headless:t-jnlf' },
+        ],
+      },
+      {
+        quads: [
+          {
+            subject: 'urn:dkg:chat:msg:user:t-jnlf',
+            predicate: 'http://schema.org/text',
+            object: '"What is the JNLF bug?"',
+          },
+          {
+            subject: 'urn:dkg:chat:msg:agent-headless:t-jnlf',
+            predicate: 'http://schema.org/text',
+            object: '"Headless reply that supersedes canonical."',
+          },
+        ],
+      },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-jnlf', 't-jnlf', { baseTurnId: 't-prev' });
+    expect(delta.mode).toBe('delta');
+
+    // Pin the SPLIT shape directly: the SELECT must address the user
+    // edge against the CANONICAL turn URI and the assistant edge
+    // against the HEADLESS turn URI. Pre-r31-12 the same effective
+    // (headless) URI was used for BOTH edges, which is the JNLF bug.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const turnMessagesSelect = allSparql.find((q) =>
+      q.includes('hasUserMessage')
+      && q.includes('hasAssistantMessage')
+      && q.startsWith('SELECT'),
+    );
+    expect(turnMessagesSelect).toBeDefined();
+    // Canonical turn URI bound on the user side.
+    expect(turnMessagesSelect!).toMatch(
+      /<urn:dkg:chat:turn:t-jnlf>\s+<[^>]*hasUserMessage>\s+\?user/,
+    );
+    // Headless turn URI bound on the assistant side.
+    expect(turnMessagesSelect!).toMatch(
+      /<urn:dkg:chat:headless-turn:t-jnlf>\s+<[^>]*hasAssistantMessage>\s+\?assistant/,
+    );
+
+    // CONSTRUCT seeds BOTH turn URIs so any envelope quads on either
+    // side are projected (canonical user-side edges + headless
+    // assistant-side provenance like supersedesCanonicalAssistant).
+    const constructQuery = allSparql[allSparql.length - 1];
+    expect(constructQuery).toContain('<urn:dkg:chat:turn:t-jnlf>');
+    expect(constructQuery).toContain('<urn:dkg:chat:headless-turn:t-jnlf>');
+
+    // Delta payload carries the REAL canonical user text — the JNLF
+    // regression would have produced empty text from the synthetic
+    // stub the headless writer emits to satisfy the writer contract.
+    const userText = delta.triples.find(
+      (t) => t.subject === 'urn:dkg:chat:msg:user:t-jnlf'
+        && t.predicate === 'http://schema.org/text',
+    );
+    expect(userText?.object).toBe('What is the JNLF bug?');
+    // And the FRESH headless reply on the assistant side.
+    const assistantText = delta.triples.find(
+      (t) => t.subject === 'urn:dkg:chat:msg:agent-headless:t-jnlf'
+        && t.predicate === 'http://schema.org/text',
+    );
+    expect(assistantText?.object).toBe('Headless reply that supersedes canonical.');
+  });
+
+  it('r31-12 (JNLF): NO superseding headless twin → SELECT keeps single canonical URI for both ?user and ?assistant (no over-split)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t-jnlf-noss',
+            ts: '"2026-04-28T11:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // No supersede marker.
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            latestTurnId: '"t-jnlf-noss"',
+            latestTs: '"2026-04-28T11:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t-prev"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      {
+        bindings: [
+          { user: 'urn:dkg:chat:msg:user:t-jnlf-noss', assistant: 'urn:dkg:chat:msg:agent:t-jnlf-noss' },
+        ],
+      },
+      { bindings: [{ s: 'urn:dkg:chat:msg:user:t-jnlf-noss' }, { s: 'urn:dkg:chat:msg:agent:t-jnlf-noss' }] },
+      { quads: [{ subject: 'urn:dkg:chat:turn:t-jnlf-noss', predicate: 'http://dkg.io/ontology/turnId', object: '"t-jnlf-noss"' }] },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-jnlf', 't-jnlf-noss', { baseTurnId: 't-prev' });
+    expect(delta.mode).toBe('delta');
+
+    // No headless twin → both edges resolve against the SAME canonical
+    // turn URI. The SPLIT only activates when supersede arbitration
+    // fires, otherwise we keep the original behaviour.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const turnMessagesSelect = allSparql.find((q) =>
+      q.includes('hasUserMessage')
+      && q.includes('hasAssistantMessage')
+      && q.startsWith('SELECT'),
+    );
+    expect(turnMessagesSelect).toBeDefined();
+    expect(turnMessagesSelect!).toMatch(
+      /<urn:dkg:chat:turn:t-jnlf-noss>\s+<[^>]*hasUserMessage>\s+\?user/,
+    );
+    expect(turnMessagesSelect!).toMatch(
+      /<urn:dkg:chat:turn:t-jnlf-noss>\s+<[^>]*hasAssistantMessage>\s+\?assistant/,
+    );
+    // No headless turn URI anywhere — the related-subjects seed must
+    // NOT include it when there's no superseding twin (would inflate
+    // the CONSTRUCT projection with phantom subjects otherwise).
+    expect(turnMessagesSelect!).not.toContain('headless-turn:');
+    const relatedSubjectsSelect = allSparql[allSparql.length - 2];
+    expect(relatedSubjectsSelect).not.toContain('headless-turn:');
+  });
+});
+
+// PR #229 bot review (r31-12 — chat-memory.ts:1003, JNLL).
+//
+// Bot's exact concern: "This arbitration only fixes getSession().
+// getRecentChats() and getStats() still read raw schema:isPartOf /
+// rdf:type schema:Message rows, so the new headless+canonical/
+// superseding shape will still duplicate assistant replies in recents
+// and inflate messageCount/knowledgeTriples. Consider extracting this
+// filtering into a shared helper and applying it to those readers
+// too."
+//
+// The fix extracted `applySupersedeDedupe()` as a shared helper at the
+// top of `chat-memory.ts` and applied it inside `getSession()` (the
+// existing call site, behaviour-preserved), `getRecentChats()` (where
+// duplicates would render twice in the panel), and `getStats()` (via
+// a corrective dedupe-pair COUNT subquery so `messageCount` reflects
+// what the user actually sees). These tests pin all three.
+describe('ChatMemoryManager r31-12 (JNLL): supersede dedupe helper applied to ALL readers', () => {
+  let mockQuery: TrackingFn;
+  let mockShare: TrackingFn;
+  let mockCreateAssertion: TrackingFn;
+  let mockWriteAssertion: TrackingFn;
+  let mockCreateContextGraph: TrackingFn;
+  let mockListContextGraphs: TrackingFn;
+  let manager: ChatMemoryManager;
+
+  beforeEach(() => {
+    mockQuery = trackFn(undefined);
+    mockShare = trackFn({ shareOperationId: 'op-1' });
+    mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
+    mockWriteAssertion = trackFn({ written: 0 });
+    mockCreateContextGraph = trackFn(undefined);
+    mockListContextGraphs = trackFn([{ id: 'agent-context', name: 'Agent Context' }]);
+    manager = new ChatMemoryManager(
+      {
+        query: mockQuery,
+        share: mockShare,
+        createAssertion: mockCreateAssertion,
+        writeAssertion: mockWriteAssertion,
+        publishFromSharedMemory: trackFn({}),
+        createContextGraph: mockCreateContextGraph,
+        listContextGraphs: mockListContextGraphs,
+      },
+      { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+  });
+
+  it('JNLL: getRecentChats default case — canonical + headless duplicate for same turn key drops the headless variant (canonical wins)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      // Sessions probe — one session.
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:session:s-rc1', sid: '"s-rc1"' },
+        ],
+      },
+      // Messages probe — three rows: user, canonical agent, headless
+      // agent (same turn key K). Pre-r31-12 the recents panel rendered
+      // both agent replies; post-r31-12 the headless variant is
+      // suppressed by the shared helper.
+      {
+        bindings: [
+          {
+            session: 'urn:dkg:chat:session:s-rc1',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"Q?"',
+            ts: '"2026-04-28T12:00:00Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-rc1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"canonical reply"',
+            ts: '"2026-04-28T12:00:01Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-rc1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"headless reply (no supersede marker)"',
+            ts: '"2026-04-28T12:00:02Z"',
+            turnId: '"headless:K"',
+            headless: '"true"',
+          },
+        ],
+      },
+    );
+
+    const chats = await manager.getRecentChats(10);
+    expect(chats).toHaveLength(1);
+    // Two messages: user + ONE assistant. The duplicate headless
+    // variant is dropped because the canonical assistant message
+    // exists for the same turn key (no supersede marker to invert).
+    expect(chats[0].messages).toHaveLength(2);
+    expect(chats[0].messages[0]).toMatchObject({ author: 'user', text: 'Q?' });
+    expect(chats[0].messages[1]).toMatchObject({ author: 'agent', text: 'canonical reply' });
+  });
+
+  it('JNLL: getRecentChats supersede inversion — canonical + headless+supersede pair drops the canonical variant (headless wins, fresh text)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:session:s-rc2', sid: '"s-rc2"' },
+        ],
+      },
+      // Same turn key K, but the headless message carries the
+      // supersede marker — the canonical (stale provisional) reply
+      // must be dropped and the headless (fresh) one surfaced.
+      {
+        bindings: [
+          {
+            session: 'urn:dkg:chat:session:s-rc2',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"What is X?"',
+            ts: '"2026-04-28T12:00:00Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-rc2',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"...thinking..."',
+            ts: '"2026-04-28T12:00:01Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-rc2',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"X is the fresh final answer"',
+            ts: '"2026-04-28T12:00:02Z"',
+            turnId: '"headless:K"',
+            headless: '"true"',
+            supersedes: '"true"',
+          },
+        ],
+      },
+    );
+
+    const chats = await manager.getRecentChats(10);
+    expect(chats).toHaveLength(1);
+    expect(chats[0].messages).toHaveLength(2);
+    expect(chats[0].messages[0]).toMatchObject({ author: 'user', text: 'What is X?' });
+    // Headless variant won via the supersede marker — recents now
+    // shows the fresh reply text instead of the stale provisional.
+    expect(chats[0].messages[1]).toMatchObject({
+      author: 'agent',
+      text: 'X is the fresh final answer',
+    });
+  });
+
+  it('JNLL: getRecentChats lone headless message (no canonical counterpart) → preserved untouched', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:session:s-rc3', sid: '"s-rc3"' },
+        ],
+      },
+      // Only a headless reply for turn key K — the typical proactive
+      // agent / recovery-path case. Dedupe must NOT activate (no
+      // canonical to suppress).
+      {
+        bindings: [
+          {
+            session: 'urn:dkg:chat:session:s-rc3',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"proactive headless message"',
+            ts: '"2026-04-28T12:00:00Z"',
+            turnId: '"headless:K"',
+            headless: '"true"',
+          },
+        ],
+      },
+    );
+
+    const chats = await manager.getRecentChats(10);
+    expect(chats).toHaveLength(1);
+    expect(chats[0].messages).toHaveLength(1);
+    expect(chats[0].messages[0]).toMatchObject({
+      author: 'agent',
+      text: 'proactive headless message',
+    });
+  });
+
+  it('JNLL: getRecentChats SELECT now pulls the dedupe columns (turnId / headless / supersedes) — pin the contract change', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ s: 'urn:dkg:chat:session:s-rc4', sid: '"s-rc4"' }] },
+      { bindings: [] },
+    );
+
+    await manager.getRecentChats(10);
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    // The third call is the message-selection query.
+    const msgSelect = allSparql[2];
+    expect(msgSelect).toContain('?turnId');
+    expect(msgSelect).toContain('?headless');
+    expect(msgSelect).toContain('?supersedes');
+    // Optionals — backwards compat for legacy messages without these
+    // predicates (pre-r31-3 sessions). If we used non-optional joins
+    // the query would silently drop legacy chats from recents.
+    expect(msgSelect).toContain('OPTIONAL { ?m <http://dkg.io/ontology/turnId> ?turnId }');
+    expect(msgSelect).toContain('OPTIONAL { ?m <http://dkg.io/ontology/headlessAssistantMessage> ?headless }');
+    expect(msgSelect).toContain('OPTIONAL { ?m <http://dkg.io/ontology/supersedesCanonicalAssistant> ?supersedes }');
+  });
+
+  it('JNLL: getStats — when N canonical+headless duplicate pairs exist, messageCount is reduced by exactly N', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      // total triples
+      { bindings: [{ c: '"100"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // session count
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // raw message count — includes the duplicate variants.
+      { bindings: [{ c: '"10"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // dedupe-pair count: 2 turn keys have BOTH canonical and headless.
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // chat-related triples.
+      { bindings: [{ c: '"40"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // entity count.
+      { bindings: [{ c: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+    );
+
+    const stats = await manager.getStats();
+    // 10 raw - 2 duplicate pairs = 8 user-visible messages.
+    expect(stats.messageCount).toBe(8);
+    expect(stats.totalTriples).toBe(100);
+    expect(stats.sessionCount).toBe(2);
+    expect(stats.entityCount).toBe(5);
+    // knowledgeTriples = totalTriples - chatRelatedTriples = 100 - 40
+    // = 60. Deliberately NOT corrected by dedupe pairs — chatRelated
+    // already attributes BOTH canonical and headless message triples
+    // to the chat namespace, so they don't leak into the knowledge
+    // bucket regardless of dedupe (see helper docstring).
+    expect(stats.knowledgeTriples).toBe(60);
+  });
+
+  it('JNLL: getStats — never returns negative messageCount even if dedupe-pair query somehow over-reports', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"50"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ c: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Only 4 raw messages...
+      { bindings: [{ c: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // ...but a buggy dedupe report claims 9 pairs (impossible — at
+      // most 2 pairs could exist with 4 messages). Math.max(0, ...)
+      // clamps to 0; we never expose a negative count.
+      { bindings: [{ c: '"9"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ c: '"10"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ c: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+    );
+
+    const stats = await manager.getStats();
+    expect(stats.messageCount).toBe(0);
+    expect(stats.messageCount).toBeGreaterThanOrEqual(0);
+  });
+
+  it('JNLL: getStats — dedupe-pair SPARQL pins the exact join shape (canonical agent author + headless marker + linked turnId pair)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"0"' }] },
+      { bindings: [{ c: '"0"' }] },
+      { bindings: [{ c: '"0"' }] },
+      { bindings: [{ c: '"0"' }] },
+      { bindings: [{ c: '"0"' }] },
+      { bindings: [{ c: '"0"' }] },
+    );
+
+    await manager.getStats();
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const dedupeQuery = allSparql.find((q) =>
+      q.includes('headlessAssistantMessage')
+      && q.includes('CONCAT("headless:"'),
+    );
+    expect(dedupeQuery).toBeDefined();
+    // Must restrict the canonical side to the agent actor — otherwise
+    // a user message with the same turn key as a headless agent reply
+    // would falsely flag as a duplicate pair.
+    expect(dedupeQuery!).toContain('<urn:dkg:chat:actor:agent>');
+    // Must FILTER OUT canonical rows that are themselves headless
+    // (the negation NOT EXISTS guard).
+    expect(dedupeQuery!).toContain('FILTER NOT EXISTS');
+    expect(dedupeQuery!).toContain('headlessAssistantMessage');
+    // Must FILTER OUT the headless: prefix on the canonical key (so
+    // the join doesn't degenerate into "headless:headless:K").
+    expect(dedupeQuery!).toContain('FILTER(!STRSTARTS(STR(?key), "headless:"))');
+  });
+
+  it('JNLL: applySupersedeDedupe is shared with getSession — the same arbitration pattern applies in both readers', async () => {
+    // Verify behaviour parity: render the SAME (canonical+headless+
+    // supersede) shape through getSession AND getRecentChats and
+    // ensure both surface the headless winner exactly once.
+    //
+    // First, the getSession path. NOTE the `headlessAssistantFlag` /
+    // `supersedesCanonicalFlag` binding keys mirror the SELECT shape
+    // `getSession()` issues (see chat-memory.ts:962). The
+    // `getRecentChats()` query below uses the JNLL-introduced shorter
+    // `headless` / `supersedes` projection — different names, same
+    // arbitration helper inside.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"Hi"',
+            ts: '"2026-04-28T12:00:00Z"',
+            turnId: '"K"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent:K',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"stale provisional"',
+            ts: '"2026-04-28T12:00:01Z"',
+            turnId: '"K"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"FRESH headless"',
+            ts: '"2026-04-28T12:00:02Z"',
+            turnId: '"headless:K"',
+            headlessAssistantFlag: '"true"',
+            supersedesCanonicalFlag: '"true"',
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('s-parity');
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(2);
+    expect(session!.messages[1]).toMatchObject({
+      author: 'agent',
+      text: 'FRESH headless',
+    });
+    const sessionAssistantTexts = session!.messages
+      .filter((m) => m.author === 'agent')
+      .map((m) => m.text);
+    expect(sessionAssistantTexts).toEqual(['FRESH headless']);
+
+    // Now the getRecentChats path with the EXACT same logical shape.
+    mockQuery.returns.push(
+      { bindings: [{ s: 'urn:dkg:chat:session:s-parity', sid: '"s-parity"' }] },
+      {
+        bindings: [
+          {
+            session: 'urn:dkg:chat:session:s-parity',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"Hi"',
+            ts: '"2026-04-28T12:00:00Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-parity',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"stale provisional"',
+            ts: '"2026-04-28T12:00:01Z"',
+            turnId: '"K"',
+          },
+          {
+            session: 'urn:dkg:chat:session:s-parity',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"FRESH headless"',
+            ts: '"2026-04-28T12:00:02Z"',
+            turnId: '"headless:K"',
+            headless: '"true"',
+            supersedes: '"true"',
+          },
+        ],
+      },
+    );
+
+    const chats = await manager.getRecentChats(10);
+    expect(chats).toHaveLength(1);
+    expect(chats[0].messages).toHaveLength(2);
+    const recentsAssistantTexts = chats[0].messages
+      .filter((m) => m.author === 'agent')
+      .map((m) => m.text);
+    // Same dedupe winner as getSession — parity enforced.
+    expect(recentsAssistantTexts).toEqual(sessionAssistantTexts);
   });
 });
 

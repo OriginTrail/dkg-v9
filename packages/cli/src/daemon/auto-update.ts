@@ -788,28 +788,102 @@ export async function runBuildStep(
         `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${err?.message ?? String(err)}`,
     );
     if (timedOut) {
-      sweepOrphanBuildProcesses(opts.log);
+      sweepOrphanBuildProcesses(opts.cwd, opts.log);
     }
     throw err;
   }
 }
 
-const ORPHAN_BUILD_PROCESS_PATTERN =
-  // Narrow patterns: solcjs runner, hardhat compile, and pnpm filtered builds
-  // we explicitly spawn. We do NOT include bare `pnpm` to avoid killing
-  // unrelated workloads on the host.
-  'solcjs-runner|hardhat compile|pnpm install --frozen-lockfile|pnpm --filter .* build';
-
-function sweepOrphanBuildProcesses(log: (m: string) => void): void {
+/**
+ * After a build-step timeout, Node's `exec` SIGTERMs only the immediate child
+ * (pnpm); grandchildren like `solcjs-runner`/`hardhat compile`/`tsc` survive
+ * and pin a CPU, which has caused subsequent updates on the same host to time
+ * out even faster ("doom loop" observed on dkg-v9-relay-02/04).
+ *
+ * We deliberately do NOT pattern-match command lines here: a host-wide
+ * `pkill -f pnpm|hardhat|...` would also kill an operator's interactive
+ * `pnpm install` or any unrelated workload running under the same user.
+ * Instead we scope by:
+ *   1) only OUR EUID's processes (`pgrep -u "$EUID"`), and
+ *   2) only those whose `/proc/<pid>/cwd` resolves under the slot directory
+ *      we're rebuilding.
+ *
+ * Build subprocesses inherit cwd from pnpm (which we run in `cwd: targetDir`),
+ * so they all match. Anything outside the slot — interactive shells, other
+ * services, builds in unrelated repos — is untouched.
+ */
+function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): void {
   const { execSync } = _autoUpdateIo;
+  if (!slotDir || !slotDir.startsWith('/')) return;
   try {
-    execSync(
-      `pkill -KILL -f ${JSON.stringify(ORPHAN_BUILD_PROCESS_PATTERN)} 2>/dev/null || true`,
-      { stdio: 'ignore', timeout: 5_000 },
-    );
-    log('Auto-update: swept orphan build subprocesses (best-effort).');
+    const script =
+      'set -u; ' +
+      'for pid in $(pgrep -u "$EUID" 2>/dev/null); do ' +
+      '  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true); ' +
+      '  case "$cwd" in ' +
+      '    "$DKG_AU_SLOT"|"$DKG_AU_SLOT/"*) kill -KILL "$pid" 2>/dev/null || true ;; ' +
+      '  esac; ' +
+      'done';
+    execSync(script, {
+      stdio: 'ignore',
+      timeout: 5_000,
+      shell: '/bin/sh',
+      env: { ...process.env, DKG_AU_SLOT: slotDir.replace(/\/+$/, '') },
+    });
+    log(`Auto-update: swept orphan build subprocesses with cwd under ${slotDir} (best-effort).`);
   } catch {
     /* best effort, never throw */
+  }
+}
+
+/**
+ * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
+ * the slot before building. Runs unconditionally (regardless of `forceClean`)
+ * because most upstream packages build with bare `tsc`, which does not
+ * remove generated files when their source is deleted/renamed. Without this,
+ * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
+ * activate it on the next slot swap. We deliberately do NOT touch:
+ *   - `node_modules/` (preserved → pnpm install stays incremental)
+ *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
+ *     cache; cold solc builds on ARM64 routinely exceed the build-step
+ *     timeout, so this cache is critical to keep)
+ *
+ * Best-effort: failure here is logged but doesn't abort the update.
+ */
+async function cleanGeneratedOutputs(
+  targetDir: string,
+  log: (m: string) => void,
+): Promise<void> {
+  const { execFile: execFileAsync } = _autoUpdateIo;
+  try {
+    await execFileAsync(
+      'find',
+      [
+        'packages',
+        '-mindepth', '2',
+        '-maxdepth', '2',
+        '-type', 'd',
+        '-name', 'dist',
+        '-prune',
+        '-exec', 'rm', '-rf', '{}', '+',
+      ],
+      { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+    );
+    await execFileAsync(
+      'find',
+      [
+        'packages',
+        '-mindepth', '2',
+        '-maxdepth', '2',
+        '-type', 'f',
+        '-name', 'tsconfig.tsbuildinfo',
+        '-delete',
+      ],
+      { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+    );
+    log('Auto-update: cleared stale dist/ + tsconfig.tsbuildinfo before build (incremental caches preserved).');
+  } catch (err: any) {
+    log(`Auto-update: pre-build clean failed (${err?.message ?? String(err)}); proceeding anyway.`);
   }
 }
 
@@ -823,13 +897,15 @@ function sweepOrphanBuildProcesses(log: (m: string) => void): void {
  * practice, so we err toward "less work" rather than "build to be safe".
  */
 async function shouldRebuildContracts(args: {
+  au: ResolvedAutoUpdateConfig;
+  fetchUrl: string;
   currentCommit: string;
   checkedOutCommit: string;
   targetDir: string;
   execFileAsync: (file: string, args: string[], opts: any) => Promise<any>;
   log: (m: string) => void;
 }): Promise<boolean> {
-  const { currentCommit, checkedOutCommit, targetDir, execFileAsync, log } = args;
+  const { au, fetchUrl, currentCommit, checkedOutCommit, targetDir, execFileAsync, log } = args;
   if (
     !/^[0-9a-f]{6,40}$/i.test(currentCommit) ||
     !/^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
@@ -852,16 +928,24 @@ async function shouldRebuildContracts(args: {
   let diff = await tryDiff();
   if (!diff.ok) {
     // Most common cause: the parent commit isn't in the slot's pack files.
-    // Fetch it explicitly (depth=1 on the SHA), then retry once. Best-effort:
-    // if the fetch itself errors, fall through and skip the build (legacy
-    // behaviour); we've never observed a real ABI/JS mismatch from this path.
+    // Fetch it explicitly (depth=1 on the SHA), then retry once. The slots
+    // are initialized with bare `git init` and fetched via direct URL — no
+    // `origin` remote is configured — so we must mirror the main fetch and
+    // pass the URL + auth args explicitly. Best-effort: if the fetch itself
+    // errors, skip the build (legacy behaviour); we've never observed a
+    // real ABI/JS mismatch from this path.
     try {
       log(`Auto-update: contract-diff failed; fetching parent commit ${currentCommit.slice(0, 8)} to retry.`);
-      await execFileAsync('git', ['fetch', '--depth=1', 'origin', currentCommit], {
-        cwd: targetDir,
-        encoding: 'utf-8',
-        timeout: 30_000,
-      });
+      await execFileAsync(
+        'git',
+        [...gitCommandArgs(fetchUrl, au), 'fetch', '--depth=1', fetchUrl, currentCommit],
+        {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          timeout: 30_000,
+          env: gitCommandEnv(au),
+        },
+      );
       diff = await tryDiff();
     } catch (fetchErr: any) {
       log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); skipping contract build.`);
@@ -956,8 +1040,10 @@ async function recordAttempt(args: {
       ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
       elapsedMs,
     },
+    // Caller guards `up-to-date` so it never reaches here; only `updated`
+    // resets the counter, every other terminal status (failed/error) bumps it.
     consecutiveFailures:
-      args.status === 'updated' || args.status === 'up-to-date'
+      args.status === 'updated'
         ? 0
         : (prev.consecutiveFailures ?? 0) + 1,
   };
@@ -1019,11 +1105,16 @@ export async function performUpdateWithStatus(
   const startedAt = Date.now();
   let status: UpdateStatus = "failed";
   let errorMessage: string | undefined;
-  let outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } | null = null;
+  // Allocate the capture object up-front so we still have whatever metadata
+  // `_performUpdateInner` filled in (notably `fromCommit`) even if the inner
+  // function throws — those exceptional paths are exactly what the persisted
+  // status file is meant to surface.
+  const outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } = {
+    fromCommit: '',
+    ref: (opts.refOverride ?? au.branch) || 'main',
+  };
   try {
-    const inner = await _performUpdateInnerInstrumented(au, log, opts);
-    status = inner.status;
-    outcome = inner.outcome;
+    status = await _performUpdateInner(au, log, opts, outcome);
     return status;
   } catch (err: any) {
     errorMessage = err?.message ?? String(err);
@@ -1033,8 +1124,11 @@ export async function performUpdateWithStatus(
     _updateInProgress = false;
     // Only persist when we got far enough to know the current commit;
     // otherwise the attempt is uninteresting (slots not initialized, etc.)
-    // and would just pollute consecutiveFailures.
-    if (outcome && outcome.fromCommit) {
+    // and would just pollute consecutiveFailures. Also skip "up-to-date"
+    // outcomes — those are no-ops, not attempts, and recording them would
+    // reset `consecutiveFailures` back to 0 on every idle poll, masking
+    // a real preceding failure from the alerting signal.
+    if (outcome.fromCommit && status !== 'up-to-date') {
       try {
         await recordAttempt({
           ref: outcome.ref,
@@ -1050,25 +1144,6 @@ export async function performUpdateWithStatus(
       }
     }
   }
-}
-
-/**
- * Wraps `_performUpdateInner` to surface the `from`/`to` commit and version
- * for the persisted status file. The inner function returns only an
- * `UpdateStatus` enum because consumers like `checkForUpdate` don't care
- * about the metadata; we capture it here via a shared closure.
- */
-async function _performUpdateInnerInstrumented(
-  au: ResolvedAutoUpdateConfig,
-  log: (msg: string) => void,
-  opts: PerformUpdateOptions,
-): Promise<{ status: UpdateStatus; outcome: { fromCommit: string; toCommit?: string; version?: string; ref: string } | null }> {
-  const captured: { fromCommit: string; toCommit?: string; version?: string; ref: string } = {
-    fromCommit: '',
-    ref: (opts.refOverride ?? au.branch) || 'main',
-  };
-  const status = await _performUpdateInner(au, log, opts, captured);
-  return { status, outcome: captured };
 }
 
 async function _performUpdateInner(
@@ -1221,15 +1296,21 @@ async function _performUpdateInner(
       encoding: "utf-8",
       timeout: 60_000,
     });
-    // Intentionally NOT running `git clean -fdx` here. Untracked files in the
-    // slot directory are dominated by `node_modules/` and the Hardhat compile
-    // cache, which we want to PRESERVE so the subsequent build is incremental
-    // (cold rebuilds on ARM64 routinely exceed 5 minutes due to WASM solc and
-    // historically tripped the build-step timeout). `git checkout --force
-    // FETCH_HEAD` already restores tracked files; untracked files left over
-    // from a previous failed build are scoped to dist/ and are overwritten by
-    // the next `pnpm build`. Operators who want a cold rebuild should pass
-    // `opts.forceClean: true` (e.g. via the manual rebuild path).
+    // Intentionally NOT running `git clean -fdx` by default here: untracked
+    // files in the slot are dominated by `node_modules/` and the Hardhat
+    // compile cache, which we want to PRESERVE so the subsequent build is
+    // incremental (cold rebuilds on ARM64 routinely exceed 5 minutes due to
+    // WASM solc and historically tripped the build-step timeout).
+    //
+    // BUT: a lot of packages here build with bare `tsc`, which doesn't
+    // delete files removed/renamed in the source tree. If we just left
+    // untracked files alone, an update could activate stale `dist/*.js`
+    // from an older commit. So we DO wipe generated outputs (`dist/` and
+    // `tsconfig.tsbuildinfo` per package) before each build — narrow enough
+    // to leave incremental caches intact, broad enough to prevent stale
+    // module activation. Operators wanting a fully cold rebuild can still
+    // pass `opts.forceClean: true` (manual rebuild path) to also wipe
+    // node_modules + caches.
     if (opts.forceClean) {
       log(
         `Auto-update: forceClean=true; running git clean -fdx in slot ${target} (cold rebuild)...`,
@@ -1239,6 +1320,8 @@ async function _performUpdateInner(
         encoding: "utf-8",
         timeout: 120_000,
       });
+    } else {
+      await cleanGeneratedOutputs(targetDir, log);
     }
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: targetDir,
@@ -1310,6 +1393,8 @@ async function _performUpdateInner(
       );
     } else {
       const shouldBuildContracts = await shouldRebuildContracts({
+        au,
+        fetchUrl,
         currentCommit,
         checkedOutCommit,
         targetDir,

@@ -1397,7 +1397,7 @@ describe('autoupdater hardening', () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     let firstDiffSeen = false;
-    let fetchSeen = false;
+    let retryFetchArgs: string[] | null = null;
     let secondDiffSeen = false;
     execFileImpl = async (file: string, args: string[]) => {
       if (file === 'git' && args[0] === 'diff') {
@@ -1408,8 +1408,8 @@ describe('autoupdater hardening', () => {
         secondDiffSeen = true;
         return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
       }
-      if (file === 'git' && args[0] === 'fetch' && args.includes('--depth=1')) {
-        fetchSeen = true;
+      if (file === 'git' && args.includes('fetch') && args.includes('--depth=1')) {
+        retryFetchArgs = args;
       }
       return { stdout: '', stderr: '' };
     };
@@ -1420,11 +1420,15 @@ describe('autoupdater hardening', () => {
       }
       return { stdout: '', stderr: '' };
     };
-    await performUpdate(AU, () => {});
+    await performUpdate({ ...AU, repo: 'owner/repo' }, () => {});
     expect(firstDiffSeen).toBe(true);
-    expect(fetchSeen).toBe(true);
+    expect(retryFetchArgs).toBeTruthy();
     expect(secondDiffSeen).toBe(true);
     expect(contractsBuilt).toBe(true);
+    // Slots are initialized with bare `git init` and have no `origin` remote;
+    // the retry must use the explicit fetch URL, not the literal 'origin'.
+    expect(retryFetchArgs!.includes('origin')).toBe(false);
+    expect(retryFetchArgs!.some(a => a.includes('github.com/owner/repo'))).toBe(true);
   });
 
   it('persists `.update-status.json` on a successful update with consecutiveFailures=0', async () => {
@@ -1527,5 +1531,126 @@ describe('autoupdater hardening', () => {
     await performUpdate(AU, (m) => logCalls.push(m));
     expect(revParseCalled).toBe(true);
     expect(logCalls.some((m) => m.includes('malformed value') && m.includes('len=80'))).toBe(true);
+  });
+
+  // ─── Bot-review fixes (PR #303) ─────────────────────────────────────────
+
+  it('clears stale dist/ + tsconfig.tsbuildinfo before build (preserves node_modules + Hardhat caches)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {});
+    const findCalls = getExecFileCalls().filter(c => c.file === 'find');
+    const wipesDist = findCalls.some(c =>
+      c.args.includes('packages') &&
+      c.args.includes('-name') && c.args.includes('dist') &&
+      c.args.includes('-exec') && c.args.includes('rm'),
+    );
+    const wipesTsBuildInfo = findCalls.some(c =>
+      c.args.includes('packages') &&
+      c.args.includes('-name') && c.args.includes('tsconfig.tsbuildinfo') &&
+      c.args.includes('-delete'),
+    );
+    expect(wipesDist).toBe(true);
+    expect(wipesTsBuildInfo).toBe(true);
+    // Sanity: no node_modules wipe and no Hardhat cache wipe.
+    const touchesNodeModules = findCalls.some(c => c.args.some(a => a.includes('node_modules')));
+    const touchesHardhatCache = findCalls.some(c =>
+      c.args.some(a => a === 'cache' || a === 'artifacts'),
+    );
+    expect(touchesNodeModules).toBe(false);
+    expect(touchesHardhatCache).toBe(false);
+  });
+
+  it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const sweepCalls: Array<{ cmd: string; env: any }> = [];
+    _autoUpdateIo.execSync = ((cmd: any, opts?: any) => {
+      sweepCalls.push({ cmd: String(cmd), env: opts?.env ?? null });
+      return '';
+    }) as any;
+    // Make pnpm install time out → triggers the sweep.
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm install')) {
+        const err: any = new Error('Command failed: pnpm install ETIMEDOUT');
+        err.killed = true;
+        err.signal = 'SIGTERM';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(sweepCalls.length).toBeGreaterThan(0);
+    for (const call of sweepCalls) {
+      // No host-wide command-line pattern matching.
+      expect(call.cmd).not.toMatch(/pkill\s+(-\S+\s+)*-f/);
+      // Scoping happens via the DKG_AU_SLOT env var, not embedded in the script.
+      expect(call.cmd).toContain('$DKG_AU_SLOT');
+      expect(call.cmd).toContain('pgrep -u "$EUID"');
+      expect(call.cmd).toContain('/proc/$pid/cwd');
+      expect(call.env?.DKG_AU_SLOT).toMatch(/\/releases\/[ab]$/);
+    }
+  });
+
+  it('does NOT record an attempt when the update is up-to-date (preserves consecutiveFailures from a prior failure)', async () => {
+    // Prior state: 2 consecutive failures persisted on disk. A subsequent
+    // up-to-date check must NOT reset the counter to 0 — that would mask a
+    // real preceding failure from any alerting based on consecutiveFailures.
+    let writtenStatus: any = null;
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
+      if (p.endsWith('.update-status.json')) {
+        return JSON.stringify({ consecutiveFailures: 2, lastAttempt: { status: 'failed' } });
+      }
+      return '';
+    };
+    // Remote returns SAME commit → up-to-date.
+    makeFetchOk('aaa111');
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    await performUpdate(AU, () => {});
+    // up-to-date path must not write status (recordAttempt is skipped).
+    expect(writtenStatus).toBeNull();
+  });
+
+  it('records a `failed` attempt when an unexpected exception escapes _performUpdateInner after fromCommit is captured', async () => {
+    // _performUpdateInner has a few unwrapped lines after `currentCommit` is
+    // captured (notably the pending-state recovery `writeFileAtomic` calls).
+    // If those throw — disk error, ENOSPC, etc. — the outer
+    // `performUpdateWithStatus` must still record the attempt as `failed`.
+    // Pre-fix the `outcome` was assigned inside the `try` block AFTER the
+    // await, so an early throw left it null and `.update-status.json` lost
+    // exactly the exceptional paths this PR exists to surface.
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
+      if (p.endsWith('.update-pending.json')) {
+        return JSON.stringify({ target: 'a', commit: 'pending111' });
+      }
+      if (p.endsWith('.update-status.json')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return '';
+    };
+    // Make the atomic rename to `.current-commit` blow up on the recovery
+    // path (this is one of the few unwrapped throw sites past fromCommit).
+    _autoUpdateIo.rename = (async (_from: any, to: any) => {
+      if (String(to).endsWith('/.current-commit')) {
+        throw new Error('EIO: simulated disk failure');
+      }
+    }) as any;
+    let writtenStatus: any = null;
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    await performUpdate(AU, () => {}).catch(() => {});
+    expect(writtenStatus).toBeTruthy();
+    expect(writtenStatus.lastAttempt?.status).toBe('failed');
+    expect(writtenStatus.lastAttempt?.fromCommit).toBe('aaa111');
+    expect(writtenStatus.consecutiveFailures).toBe(1);
   });
 });

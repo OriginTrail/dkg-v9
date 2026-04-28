@@ -325,6 +325,10 @@ program
         ...(allowPrerelease !== effectiveAllowPrerelease ? { allowPrerelease } : {}),
         ...(sshKeyPath && sshKeyPath !== effectiveSshKeyPath ? { sshKeyPath } : {}),
         ...(Number.isFinite(interval) && interval !== effectiveInterval ? { checkIntervalMinutes: interval } : {}),
+        // Preserve advanced fields the wizard does not prompt for. Operators
+        // hand-tune `buildTimeoutMs` for slow ARM64 hosts; rerunning `dkg init`
+        // shouldn't silently revert them.
+        ...(existing.autoUpdate?.buildTimeoutMs ? { buildTimeoutMs: existing.autoUpdate.buildTimeoutMs } : {}),
       } as AutoUpdateConfig;
     }
 

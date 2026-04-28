@@ -2695,11 +2695,27 @@ export class DkgNodePlugin {
         }
       }
       if (view === 'working-memory' && agentAddress !== undefined) {
-        // `toAgentPeerId` strips the legacy `did:dkg:agent:` prefix if
-        // present; for raw eth addresses (the canonical shape now)
-        // it's a pass-through. Kept for backwards-compatibility with
-        // callers that still pass a DID-prefixed address explicitly.
-        agentAddress = toAgentPeerId(agentAddress);
+        // T48 — WM is now scoped by the daemon's eth-address writer
+        // identity (T31 / Bug A fix). `toAgentPeerId` strips the
+        // legacy `did:dkg:agent:` prefix; for raw eth (the canonical
+        // shape now) it's a pass-through. Validate the post-strip
+        // value against the eth shape and error on a non-eth pass.
+        // Pre-fix, a caller supplying `did:dkg:agent:12D3KooW…` (a
+        // libp2p peerId wrapped in the legacy DID) — or a bare
+        // peerId — silently routed to a non-existent WM namespace
+        // and returned an empty result. Reject up front so the
+        // operator/caller sees the actual error.
+        const stripped = toAgentPeerId(agentAddress);
+        if (!isValidEthAddressString(stripped)) {
+          return this.error(
+            `"view: working-memory" requires agent_address to be a 0x-prefixed eth address ` +
+            `(matched against /^0x[0-9a-f]{40}$/i). Got "${agentAddress}". WM is scoped by ` +
+            `the daemon's writer-side eth identity post-PR-264; legacy peerId-based ` +
+            `agent_address values are no longer accepted. Omit agent_address to default to ` +
+            `the node's active agent.`,
+          );
+        }
+        agentAddress = stripped;
       }
       const result = await this.client.query(sparql, {
         contextGraphId,

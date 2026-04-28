@@ -279,6 +279,22 @@ describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
     }
   });
 
+  it('T46 — dedupes same address recorded in checksum AND lowercase form (single-agent, not multi)', async () => {
+    // Operator hand-edited the keystore (or two writer paths used
+    // different normalisation), recording the same identity as both
+    // mixed-case (checksum) and lowercase. Pre-fix the lowercase
+    // pass left two equal entries → MultipleAgentsError fired and
+    // disabled WM lookup. Post-fix the dedupe collapses them.
+    const checksum = '0x26C9B05A30138b35E84E60A5b778d580065FFBB8';
+    const lowercase = checksum.toLowerCase();
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [checksum]: { authToken: 'a' }, [lowercase]: { authToken: 'b' } }),
+    );
+    expect(loadAgentEthAddressSync(tempDir)).toBe(lowercase);
+    expect(await loadAgentEthAddress(tempDir)).toBe(lowercase);
+  });
+
   it('honors explicitAddress override (skips keystore read)', async () => {
     // No keystore file at all — override still resolves.
     expect(

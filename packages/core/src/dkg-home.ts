@@ -129,12 +129,20 @@ export class MultipleAgentsError extends Error {
 /**
  * Filter and lowercase eth-address keys from the keystore JSON. Non-eth-shaped
  * keys are dropped (defensive against future schema mixins / corrupted files).
+ *
+ * T46 — Deduped after lowercasing. A keystore that recorded the same identity
+ * under both checksum and lowercase form (e.g. operator hand-edited the file,
+ * or two writer paths used different normalisation) would otherwise be flagged
+ * as multi-agent and disable WM lookup even though it's a single identity.
+ * `Set` over the post-lowercase keys collapses the duplicate to one entry
+ * before the multi-agent guardrail counts them.
  */
 function extractEthAddressKeys(parsed: unknown): string[] {
   if (!parsed || typeof parsed !== 'object') return [];
-  return Object.keys(parsed as Record<string, unknown>)
+  const lc = Object.keys(parsed as Record<string, unknown>)
     .map((k) => k.toLowerCase())
     .filter((k) => ETH_ADDR_RE.test(k));
+  return Array.from(new Set(lc));
 }
 
 /**

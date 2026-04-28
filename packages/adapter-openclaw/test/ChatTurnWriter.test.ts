@@ -2245,6 +2245,74 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T45 — concurrent persist during setStateDir merge+write is preserved (no wipe on failure, no clobber on success)", async () => {
+    // Regression for T45: pre-fix `setStateDir` mutated live maps
+    // during merge. A concurrent persist firing AFTER `flush()`
+    // returned but BEFORE the write committed could be wiped by
+    // the snapshot restore (failure path) or clobbered by the
+    // merged destination value (success path). Post-fix the merge
+    // uses TEMP maps; live state mutates only on commit, and the
+    // commit unions back via max-merge so concurrent advances
+    // survive.
+    const newStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t45-"));
+    const newDir = path.join(newStateDir, "dkg-adapter");
+    fs.mkdirSync(newDir, { recursive: true });
+    const newFile = path.join(newDir, "chat-turn-watermarks.json");
+    // Destination has w=10 for sk-shared.
+    fs.writeFileSync(newFile, JSON.stringify({
+      "openclaw:tg:::sk-shared": { w: 10, b: 5 },
+    }));
+
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 3);
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-shared", 2);
+    // Stage 1 — failure path: simulate write failure. Live state
+    // must NOT be mutated by the merge attempt.
+    const writeSpy = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce(() => false);
+    await writer.setStateDir(newStateDir);
+    expect(dkw.cachedWatermarks.get("openclaw:tg:::sk-shared")).toBe(3);
+    expect(dkw.w4bSessionCounts.get("openclaw:tg:::sk-shared")).toBe(2);
+    writeSpy.mockRestore();
+
+    // Stage 2 — success path with simulated concurrent persist
+    // increment that lands DURING the write. We simulate by
+    // bumping live's watermark mid-call via the spy itself.
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 3);
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-shared", 2);
+    const writeSpy2 = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce((target: string, override: any) => {
+      // Simulate a concurrent persist firing right before the
+      // commit phase: bump live to 7. Without T45's max-union
+      // commit, the merge-into-live (or restore) would clobber
+      // this back to 3 or 10.
+      dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 7);
+      // Also write the override data to the new path so the
+      // outer `wrote` boolean is true and the commit path runs.
+      fs.writeFileSync(target, JSON.stringify(Object.fromEntries(override.wm.entries() as Iterable<[string, number]>)));
+      return true;
+    });
+    // Use a different new state dir so setStateDir doesn't bail on
+    // same-path. Required because Stage 1 left stateDir unchanged
+    // but the same-path guard compares the constructed
+    // newWatermarkFilePath, not the stateDir, so reusing newStateDir
+    // would still pass the guard — but using a fresh dir keeps the
+    // test assertions independent.
+    const newStateDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t45-stage2-"));
+    fs.mkdirSync(path.join(newStateDir2, "dkg-adapter"), { recursive: true });
+    fs.writeFileSync(
+      path.join(newStateDir2, "dkg-adapter", "chat-turn-watermarks.json"),
+      JSON.stringify({ "openclaw:tg:::sk-shared": { w: 10, b: 5 } }),
+    );
+    await writer.setStateDir(newStateDir2);
+    // Live MUST be max(merged=10, concurrent=7) = 10. The
+    // concurrent persist's 7 doesn't shadow the merge — neither
+    // does the merge clobber back below the concurrent value.
+    expect(dkw.cachedWatermarks.get("openclaw:tg:::sk-shared")).toBe(10);
+    writeSpy2.mockRestore();
+
+    try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { fs.rmSync(newStateDir2, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
   it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
     // Regression for T19: pre-fix, the success === false branch shifted
     // only the OLDEST pending inbound, but T15 changed the success path

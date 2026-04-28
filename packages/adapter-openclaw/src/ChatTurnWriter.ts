@@ -208,25 +208,28 @@ export class ChatTurnWriter {
     // all outstanding persists/resets/chains — we must capture their
     // effects before swapping paths.
     await this.flush();
-    // T43 — Merge into TEMPORARY snapshots first; only commit to the
-    // live `this.cachedWatermarks` / `this.w4bSessionCounts` after the
-    // write to the new path succeeds. Pre-fix order was:
-    //   (a) merge directly into live maps,
-    //   (b) attempt write,
-    //   (c) on failure, keep old paths.
-    // That left the in-memory state polluted with destination's
-    // watermarks even when the write failed. Concrete failure path:
-    // unpersisted pair at idx 5 in old session, destination file's
-    // same session at idx 7 (newer process or stale state) → merge
-    // pushes live watermark to 7 → new-path write fails (e.g. disk
-    // full) → writer keeps old path → next persist treats turn at
-    // idx 6 as already saved (6 < 7) and silently drops it.
+    // T43/T45 — Build merged TEMP maps; never mutate live state during
+    // merge. Pre-fix versions of this code path mutated live first,
+    // then either wrote+committed (success) or attempted to restore
+    // on failure. Both shapes were vulnerable to concurrent persists
+    // arriving in the merge+write window:
+    //   - T43: write fails, snapshot restore wipes destination's data
+    //          AND any concurrent persist's watermark advance.
+    //   - T45: hooks stay live across `await this.flush()`, so a
+    //          new turn fired after flush returned could mutate live
+    //          maps mid-merge; on failure the snapshot restore
+    //          erased the new persist's increment, on success the
+    //          merge clobbered the new persist's value.
     //
-    // Snapshot live state, mutate live maps for the write (so
-    // `writeWatermarkFile` sees the merged data without a separate
-    // override channel), restore from snapshot on failure.
-    const wmSnapshot = new Map(this.cachedWatermarks);
-    const bcSnapshot = new Map(this.w4bSessionCounts);
+    // Fix: live state is read-only until commit. `mergedWm` /
+    // `mergedBc` carry the (live ∪ destination_file) view as input
+    // to `writeWatermarkFile`'s explicit-override channel. On write
+    // success we union back into live (max-merge) so any concurrent
+    // persist's increment that landed in live during the write
+    // window is preserved. On write failure live is unchanged —
+    // concurrent persists keep their advances; nothing got wiped.
+    const mergedWm = new Map(this.cachedWatermarks);
+    const mergedBc = new Map(this.w4bSessionCounts);
     try {
       if (fs.existsSync(newWatermarkFilePath)) {
         const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
@@ -241,14 +244,8 @@ export class ChatTurnWriter {
               if (typeof obj.w === "number") w = obj.w;
               if (typeof obj.b === "number") b = obj.b;
             }
-            this.cachedWatermarks.set(
-              key,
-              Math.max(this.cachedWatermarks.get(key) ?? -1, w),
-            );
-            this.w4bSessionCounts.set(
-              key,
-              Math.max(this.w4bSessionCounts.get(key) ?? 0, b),
-            );
+            mergedWm.set(key, Math.max(mergedWm.get(key) ?? -1, w));
+            mergedBc.set(key, Math.max(mergedBc.get(key) ?? 0, b));
           }
         }
       }
@@ -266,7 +263,9 @@ export class ChatTurnWriter {
     try {
       const newDir = path.dirname(newWatermarkFilePath);
       if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
-      wrote = this.writeWatermarkFile(newWatermarkFilePath);
+      // T45 — Pass the merged temp maps explicitly so live state
+      // stays untouched if the write fails.
+      wrote = this.writeWatermarkFile(newWatermarkFilePath, { wm: mergedWm, bc: mergedBc });
     } catch (err) {
       // T23 — Surface BOTH mkdirSync failures (ENOTDIR / ENOENT on
       // an unwritable parent) AND writeWatermarkFile failures
@@ -277,13 +276,22 @@ export class ChatTurnWriter {
       );
       wrote = false;
     }
-    if (!wrote) {
-      // T43 — Restore the pre-merge in-memory state. Without this,
-      // the live maps remain polluted with destination's watermarks
-      // and turns can be incorrectly skipped on subsequent persists.
-      this.cachedWatermarks = wmSnapshot;
-      this.w4bSessionCounts = bcSnapshot;
+    if (wrote) {
+      // T45 — Commit by union-merging back into live. If a concurrent
+      // persist advanced live's watermark during the write window,
+      // its increment is preserved (max takes the higher of merged-
+      // from-destination and post-flush-live). If no concurrent
+      // persist arrived, live ends up exactly equal to mergedWm/Bc.
+      for (const [key, val] of mergedWm) {
+        this.cachedWatermarks.set(key, Math.max(this.cachedWatermarks.get(key) ?? -1, val));
+      }
+      for (const [key, val] of mergedBc) {
+        this.w4bSessionCounts.set(key, Math.max(this.w4bSessionCounts.get(key) ?? 0, val));
+      }
     }
+    // T45 — On failure, live state is already untouched. No restore
+    // needed; concurrent persists' advances during the failed merge
+    // are preserved automatically.
     if (wrote) {
       // Only NOW commit the swap. Subsequent normal writes via
       // `writeWatermarkFile()` (no explicit target) will hit the new
@@ -1577,7 +1585,10 @@ export class ChatTurnWriter {
     }
   }
 
-  private writeWatermarkFile(targetPath: string = this.watermarkFilePath): boolean {
+  private writeWatermarkFile(
+    targetPath: string = this.watermarkFilePath,
+    overrideMaps?: { wm: Map<string, number>; bc: Map<string, number> },
+  ): boolean {
     try {
       // T17 — Emit the new `{ w: <watermark>, b: <w4bCount> }` shape so
       // the W4b session count is preserved across process restarts.
@@ -1592,15 +1603,20 @@ export class ChatTurnWriter {
       // would leave the writer's internal state pointing at the new
       // path even though no valid file exists there, and the next
       // setStateDir(newStateDir) would short-circuit on same-path.
-      const allKeys = new Set<string>([
-        ...this.cachedWatermarks.keys(),
-        ...this.w4bSessionCounts.keys(),
-      ]);
+      // T45 — `overrideMaps` lets `setStateDir` write a merged-but-
+      // not-yet-committed watermark snapshot WITHOUT mutating the
+      // live `cachedWatermarks` / `w4bSessionCounts`. That way a
+      // concurrent persist arriving during the merge+write window
+      // doesn't get wiped on write failure, and the merged values
+      // only become "the source of truth" once the write succeeded.
+      const wm = overrideMaps?.wm ?? this.cachedWatermarks;
+      const bc = overrideMaps?.bc ?? this.w4bSessionCounts;
+      const allKeys = new Set<string>([...wm.keys(), ...bc.keys()]);
       const data: Record<string, { w: number; b: number }> = {};
       for (const key of allKeys) {
         data[key] = {
-          w: this.cachedWatermarks.get(key) ?? -1,
-          b: this.w4bSessionCounts.get(key) ?? 0,
+          w: wm.get(key) ?? -1,
+          b: bc.get(key) ?? 0,
         };
       }
       const tmpPath = `${targetPath}.tmp`;

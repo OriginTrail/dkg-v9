@@ -2748,19 +2748,27 @@ export class DkgNodePlugin {
         ? args.agent_address.trim()
         : undefined;
       if (view === 'working-memory' && agentAddress === undefined) {
-        // T31 — `working-memory` reads scope by the daemon's WRITER-side
-        // identifier (eth address from agent-keystore.json), not the
-        // libp2p peerId. Use `nodeAgentAddress` and its lazy re-read
-        // mirror; falls back to the existing "agent identity not yet
-        // available" error if the keystore is missing/empty/multi-agent.
+        // T31 — Keystore-present deployments scope WM by the daemon's
+        // writer-side eth address.
+        // T57 — No-keystore deployments fall back to peerId, matching
+        // the daemon's writer-side `defaultAgentAddress ?? peerId`
+        // priority (`packages/cli/src/daemon/lifecycle.ts:346`) and
+        // the same fallback the resolver applies (T56). Pre-fix this
+        // handler defaulted to ONLY `nodeAgentAddress`, so on fresh /
+        // auth-disabled / no-keystore nodes `dkg_query(view: WM)`
+        // errored even though the daemon would have served the
+        // peerId-keyed namespace.
         if (this.nodeAgentAddress === undefined) {
           await this.ensureNodeAgentAddress().catch(() => {});
         }
-        agentAddress = this.nodeAgentAddress;
+        if (this.nodeAgentAddress === undefined && this.nodePeerId === undefined) {
+          await this.ensureNodePeerId().catch(() => {});
+        }
+        agentAddress = this.nodeAgentAddress ?? this.nodePeerId;
         if (agentAddress === undefined) {
           return this.error(
             '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
-              "or retry once the node's agent address is available.",
+              "or retry once the node's agent address (or peer ID) is available.",
           );
         }
       }

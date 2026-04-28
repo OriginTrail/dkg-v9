@@ -888,6 +888,29 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).not.toContain('did:dkg:agent:');
     });
 
+    it('dkg_query falls back to nodePeerId when agent_address is omitted on no-keystore nodes (T57)', async () => {
+      // T57 — Pre-fix the handler defaulted ONLY to `nodeAgentAddress`
+      // when `agent_address` was omitted, mirroring T31 keystore-
+      // present semantics. On no-keystore deployments that errored
+      // even though the daemon would have served the peerId-keyed
+      // WM. Match T56's resolver fallback shape: try eth, then
+      // peerId, then error.
+      const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
+      // No keystore → nodeAgentAddress stays undefined. Pre-seed peerId.
+      (plugin as any).nodeAgentAddress = undefined;
+      (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        // agent_address intentionally omitted
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('working-memory');
+      expect(body.agentAddress).toBe('12D3KooWNoKeystorePeer');
+    });
+
     it('dkg_query forwards peerId-form WM agent_address verbatim (T48/T53 — daemon accepts as self-alias on no-keystore nodes)', async () => {
       // T53 supersedes T48's hard-rejection. The daemon's `/api/query`
       // accepts peerId as a valid self-alias for the default agent

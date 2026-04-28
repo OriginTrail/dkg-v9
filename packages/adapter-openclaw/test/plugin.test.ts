@@ -4031,6 +4031,55 @@ describe('DkgNodePlugin', () => {
       }
     });
 
+    it('falls back to nodePeerId when nodeAgentAddress is unresolved (T56 — no-keystore deployments)', async () => {
+      // T56 — On fresh / auth-disabled / no-keystore nodes, the
+      // daemon's writer-side falls back to peerId via
+      // `defaultAgentAddress ?? peerId`. Adapter resolver MUST mirror
+      // that priority so `memory_search` / auto-recall / `dkg_query
+      // (view: WM)` keep working in those deployments. Empty keystore
+      // dir → nodeAgentAddress stays undefined → resolver should
+      // surface peerId.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        // Pre-seed the peerId field so we don't depend on /api/status.
+        (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe('12D3KooWNoKeystorePeer');
+        expect(resolver.getSession(undefined)?.agentAddress).toBe('12D3KooWNoKeystorePeer');
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('keystore eth wins over peerId when both are available (T56 — keystore-present deployments)', async () => {
+      // T56 — Keystore-present deployments must keep using eth
+      // (the original Bug A / T31 fix). Fallback only kicks in when
+      // nodeAgentAddress is undefined.
+      writeKeystore([ETH_PRIMARY]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        (plugin as any).nodePeerId = '12D3KooWShouldNotBeReturned';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
+        expect(resolver.getSession(undefined)?.agentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
     it('skips keystore read for remote daemonUrl + warns operator (T38)', async () => {
       // T38 — Remote/custom-daemon setup: gateway's local keystore is
       // either absent or belongs to a different identity. Reading it

@@ -2360,6 +2360,48 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T55 — onAgentEnd backfill stamps cross-path origin ONLY for the last pair (no stale stamp for repeated content)", async () => {
+    // Regression for T55: pre-fix `markCrossPathStamp` ran for every
+    // persisted pair in the backfill loop. If pair[0] and pair[N-1]
+    // (the live one) shared `(user, assistant)` text, the stamp from
+    // pair[0]'s persist would sit in the cross-path map. A
+    // concurrent W4b `message:sent` arriving for the live pair would
+    // see the stamp via its content-only check and drop the user
+    // queue, even though pair[N-1]'s W4a persist hadn't completed
+    // yet. If pair[N-1] then failed, the live turn was lost.
+    //
+    // Post-fix the stamp is gated on `i === lastIdx`; only the live
+    // pair leaves a cross-path footprint, matching the in-flight-
+    // reservation gate already in place. Spy on the stamp method to
+    // count calls — pre-fix would be 3 (one per persisted pair),
+    // post-fix is 1 (only the last).
+    const dkw = writer as any;
+    const stampSpy = vi.spyOn(dkw, "markCrossPathStamp");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },  // pair[0]
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },  // pair[1]
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },  // pair[2] (last, live pair)
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(3);
+    // Filter to W4a-side stamp calls. The W4a key uses `w4aOriginKey`
+    // (content hashed with the W4a discriminator); we only need to
+    // count how many times the backfill loop stamped, which is
+    // exactly the count of calls.
+    expect(stampSpy).toHaveBeenCalledTimes(1);
+    // Verify it was the LAST pair that got stamped, not pair[0] or pair[1].
+    const lastKey = dkw.w4aOriginKey("u2", "a2");
+    expect(stampSpy.mock.calls.some((c: any[]) => c[1] === lastKey)).toBe(true);
+    stampSpy.mockRestore();
+  });
+
   it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
     // Regression for T19: pre-fix, the success === false branch shifted
     // only the OLDEST pending inbound, but T15 changed the success path

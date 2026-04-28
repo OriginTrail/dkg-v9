@@ -501,10 +501,25 @@ export class ChatTurnWriter {
           if (w4aInflightKey) this.markCrossPathInflight(sessionId, w4aInflightKey);
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
-            // Stamp W4a-origin so a same-cycle W4b fire dedups. Uses the
-            // short-TTL cross-path map (T5) so a repeated same-content
-            // turn outside the cross-path window doesn't false-dedup.
-            this.markCrossPathStamp(sessionId, this.w4aOriginKey(user, assistant));
+            // T55 — Only stamp W4a-origin for the LAST (live) pair.
+            // Historical backfill pairs cannot race W4b — by the time
+            // backfill runs, W4b has long since seen and processed
+            // those messages. Pre-fix the stamp ran for every pair,
+            // and a live pair[N] sharing content with a backfilled
+            // pair[0] would leave a stale stamp from pair[0]'s
+            // persist; W4b's content-only check would then see the
+            // stamp during the live `message:sent` arrival and drop
+            // its user queue while pair[N]'s persist was still in
+            // flight. If pair[N] then failed, the live turn was lost
+            // (no W4a backfill source either — `agent_end` already
+            // ran). Mirrors the `i === lastIdx` gate on the in-flight
+            // reservation above for the same reason. Uses the
+            // short-TTL cross-path map (T5) so a repeated same-
+            // content turn outside the cross-path window doesn't
+            // false-dedup.
+            if (i === lastIdx) {
+              this.markCrossPathStamp(sessionId, this.w4aOriginKey(user, assistant));
+            }
           } catch (err) {
             // Release the turnId reservation so a retry can re-attempt.
             // No w4b-origin release needed — W4a's last-pair check is

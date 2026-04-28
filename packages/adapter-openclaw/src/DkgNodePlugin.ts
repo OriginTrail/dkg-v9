@@ -285,14 +285,25 @@ export class DkgNodePlugin {
       }
       return {
         projectContextGraphId,
-        agentAddress: this.nodeAgentAddress,
+        // T56 — Match the daemon's writer-side priority
+        // (`packages/cli/src/daemon/lifecycle.ts:346`,
+        // `agent.getDefaultAgentAddress() ?? agent.peerId`): when the
+        // keystore yields an eth address use it; on fresh / auth-
+        // disabled / no-keystore nodes fall back to peerId. The daemon
+        // accepts both as valid self-aliases per `agent.query()` at
+        // `dkg-agent.ts:2647-2696`. Without the fallback,
+        // `memory_search` / auto-recall / `dkg_query(view: WM)` all
+        // dead-end on no-keystore deployments even though the
+        // documented contract says they should work.
+        agentAddress: this.nodeAgentAddress ?? this.nodePeerId,
       };
     },
     getDefaultAgentAddress: () => {
       if (this.nodeAgentAddress === undefined) {
         void this.ensureNodeAgentAddress();
       }
-      return this.nodeAgentAddress;
+      // T56 — same fallback as `getSession.agentAddress` above.
+      return this.nodeAgentAddress ?? this.nodePeerId;
     },
     // B17 + B23: The cache is populated fire-and-forget from
     // `refreshMemoryResolverState` at register time. Two failure modes

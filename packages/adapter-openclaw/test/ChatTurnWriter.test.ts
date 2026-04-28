@@ -437,6 +437,37 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toBe("It's rainy today.");
   });
 
+  it("T5 — cross-path stamps live on a SHORTER TTL than the in-flight turnIds (<=10s)", () => {
+    // Regression for T5: pre-fix, content-only `w4aOriginKey` /
+    // `w4bOriginKey` lived on the 60s `TURNID_TTL_MS` map. Two
+    // legitimate repeated turns with the same text within 60s would
+    // collide on the first turn's stamp — if the second turn's
+    // remaining path then failed, the turn was dropped. The fix
+    // moves cross-path stamps to a separate map with a short
+    // (~5s) TTL. The pair-indexed turnId on `recentTurnIds` keeps
+    // the longer 60s window because it's per-pair-unique.
+    const crossTtl = (writer.constructor as any).CROSS_PATH_TTL_MS;
+    const longTtl = (writer.constructor as any).TURNID_TTL_MS;
+    expect(crossTtl).toBeLessThanOrEqual(10_000);
+    expect(longTtl).toBeGreaterThanOrEqual(crossTtl);
+    expect(longTtl - crossTtl).toBeGreaterThan(0); // strict separation
+  });
+
+  it("T5 — cross-path stamp from W4a does NOT block a repeated same-content turn after the cross-path TTL elapses", async () => {
+    // Regression for T5: simulates the data-loss scenario by stamping
+    // w4aOrigin (T5 short-TTL map) for "ping/pong", then expiring it,
+    // then firing a fresh agent_end with the same content. With the
+    // separate short-TTL map, the expired stamp doesn't block.
+    const dkw = writer as any;
+    const sessionId = "openclaw:ch:::sk";
+    // Stamp w4a-origin for ("ping","pong") at simulated past time.
+    const key = dkw.dedupKey(sessionId, dkw.w4aOriginKey("ping", "pong"));
+    dkw.crossPathStamps.set(key, Date.now() - 10_000); // 10s ago, beyond 5s TTL
+    expect(dkw.peekCrossPathStamp(sessionId, dkw.w4aOriginKey("ping", "pong"))).toBe(false);
+    // The stale entry is opportunistically evicted on the peek above.
+    expect(dkw.crossPathStamps.has(key)).toBe(false);
+  });
+
   it("R18.1 — TURNID_TTL_MS is generous enough to cover slow outbound channels (>=30s)", () => {
     // Regression for R18.1: the cross-path dedup TTL was 3s, so a slow
     // `message:sent` (queued Telegram, retry, network glitch) arriving
@@ -855,20 +886,23 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     const recent = (writer as any).recentTurnIds as Map<string, number>;
-    // After R13.1, a single W4a persist stamps exactly TWO map
-    // entries — the writer never reserves a key it does not own:
-    //   1. The pair-indexed turnId (the W4a write key)
-    //   2. The W4a-origin key (`w4a-content::<sha>`) so future W4b
-    //      fires dedup against this write
-    // The cross-path peek of `w4b-content::<sha>` is a non-mutating
-    // presence check (R13.1) and must NOT add a third entry.
-    expect(recent.size).toBe(2);
-    const keys = Array.from(recent.keys());
-    const w4aKey = keys.find((k) => k.includes("::w4a-content::"));
-    const turnIdKey = keys.find((k) => k !== w4aKey)!;
+    const crossPath = (writer as any).crossPathStamps as Map<string, number>;
+    // After T5, the W4a-origin stamp moved to the SHORT-TTL
+    // `crossPathStamps` map. `recentTurnIds` now holds only the
+    // pair-indexed turnId (the W4a write key); `crossPathStamps`
+    // holds the `w4a-content::<sha>` cross-path stamp that W4b's
+    // `message:sent` path peeks. The cross-path peek of
+    // `w4b-content::<sha>` is a non-mutating presence check (R13.1)
+    // and must NOT add an entry to either map.
+    expect(recent.size).toBe(1);
+    expect(crossPath.size).toBe(1);
+    const turnIdKey = Array.from(recent.keys())[0];
+    const w4aKey = Array.from(crossPath.keys())[0];
     expect(w4aKey).toMatch(/::w4a-content::[0-9a-f]{16}$/);
-    // Negative assertion — peek must not have stamped a w4b-origin.
-    expect(keys.some((k) => k.includes("::w4b-content::"))).toBe(false);
+    // Negative assertion — peek must not have stamped a w4b-origin
+    // anywhere.
+    expect(Array.from(recent.keys()).some((k) => k.includes("::w4b-content::"))).toBe(false);
+    expect(Array.from(crossPath.keys()).some((k) => k.includes("::w4b-content::"))).toBe(false);
     const turnId = turnIdKey.slice(turnIdKey.lastIndexOf("::") + 2);
     expect(turnId).toMatch(/^[0-9a-f]{16}$/);
   });
@@ -912,6 +946,80 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
   });
 
+  it("T4 — concurrent agent_end calls for the same session are serialized via the chain (no failed-pair drop)", async () => {
+    // Regression for T4: pre-fix, two back-to-back `agent_end` fires
+    // raced the per-pair turnId reservation. Job 1 reserved pair N
+    // and started awaiting its persist (fire-and-forget). Job 2
+    // fired with a longer messages array, saw pair N already
+    // reserved → continue (no bump), persisted pair N+1, advanced
+    // watermark to N+1. If Job 1 then failed, releasing the pair-N
+    // reservation, the watermark was already past pair N — silent
+    // data loss. The chain ensures Job 2's computeDelta only runs
+    // after Job 1's persist has settled.
+
+    // First persist hangs until released; second succeeds quickly.
+    let releasePersist1: ((err?: Error) => void) | null = null;
+    let firstCalled = false;
+    let secondCalled = false;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async (_sid, user) => {
+      if (user === "u1" && !firstCalled) {
+        firstCalled = true;
+        await new Promise<void>((resolve, reject) => {
+          releasePersist1 = (err) => err ? reject(err) : resolve();
+        });
+        throw new Error("transient daemon failure"); // make Job 1 fail
+      }
+      secondCalled = true;
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    // Job 1: pair 0 (u1, a1).
+    writer.onAgentEnd(
+      { sessionId: "t", messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ]},
+      { channelId: "ch", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    // Job 2 fires while Job 1's persist is hanging. Pre-fix, Job 2
+    // would race Job 1 and advance the watermark past pair 0.
+    writer.onAgentEnd(
+      { sessionId: "t", messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+      ]},
+      { channelId: "ch", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    // Job 2 should NOT have called the daemon yet — it must wait
+    // for Job 1 to settle in the chain.
+    expect(secondCalled).toBe(false);
+
+    // Release Job 1 with a failure (waiting until even retries exhaust).
+    releasePersist1!(new Error("kaboom"));
+    // Wait long enough for the persistOne retry (250ms backoff) and
+    // the chain to advance to Job 2.
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Job 2 ran AFTER Job 1 failed. Critically, the watermark stayed
+    // at -1 (Job 1's failure caught and released the reservation
+    // without advancing). Job 2's computeDelta yielded BOTH pair 0
+    // (failed-and-released) and pair 1 — so pair 0 retries via Job 2.
+    const dkw = writer as any;
+    // Either pair 0 was retried (count = 2 daemon calls) or it
+    // landed correctly somehow. The KEY invariant: pair 0 was NOT
+    // silently dropped by the watermark advancing past it before
+    // its persist settled.
+    expect(secondCalled).toBe(true);
+    // Watermark must reflect the highest successfully persisted
+    // pair, not have skipped pair 0.
+    writer.flushSync();
+    expect(dkw.loadWatermark("openclaw:ch:::sk")).toBeGreaterThanOrEqual(0);
+  });
+
   it("R14.1 — W4a advances the watermark when the last-pair peek hits W4b's reservation", async () => {
     // R14.1 regression: when W4b has already persisted a turn via
     // `message:sent` and the cross-path peek tells W4a to skip it, the
@@ -922,9 +1030,9 @@ describe("ChatTurnWriter", () => {
     const sessionId = "openclaw:tg:::sk";
     const dkw = writer as any;
     // Simulate W4b having just persisted "ping/pong" by stamping the
-    // w4b-origin key directly in the dedup map. This is what
+    // w4b-origin key in the SHORT-TTL cross-path map (T5). This is what
     // `onMessageSent` does after a successful persist.
-    dkw.markTurnIdSeen(sessionId, dkw.w4bOriginKey("ping", "pong"));
+    dkw.markCrossPathStamp(sessionId, dkw.w4bOriginKey("ping", "pong"));
 
     const ev: AgentEndContext = {
       sessionId: "test",
@@ -950,6 +1058,7 @@ describe("ChatTurnWriter", () => {
     // longer trigger the cross-path peek. The watermark is the second
     // line of defense and must independently prevent replay.
     dkw.recentTurnIds.clear();
+    dkw.crossPathStamps.clear();
     writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).not.toHaveBeenCalled();

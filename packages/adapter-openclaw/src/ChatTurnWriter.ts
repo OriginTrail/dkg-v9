@@ -124,6 +124,35 @@ export class ChatTurnWriter {
   // before processing so a compacted message array can't be read against
   // a stale watermark while the reset is still draining.
   private pendingResets: Map<string, Promise<void>> = new Map();
+  // T4 — Per-session promise chain for `onAgentEnd`. Without this,
+  // two back-to-back `agent_end` fires for the same session can overlap
+  // (the inner `trackPersistJob` is fire-and-forget). The later fire
+  // sees the earlier fire's pair-N reservation in `recentTurnIds` →
+  // `continue` (no bump) → moves on to pair N+1, persists, advances
+  // the watermark. If the earlier fire then fails on pair N, releasing
+  // its reservation, the watermark is already at N+1 and the next
+  // `agent_end`'s `computeDelta` from N+1 never re-yields pair N.
+  // Silent data loss. Chaining ensures each fire's `computeDelta` reads
+  // the previous fire's settled watermark.
+  private w4aSessionChains: Map<string, Promise<void>> = new Map();
+  // T5 — Cross-path stamps (`w4aOriginKey`, `w4bOriginKey`) need a
+  // SHORTER lifetime than the pair-indexed `recentTurnIds`. The 60s
+  // `TURNID_TTL_MS` is right for in-flight reservations (where the
+  // pairIndex / messageId discriminator prevents same-content
+  // collisions), but content-only cross-path stamps with 60s TTL
+  // false-dedup repeated same-content turns: Turn 1's `w4aOrigin "ok"`
+  // would still be live when Turn 2's W4b peeks → W4b skips Turn 2 →
+  // if Turn 2's W4a then fails, the turn is dropped.
+  //
+  // Holding stamps for ~5s covers normal-channel `agent_end →
+  // message:sent` gaps (~50-200ms typical) and even queued-Telegram-
+  // retry timing (~1-3s observed). Slow channels with >5s gaps now
+  // miss the cross-path dedup → both paths persist → daemon writes a
+  // duplicate turn record. That's a cosmetic dup vs the data-loss
+  // failure mode T5 flagged; we accept the cosmetic cost as the
+  // lesser evil.
+  private crossPathStamps: Map<string, number> = new Map();
+  private static readonly CROSS_PATH_TTL_MS = 5_000;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -156,13 +185,44 @@ export class ChatTurnWriter {
   }
 
   async onAgentEnd(event: AgentEndContext, ctx?: any): Promise<void> {
+    // B5 — skip dkg-ui channel; DkgChannelPlugin.queueTurnPersistence
+    // owns UI-channel persistence with richer metadata (correlation IDs,
+    // attachment refs). Avoids double-persist under different sessionIds.
+    if (ctx?.channelId === "dkg-ui") return;
+    const sessionId = this.deriveSessionId(ctx);
+    if (!sessionId) return;
+    // T4 — Serialize agent_end calls per session via a Promise chain.
+    // The full computeDelta + per-pair persist loop runs INSIDE the
+    // chain so a later fire's `computeDelta` reads the earlier fire's
+    // settled watermark. Without this, concurrent fire-and-forget
+    // persists race the per-pair turnId reservation and can drop
+    // failed earlier pairs (see comment on `w4aSessionChains`).
+    //
+    // Crucially, this method does NOT `await` the chain — the gateway
+    // must not block on disk/network (per R19.2). The chain alone
+    // ensures the NEXT fire's work runs only after this fire's work
+    // settles. `flush()` still drains the persist via `inFlightPersists`
+    // tracked inside `runAgentEndPersist` → `trackPersistJob`.
+    const previous = this.w4aSessionChains.get(sessionId) ?? Promise.resolve();
+    const work = previous
+      // Never block the next fire on the previous fire's failure.
+      .catch(() => undefined)
+      .then(() => this.runAgentEndPersist(event, sessionId));
+    this.w4aSessionChains.set(sessionId, work);
+    work.finally(() => {
+      // Cleanup so idle sessions don't accumulate empty chains. Only
+      // delete if our work is still the head — a newer fire may have
+      // already replaced us.
+      if (this.w4aSessionChains.get(sessionId) === work) {
+        this.w4aSessionChains.delete(sessionId);
+      }
+    }).catch(() => undefined);
+    // Fire-and-forget from the gateway's perspective. The chain serialises
+    // ordering; flush() drains via inFlightPersists.
+  }
+
+  private async runAgentEndPersist(event: AgentEndContext, sessionId: string): Promise<void> {
     try {
-      // B5 — skip dkg-ui channel; DkgChannelPlugin.queueTurnPersistence
-      // owns UI-channel persistence with richer metadata (correlation IDs,
-      // attachment refs). Avoids double-persist under different sessionIds.
-      if (ctx?.channelId === "dkg-ui") return;
-      const sessionId = this.deriveSessionId(ctx);
-      if (!sessionId) return;
       // If a compaction/reset is mid-flight for this session, wait for it
       // before reading the watermark. Otherwise we'd compute the delta
       // against stale state.
@@ -207,10 +267,10 @@ export class ChatTurnWriter {
           // (R13.1).
           if (i === lastIdx) {
             const w4bOrigin = this.w4bOriginKey(user, assistant);
-            if (this.peekTurnIdSeen(sessionId, w4bOrigin)) {
+            if (this.peekCrossPathStamp(sessionId, w4bOrigin)) {
               // W4b already persisted this pair via `message:sent`. The
               // pair is logically saved, so advance the watermark to its
-              // index — without this, a later `agent_end` (after the 3s
+              // index — without this, a later `agent_end` (after the
               // dedup TTL has expired) would re-pair the same pair as
               // unsaved backfill and write a duplicate (R14.1).
               this.bumpWatermark(sessionId, pairIndex);
@@ -220,8 +280,10 @@ export class ChatTurnWriter {
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
-            // Stamp W4a-origin so a same-cycle W4b fire dedups.
-            this.markTurnIdSeen(sessionId, this.w4aOriginKey(user, assistant));
+            // Stamp W4a-origin so a same-cycle W4b fire dedups. Uses the
+            // short-TTL cross-path map (T5) so a repeated same-content
+            // turn outside the cross-path window doesn't false-dedup.
+            this.markCrossPathStamp(sessionId, this.w4aOriginKey(user, assistant));
           } catch (err) {
             // Release the turnId reservation so a retry can re-attempt.
             // No w4b-origin release needed — W4a's last-pair check is
@@ -232,9 +294,14 @@ export class ChatTurnWriter {
           }
         }
       });
-      // Don't await the persist work itself — gateway must not block on
-      // disk/network; the await above only covers the reset gate.
-      job.catch(() => { /* outer try-catch already covered */ });
+      // T4 — AWAIT the persist job so the per-session chain in
+      // `onAgentEnd` waits for completion. Concurrent `agent_end` fires
+      // for the same session would otherwise race the per-pair turnId
+      // reservations and silently drop a failed earlier pair when a
+      // later fire advances the watermark past it. The previous
+      // fire-and-forget pattern was safe in isolation (single fire) but
+      // not under realistic gateway-driven concurrency.
+      await job.catch(() => { /* outer try-catch already covered */ });
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onAgentEnd] Error", { err });
     }
@@ -294,6 +361,21 @@ export class ChatTurnWriter {
    */
   private async runReset(sessionId: string): Promise<void> {
     if (!sessionId) return;
+    // T4 — Drain any queued (but not yet started) agent_end chain
+    // work BEFORE registering this reset in `pendingResets`. The
+    // chain's `.then(() => runAgentEndPersist(...))` delays
+    // `trackPersistJob` registration by one microtask, so a chained-
+    // but-not-yet-running fire wouldn't appear in `inFlightPersists`
+    // (which `resetSessionState` awaits). Critically, this drain
+    // happens BEFORE `pendingResets.set` — otherwise the chained
+    // `runAgentEndPersist` would see our pending reset, await it,
+    // and deadlock against itself. Draining first lets the chained
+    // work see no-pending-reset and run with the pre-compaction
+    // state; the reset then wipes after the work completes.
+    const chain = this.w4aSessionChains.get(sessionId);
+    if (chain) {
+      await chain.catch(() => undefined);
+    }
     const reset = this.resetSessionState(sessionId);
     this.pendingResets.set(sessionId, reset);
     try {
@@ -327,6 +409,7 @@ export class ChatTurnWriter {
       await Promise.allSettled(pending);
     }
     this.inFlightPersists.delete(sessionId);
+    this.w4aSessionChains.delete(sessionId);
     this.cachedWatermarks.delete(sessionId);
     const entry = this.debounceTimers.get(sessionId);
     if (entry) {
@@ -425,11 +508,13 @@ export class ChatTurnWriter {
       const userText = queue.shift()!;
       if (queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {
-        // Cross-path dedup, W4b side:
+        // Cross-path dedup, W4b side (T5: short-TTL stamp map):
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
-        //   turn within the TTL window, skip.
+        //   turn within the cross-path TTL window (5s), skip. The
+        //   short window means a repeated same-content turn fired
+        //   later won't collide with the previous turn's stamp.
         const w4aOrigin = this.w4aOriginKey(userText, assistantText);
-        if (this.peekTurnIdSeen(sessionId, w4aOrigin)) return; // W4a already wrote
+        if (this.peekCrossPathStamp(sessionId, w4aOrigin)) return; // W4a already wrote
         // R15.1 — In-flight guard with per-turn discriminator.
         //   The cross-path stamp (`w4bOrigin`, content-only) is held for
         //   3s post-success so W4a's later last-pair peek can find it.
@@ -452,10 +537,13 @@ export class ChatTurnWriter {
         this.trackPersistJob(sessionId, async () => {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
-            // Post-success: stamp the content-only `w4bOrigin` key so
-            // a later W4a `agent_end` last-pair peek can see that W4b
-            // already persisted this turn and skip + bumpWatermark.
-            this.markTurnIdSeen(sessionId, this.w4bOriginKey(userText, assistantText));
+            // Post-success: stamp the content-only `w4bOrigin` key on
+            // the SHORT-TTL cross-path map (T5) so a later W4a
+            // `agent_end` last-pair peek can see that W4b already
+            // persisted THIS turn and skip + bumpWatermark, but a
+            // repeated same-content turn arriving outside the 5s
+            // cross-path window doesn't false-dedup against this stamp.
+            this.markCrossPathStamp(sessionId, this.w4bOriginKey(userText, assistantText));
             // R18.2 — Track the W4b session count so a later `agent_end`
             // (typically after a `setup-runtime → full` upgrade) sees a
             // raised `savedUpTo` floor in `computeDelta` and doesn't
@@ -554,11 +642,48 @@ export class ChatTurnWriter {
     this.recentTurnIds.delete(this.dedupKey(sessionId, turnId));
   }
 
+  /**
+   * T5 — Set semantics on the SHORT-TTL cross-path map. Used for
+   * `w4aOrigin` / `w4bOrigin` content-only stamps. Lifetime is
+   * `CROSS_PATH_TTL_MS` (5s) — long enough for the opposite path to
+   * fire on the same logical turn, short enough that a repeated same-
+   * content turn outside the window doesn't false-dedup.
+   * Opportunistic eviction prevents unbounded growth.
+   */
+  private markCrossPathStamp(sessionId: string, key: string): void {
+    const compositeKey = this.dedupKey(sessionId, key);
+    const now = Date.now();
+    const ttl = ChatTurnWriter.CROSS_PATH_TTL_MS;
+    for (const [k, ts] of this.crossPathStamps) {
+      if (now - ts > ttl) this.crossPathStamps.delete(k);
+    }
+    this.crossPathStamps.set(compositeKey, now);
+  }
+
+  /**
+   * T5 — Non-mutating presence check on the cross-path map. Returns
+   * `true` if the key is currently within the 5s window.
+   */
+  private peekCrossPathStamp(sessionId: string, key: string): boolean {
+    const compositeKey = this.dedupKey(sessionId, key);
+    const ts = this.crossPathStamps.get(compositeKey);
+    if (ts === undefined) return false;
+    if (Date.now() - ts > ChatTurnWriter.CROSS_PATH_TTL_MS) {
+      this.crossPathStamps.delete(compositeKey);
+      return false;
+    }
+    return true;
+  }
+
   /** Drop all dedup reservations belonging to one session. */
   private clearSessionTurnIds(sessionId: string): void {
     const prefix = `${sessionId}::`;
     for (const k of this.recentTurnIds.keys()) {
       if (k.startsWith(prefix)) this.recentTurnIds.delete(k);
+    }
+    // T5 — also clear the short-TTL cross-path stamps for this session.
+    for (const k of this.crossPathStamps.keys()) {
+      if (k.startsWith(prefix)) this.crossPathStamps.delete(k);
     }
   }
 
@@ -588,6 +713,14 @@ export class ChatTurnWriter {
       }
       for (const reset of this.pendingResets.values()) {
         allJobs.push(reset);
+      }
+      // T4 — Also await the per-session agent_end chain heads. The
+      // chain serialises onAgentEnd calls so a queued (but not yet
+      // started) `runAgentEndPersist` won't have populated
+      // `inFlightPersists` yet. Without this, `flush()` could return
+      // before the queued work even reaches its persist call.
+      for (const chain of this.w4aSessionChains.values()) {
+        allJobs.push(chain.catch(() => undefined));
       }
       if (allJobs.length === 0) break;
       await Promise.allSettled(allJobs);

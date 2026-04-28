@@ -92,5 +92,6 @@ describe('hermesSetupAction', () => {
 
   it('rejects invalid memory modes', () => {
     expect(() => normalizeHermesSetupOptions({ memoryMode: 'everything' as any })).toThrow('Invalid Hermes memory mode');
+    expect(() => normalizeHermesSetupOptions({ memoryMode: 'ask' as any })).toThrow('Invalid Hermes memory mode');
   });
 });

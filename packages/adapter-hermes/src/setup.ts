@@ -43,7 +43,7 @@ export interface HermesCliOptions {
   bridgeHealthUrl?: string;
   port?: string | number;
   cwd?: string;
-  memoryMode?: HermesMemoryMode | 'primary' | 'ask';
+  memoryMode?: HermesMemoryMode | 'primary';
   dryRun?: boolean;
   verify?: boolean;
   start?: boolean;
@@ -364,15 +364,23 @@ function normalizePublishGuard(input: Partial<HermesPublishGuardPolicy> | undefi
 }
 
 function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
+  const profileName = trimmed(options.profileName ?? options.profile);
+  const hermesHome = trimmed(options.hermesHome);
+  const existingState = readSetupState(resolveHermesProfile({ profileName, hermesHome }));
+  const memoryMode = normalizeCliMemoryMode(options.memoryMode) ?? existingState?.profile.memoryMode;
   const port = normalizePort(options.port);
+  const daemonUrl = trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : undefined);
   return {
-    profileName: trimmed(options.profileName ?? options.profile),
-    hermesHome: trimmed(options.hermesHome),
-    daemonUrl: stripTrailingSlashes(trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:9200')),
-    bridgeUrl: stripTrailingSlashes(trimmed(options.bridgeUrl) ?? ''),
-    gatewayUrl: stripTrailingSlashes(trimmed(options.gatewayUrl) ?? ''),
-    bridgeHealthUrl: stripTrailingSlashes(trimmed(options.bridgeHealthUrl) ?? ''),
-    memoryMode: normalizeCliMemoryMode(options.memoryMode),
+    profileName: profileName ?? existingState?.profile.profileName,
+    hermesHome: hermesHome ?? existingState?.profile.hermesHome,
+    daemonUrl: stripTrailingSlashes(daemonUrl ?? existingState?.daemonUrl ?? 'http://127.0.0.1:9200'),
+    bridgeUrl: stripTrailingSlashes(trimmed(options.bridgeUrl) ?? existingState?.bridge?.url ?? ''),
+    gatewayUrl: stripTrailingSlashes(trimmed(options.gatewayUrl) ?? existingState?.bridge?.gatewayUrl ?? ''),
+    bridgeHealthUrl: stripTrailingSlashes(trimmed(options.bridgeHealthUrl) ?? existingState?.bridge?.healthUrl ?? ''),
+    contextGraph: existingState?.contextGraph,
+    agentName: existingState?.agentName,
+    publishGuard: existingState?.publishGuard,
+    memoryMode,
     dryRun: options.dryRun === true,
   };
 }
@@ -389,10 +397,15 @@ function toReconnectSetupOptions(options: HermesCliOptions): HermesSetupOptions 
   };
 }
 
-function normalizeCliMemoryMode(value: HermesCliOptions['memoryMode']): HermesMemoryMode | undefined {
-  if (value === 'tools-only') return 'tools-only';
-  if (value === 'provider' || value === 'primary' || value === 'ask') return 'provider';
-  return undefined;
+function normalizeCliMemoryMode(value: unknown): HermesMemoryMode | undefined {
+  const memoryMode = trimmed(value);
+  if (!memoryMode) return undefined;
+  if (memoryMode === 'tools-only') return 'tools-only';
+  if (memoryMode === 'provider' || memoryMode === 'primary') return 'provider';
+  if (memoryMode === 'ask') {
+    throw new Error('Hermes memory mode "ask" is not supported in non-interactive setup; use primary or tools-only.');
+  }
+  throw new Error(`Invalid Hermes memory mode: ${memoryMode}`);
 }
 
 function normalizePort(value: string | number | undefined): number | undefined {

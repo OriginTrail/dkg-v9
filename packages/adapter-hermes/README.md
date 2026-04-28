@@ -10,7 +10,7 @@ session state, plugins, tools, and runtime logs.
 This package contains:
 
 - `src/` - TypeScript setup helpers, daemon client helpers, and Hermes channel
-  route contracts.
+  payload/client contracts.
 - `hermes-plugin/` - Python Hermes memory provider plugin and DKG daemon
   client.
 
@@ -18,7 +18,11 @@ This package contains:
 
 The adapter now provides the DKG-side setup and local-agent contracts for
 Hermes. It includes profile-aware setup helpers, guarded publish behavior,
-provider conflict handling, and `/api/hermes-channel/*` route wiring.
+provider conflict handling, and client contracts for the daemon-owned
+`/api/hermes-channel/*` routes.
+
+Supported Hermes channel routes are registered by the DKG CLI daemon, not by
+this adapter package as standalone HTTP stubs.
 
 The Hermes local bridge process that answers chat requests must expose
 `/health`, `/send`, and `/stream` on its configured bridge URL, or equivalent
@@ -67,7 +71,7 @@ Common setup flags:
 | `--gateway-url <url>` | Gateway URL for WSL2 or remote Hermes chat. |
 | `--bridge-health-url <url>` | Optional health URL override for the configured bridge/gateway. |
 | `--port <port>` | Shortcut for `http://127.0.0.1:<port>`. |
-| `--memory-mode <mode>` | `primary` is the default provider-election path; use `tools-only` to preserve an existing Hermes memory provider. The current CLI also accepts `ask`, which follows the provider setup path in this PR. |
+| `--memory-mode <mode>` | `primary` maps to provider-election mode and is the default path; use `tools-only` to preserve an existing Hermes memory provider. |
 | `--dry-run` | Print planned file changes without writing them. |
 | `--no-verify` | Skip the post-setup verification pass. |
 | `--no-start` | Configure files without best-effort daemon registration. |
@@ -128,7 +132,9 @@ flows should remain operator-reviewed.
 
 ## Local-Agent Routes
 
-Hermes uses Hermes-specific daemon routes for this PR:
+Hermes uses Hermes-specific daemon routes for this PR. These routes are
+supported by the DKG CLI daemon; this adapter package provides the setup,
+client, and payload contracts that call into them.
 
 | Route | Purpose |
 | --- | --- |

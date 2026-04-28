@@ -1,58 +1,12 @@
 import type {
   DaemonPluginApi,
   HermesChannelPersistTurnPayload,
-  HermesChannelSendPayload,
   SessionEndPayload,
   SessionTurnPayload,
 } from './types.js';
 import { randomUUID } from 'node:crypto';
 
 export function registerHermesRoutes(api: DaemonPluginApi): void {
-  api.registerHttpRoute({
-    method: 'GET',
-    path: '/api/hermes-channel/health',
-    handler: async (_req, res) => {
-      res.status(503).json({
-        ok: false,
-        status: 'degraded',
-        error: 'Hermes bridge dispatcher is not registered in this adapter package yet.',
-        bridge: { ready: false },
-      });
-    },
-  });
-
-  api.registerHttpRoute({
-    method: 'POST',
-    path: '/api/hermes-channel/send',
-    handler: async (req, res) => {
-      const body = req.body as Partial<HermesChannelSendPayload>;
-      if (!body.text || !body.correlationId) {
-        res.status(400).json({ success: false, error: 'text and correlationId required' });
-        return;
-      }
-      res.status(501).json({
-        success: false,
-        error: 'Hermes bridge send is a daemon/client contract route; no bridge dispatcher is registered in this package yet.',
-      });
-    },
-  });
-
-  api.registerHttpRoute({
-    method: 'POST',
-    path: '/api/hermes-channel/stream',
-    handler: async (req, res) => {
-      const body = req.body as Partial<HermesChannelSendPayload>;
-      if (!body.text || !body.correlationId) {
-        res.status(400).json({ success: false, error: 'text and correlationId required' });
-        return;
-      }
-      res.status(501).json({
-        success: false,
-        error: 'Hermes bridge stream is a daemon/client contract route; no bridge dispatcher is registered in this package yet.',
-      });
-    },
-  });
-
   api.registerHttpRoute({
     method: 'POST',
     path: '/api/hermes-channel/persist-turn',

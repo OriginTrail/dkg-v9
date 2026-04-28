@@ -2,7 +2,7 @@
 
 This guide connects a Hermes profile to a local DKG V10 node. It reflects the
 current PR behavior: profile-aware DKG setup helpers, DKG as an optional Hermes
-memory provider, and Hermes-specific local-agent routes under
+memory provider, and DKG daemon-owned local-agent routes under
 `/api/hermes-channel/*`.
 
 ## Prerequisites
@@ -69,6 +69,9 @@ adapter state and installs the provider package files so `status`, `doctor`,
 DKG/Hermes profile relationship. Model-injected DKG memory tools require
 provider mode in this PR.
 
+`--memory-mode ask` is reserved for a future interactive setup flow and is not
+supported in this PR.
+
 ## CLI Helpers
 
 ```bash
@@ -87,9 +90,15 @@ metadata. `disconnect` removes only the managed provider election block and
 marks the DKG adapter disconnected. `uninstall` removes ownership-marked DKG
 adapter artifacts and preserves user-owned Hermes data.
 
+Lifecycle commands reuse persisted daemon and bridge settings from
+`setup-state.json` when flags are omitted, so a profile configured with a
+custom daemon URL or gateway does not fall back to localhost during
+`disconnect`, `reconnect`, or `uninstall`.
+
 ## Local-Agent Chat
 
-The DKG daemon exposes these Hermes-specific routes:
+The DKG daemon exposes these Hermes-specific routes. They are supported daemon
+routes, not standalone HTTP handlers exported by `packages/adapter-hermes`:
 
 ```text
 GET  /api/hermes-channel/health

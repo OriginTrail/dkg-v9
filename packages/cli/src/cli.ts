@@ -1777,7 +1777,7 @@ hermesCmd
   .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
   .option('--port <port>', 'Override daemon API port (default: 9200)')
   .option('--cwd <dir>', 'Hermes working directory')
-  .option('--memory-mode <mode>', 'Memory mode: primary, tools-only, or ask')
+  .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
   .option('--dry-run', 'Preview changes without writing anything')
   .option('--no-verify', 'Skip post-setup verification')
   .option('--no-start', 'Skip daemon start (configure only)')

@@ -98,11 +98,12 @@ describe('HermesAdapterPlugin', () => {
 
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(7);
-    expect(api.routes.has('GET /api/hermes-channel/health')).toBe(true);
-    expect(api.routes.has('POST /api/hermes-channel/send')).toBe(true);
-    expect(api.routes.has('POST /api/hermes-channel/stream')).toBe(true);
+    expect(api.registerHttpRouteCalls).toHaveLength(4);
+    expect(api.routes.has('GET /api/hermes-channel/health')).toBe(false);
+    expect(api.routes.has('POST /api/hermes-channel/send')).toBe(false);
+    expect(api.routes.has('POST /api/hermes-channel/stream')).toBe(false);
     expect(api.routes.has('POST /api/hermes-channel/persist-turn')).toBe(true);
+    expect(api.routes.has('POST /api/hermes/session-turn')).toBe(true);
     expect(api.routes.has('POST /api/hermes/session-end')).toBe(true);
     expect(api.routes.has('GET /api/hermes/status')).toBe(true);
   });
@@ -125,7 +126,7 @@ describe('HermesAdapterPlugin', () => {
     plugin.register(api);
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(7);
+    expect(api.registerHttpRouteCalls).toHaveLength(4);
   });
 });
 
@@ -291,41 +292,6 @@ describe('POST /api/hermes/session-end', () => {
     await handler({ body: { sessionId: 's2' } }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's2')).toBe(true);
-  });
-});
-
-describe('GET /api/hermes-channel/health', () => {
-  it('reports degraded until a bridge dispatcher is registered', async () => {
-    const api = createTrackingApi();
-    registerHermesRoutes(api);
-    const handler = api.routes.get('GET /api/hermes-channel/health')!;
-    const { res, calls } = trackingRes();
-
-    await handler({}, res);
-
-    expect(calls.some(c => c.status === 503)).toBe(true);
-    expect(calls.some(c =>
-      c.json?.ok === false &&
-      c.json?.status === 'degraded' &&
-      c.json?.bridge?.ready === false,
-    )).toBe(true);
-  });
-});
-
-describe('POST /api/hermes-channel/send and stream', () => {
-  it('fail closed until a bridge dispatcher is registered', async () => {
-    const api = createTrackingApi();
-    registerHermesRoutes(api);
-
-    for (const route of ['POST /api/hermes-channel/send', 'POST /api/hermes-channel/stream']) {
-      const handler = api.routes.get(route)!;
-      const { res, calls } = trackingRes();
-
-      await handler({ body: { text: 'hello', correlationId: 'corr-1' } }, res);
-
-      expect(calls.some(c => c.status === 501)).toBe(true);
-      expect(calls.some(c => c.json?.success === false)).toBe(true);
-    }
   });
 });
 
@@ -608,13 +574,17 @@ describe('Hermes profile setup helpers', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+    setupHermesProfile({
+      hermesHome,
+      memoryMode: 'provider',
+      daemonUrl: 'http://127.0.0.1:9333',
+    });
 
-    await runDisconnect({ hermesHome, daemonUrl: 'http://127.0.0.1:9200' });
-    await runUninstall({ hermesHome, daemonUrl: 'http://127.0.0.1:9200' });
+    await runDisconnect({ hermesHome });
+    await runUninstall({ hermesHome });
 
     const disconnectCalls = calls.filter((call) =>
-      call.url === 'http://127.0.0.1:9200/api/local-agent-integrations/hermes'
+      call.url === 'http://127.0.0.1:9333/api/local-agent-integrations/hermes'
       && call.init.method === 'PUT');
     expect(disconnectCalls).toHaveLength(2);
     for (const call of disconnectCalls) {
@@ -655,6 +625,38 @@ describe('Hermes profile setup helpers', () => {
     expect(config).not.toContain('provider: dkg');
     expect(verify.ok).toBe(true);
     expect(verify.profile.memoryMode).toBe('tools-only');
+  });
+
+  it('reconnect preserves persisted daemon and bridge settings when flags are omitted', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({
+      hermesHome,
+      memoryMode: 'tools-only',
+      daemonUrl: 'https://dkg.example.com/',
+      gatewayUrl: 'https://hermes.example.com/',
+      bridgeHealthUrl: 'https://hermes.example.com/health/',
+    });
+    disconnectHermesProfile({ hermesHome });
+
+    await runReconnect({ hermesHome, start: false, verify: false });
+
+    const config = JSON.parse(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8'));
+    const state = JSON.parse(readFileSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'), 'utf-8'));
+    expect(config.daemon_url).toBe('https://dkg.example.com');
+    expect(config.bridge).toEqual({
+      gatewayUrl: 'https://hermes.example.com',
+      healthUrl: 'https://hermes.example.com/health',
+    });
+    expect(state.daemonUrl).toBe('https://dkg.example.com');
+    expect(state.bridge).toEqual(config.bridge);
+    expect(state.profile.memoryMode).toBe('tools-only');
+  });
+
+  it('rejects unsupported non-interactive ask memory mode', async () => {
+    await expect(runSetup({
+      memoryMode: 'ask' as any,
+      dryRun: true,
+    })).rejects.toThrow('not supported');
   });
 
   it('exposes a dry-run CLI setup helper for dkg hermes setup', async () => {

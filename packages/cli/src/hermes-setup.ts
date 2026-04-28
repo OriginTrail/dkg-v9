@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 
-export type HermesMemoryMode = 'primary' | 'tools-only' | 'ask';
+export type HermesMemoryMode = 'primary' | 'tools-only';
 
 export interface HermesSetupCliOptions {
   profile?: string;
@@ -57,7 +57,6 @@ export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): Normal
     memoryMode !== undefined
     && memoryMode !== 'primary'
     && memoryMode !== 'tools-only'
-    && memoryMode !== 'ask'
   ) {
     throw new Error(`Invalid Hermes memory mode: ${memoryMode}`);
   }

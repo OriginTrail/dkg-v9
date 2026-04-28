@@ -56,6 +56,13 @@ function normalizeOptionalContextGraphId(raw: unknown): string | undefined {
   return validateContextGraphId(trimmed).valid ? trimmed : undefined;
 }
 
+function hasInvalidOptionalContextGraphId(raw: unknown): boolean {
+  if (raw == null) return false;
+  if (typeof raw !== 'string') return true;
+  const trimmed = raw.trim();
+  return !!trimmed && !validateContextGraphId(trimmed).valid;
+}
+
 function finalizeAgentReplyText(text: string): string {
   if (text.trim().length === 0) {
     throw new Error(NO_TEXT_RESPONSE_ERROR);
@@ -900,6 +907,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (hasInvalidOptionalContextGraphId(opts?.uiContextGraphId)) {
+      throw new Error('Invalid uiContextGraphId');
+    }
     const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
@@ -1211,6 +1221,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (hasInvalidOptionalContextGraphId(opts?.uiContextGraphId)) {
+      throw new Error('Invalid uiContextGraphId');
+    }
     const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
@@ -1746,6 +1759,11 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
           return;
         }
+        if (hasInvalidOptionalContextGraphId(parsed.uiContextGraphId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
+          return;
+        }
         const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
         const { text, correlationId, identity } = parsed;
         if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
@@ -1810,6 +1828,11 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
+      if (hasInvalidOptionalContextGraphId(parsed.uiContextGraphId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
+        return;
+      }
       const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
       const { text, correlationId, identity } = parsed;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
@@ -1864,6 +1887,11 @@ export class DkgChannelPlugin {
       if (body.contextEntries != null && contextEntries === undefined) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
+      if (hasInvalidOptionalContextGraphId(body.uiContextGraphId)) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
         return;
       }
       const uiContextGraphId = normalizeOptionalContextGraphId(body.uiContextGraphId);

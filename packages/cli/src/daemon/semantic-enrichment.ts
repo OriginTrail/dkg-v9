@@ -278,7 +278,6 @@ export function isAuthorizedLocalAgentSemanticWorkerRequest(
   const bridgeHeader = readSingleHeaderValue(req.headers['x-dkg-bridge-token'])?.trim();
   if (bridgeHeader !== bridgeAuthToken) return false;
   if (!requestToken) return true;
-  if (requestToken !== bridgeAuthToken) return false;
   return opts.resolveAgentByToken?.(requestToken) === undefined;
 }
 

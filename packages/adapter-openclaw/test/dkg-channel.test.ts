@@ -772,7 +772,7 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
-  it('processInbound drops invalid UI context graph ids before persisting the turn', async () => {
+  it('processInbound rejects invalid UI context graph ids before dispatch or persistence', async () => {
     const { runtime } = makeMockRuntime({
       dispatchImpl: async (params) => {
         await params.dispatcherOptions.deliver({ text: 'Agent reply' });
@@ -787,18 +787,10 @@ describe('DkgChannelPlugin', () => {
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
-    await plugin.processInbound('User message', 'corr-invalid-cg', 'owner', {
+    await expect(plugin.processInbound('User message', 'corr-invalid-cg', 'owner', {
       uiContextGraphId: 'bad project id!',
-    });
-
-    await new Promise(r => setTimeout(r, 10));
-
-    expect(storeCalls[0]).toEqual([
-      'openclaw:dkg-ui',
-      'User message',
-      'Agent reply',
-      { turnId: 'corr-invalid-cg' },
-    ]);
+    })).rejects.toThrow('Invalid uiContextGraphId');
+    expect(storeCalls).toHaveLength(0);
   });
 
   it('processInbound does not queue an in-memory semantic wake before the daemon callback arrives', async () => {
@@ -1514,6 +1506,35 @@ describe('DkgChannelPlugin', () => {
         attachmentRefs,
       }),
     );
+  });
+
+  it('standalone bridge rejects invalid UI context graph ids with a field-specific 400', async () => {
+    const routeInboundMessage = vi.fn().mockResolvedValue({
+      correlationId: 'corr-invalid-ui-cg',
+      text: 'Should not run',
+    });
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+    const port = await waitForBridgePort(plugin);
+
+    const res = await fetch(`http://127.0.0.1:${port}/inbound`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-dkg-bridge-token': 'test-token',
+      },
+      body: JSON.stringify({
+        text: 'User message',
+        correlationId: 'corr-invalid-ui-cg',
+        uiContextGraphId: 'bad project id!',
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: 'Invalid "uiContextGraphId"' });
+    expect(routeInboundMessage).not.toHaveBeenCalled();
+    expect(storeSpy).not.toHaveBeenCalled();
   });
 
   it('standalone bridge streaming accepts attachment-only inbound requests', async () => {

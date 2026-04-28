@@ -972,6 +972,18 @@ describe('best-effort semantic enqueue helper', () => {
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw', {
+      requestToken: 'secondary-admin-token',
+      bridgeAuthToken: 'node-token',
+      resolveAgentByToken: () => undefined,
+    })).toBe(true);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
       },
       socket: { remoteAddress: '127.0.0.1' },
     } as any, 'openclaw', authOpts)).toBe(false);
@@ -980,6 +992,18 @@ describe('best-effort semantic enqueue helper', () => {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
         'x-dkg-bridge-token': 'agent-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw', {
+      requestToken: 'agent-token',
+      bridgeAuthToken: 'node-token',
+      resolveAgentByToken: () => 'did:dkg:agent:0xagent',
+    })).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
       },
       socket: { remoteAddress: '127.0.0.1' },
     } as any, 'openclaw', {

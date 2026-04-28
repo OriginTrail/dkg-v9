@@ -4004,6 +4004,27 @@ describe('DkgNodePlugin', () => {
       }
     });
 
+    it('treats IPv6 loopback (`http://[::1]:…`) as localhost (T40)', async () => {
+      // T40 — `new URL('http://[::1]:9200').hostname` returns `[::1]`
+      // (with brackets) per WHATWG URL. Without bracket-stripping,
+      // the heuristic misclassifies a local IPv6 daemon as remote
+      // and skips the keystore read, leaving recall/search broken
+      // for an entirely valid local-only deployment.
+      writeKeystore([ETH_PRIMARY]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://[::1]:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
     it('honors DKG_AGENT_ADDRESS even when daemonUrl is remote (T38)', async () => {
       // T38 — Operator escape hatch: setting DKG_AGENT_ADDRESS lets
       // remote-daemon deployments scope WM correctly without waiting

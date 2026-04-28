@@ -1643,7 +1643,12 @@ export class DkgNodePlugin {
   private daemonIsLocalhost(): boolean {
     const url = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     try {
-      const host = new URL(url).hostname.toLowerCase();
+      // T40 — `new URL('http://[::1]:9200').hostname` returns `[::1]`
+      // (with brackets) per WHATWG URL. Strip enclosing brackets
+      // before comparison so IPv6 loopback urls don't get
+      // misclassified as remote.
+      let host = new URL(url).hostname.toLowerCase();
+      if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
       if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true;
       // 127.0.0.0/8 (loopback range)
       if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;

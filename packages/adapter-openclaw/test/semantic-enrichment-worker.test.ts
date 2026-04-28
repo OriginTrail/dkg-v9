@@ -90,6 +90,7 @@ describe('SemanticEnrichmentWorker', () => {
           leaseOwner: 'worker',
           leaseExpiresAt: Date.now() + 60_000,
           nextAttemptAt: Date.now(),
+          payloadHash: 'a'.repeat(64),
         },
       })
       .mockResolvedValueOnce({ event: null })
@@ -261,6 +262,7 @@ describe('SemanticEnrichmentWorker', () => {
           object: 'https://schema.org/Person',
         },
       ],
+      'a'.repeat(64),
     );
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });

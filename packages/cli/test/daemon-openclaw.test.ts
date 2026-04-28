@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +57,10 @@ const testEntryConfig: AdapterEntryConfig = {
   memory: { enabled: true },
   channel: { enabled: true },
 };
+
+function semanticPayloadHashForTest(payload: unknown): string {
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -929,6 +934,7 @@ describe('best-effort semantic enqueue helper', () => {
     const body = JSON.stringify({
       eventId: 'evt-large-body',
       leaseOwner: 'host-a:123:boot-1',
+      payloadHash: semanticPayloadHashForTest({ eventId: 'evt-large-body' }),
       triples: [],
       padding: 'x'.repeat(300_000),
     });
@@ -962,6 +968,101 @@ describe('best-effort semantic enqueue helper', () => {
     expect(JSON.parse(res.body)).toEqual({
       error: 'Semantic enrichment event not found: evt-large-body',
     });
+  });
+
+  it('rejects stale chat semantic appends after the queued payload is refreshed', async () => {
+    const req = new PassThrough() as any;
+    req.method = 'POST';
+    req.headers = {
+      'x-dkg-local-agent-integration': 'openclaw',
+      'x-dkg-bridge-token': 'bridge-token',
+    };
+    req.socket = { remoteAddress: '127.0.0.1' };
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(status: number) {
+        this.statusCode = status;
+      },
+      end(body: string) {
+        this.body = body;
+      },
+    };
+    const stalePayload = {
+      kind: 'chat_turn',
+      sessionId: 'openclaw:dkg-ui',
+      turnId: 'turn-stale',
+      contextGraphId: 'agent-context',
+      assertionName: 'chat-turns',
+      assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+      sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+      turnUri: 'urn:dkg:chat:turn:turn-stale',
+      userMessage: 'draft question',
+      assistantReply: 'draft answer',
+      persistenceState: 'pending',
+    };
+    const currentPayload = {
+      ...stalePayload,
+      assistantReply: 'final grounded answer',
+      persistenceState: 'stored',
+    };
+    const insert = vi.fn();
+    const body = JSON.stringify({
+      eventId: 'evt-stale-chat',
+      leaseOwner: 'host-a:123:boot-1',
+      payloadHash: semanticPayloadHashForTest(stalePayload),
+      triples: [{
+        subject: 'urn:dkg:chat:turn:turn-stale',
+        predicate: 'http://schema.org/about',
+        object: 'urn:dkg:entity:stale',
+      }],
+    });
+
+    const responsePromise = handleSemanticEnrichmentRoutes({
+      req,
+      res: res as any,
+      path: '/api/semantic-enrichment/events/append',
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+          },
+        },
+      }),
+      dashDb: {
+        getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+          id: 'evt-stale-chat',
+          kind: 'chat_turn',
+          idempotency_key: 'chat-turn:turn-stale',
+          payload_json: JSON.stringify(currentPayload),
+          status: 'leased',
+          attempts: 1,
+          max_attempts: 5,
+          lease_owner: 'host-a:123:boot-1',
+          lease_expires_at: Date.now() + 60_000,
+          next_attempt_at: Date.now(),
+          semantic_triple_count: 0,
+          last_error: null,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        }),
+      },
+      agent: {
+        resolveAgentByToken: () => undefined,
+        store: { insert },
+      },
+      extractionStatus: new Map(),
+      requestToken: 'bridge-token',
+      bridgeAuthToken: 'bridge-token',
+    } as any);
+    req.end(body);
+
+    await responsePromise;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Semantic enrichment lease is no longer owned by this worker',
+    });
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it('cleans event provenance and semantic count when semantic append insert fails', async () => {
@@ -1008,6 +1109,7 @@ describe('best-effort semantic enqueue helper', () => {
     const body = JSON.stringify({
       eventId: 'evt-partial',
       leaseOwner: 'host-a:123:boot-1',
+      payloadHash: semanticPayloadHashForTest(payload),
       triples: [{
         subject: 'urn:dkg:entity:acme',
         predicate: 'http://schema.org/name',
@@ -1398,7 +1500,7 @@ describe('best-effort semantic enqueue helper', () => {
     };
     const dashDb = {
       getSemanticEnrichmentEventByIdempotencyKey: vi.fn(() => row),
-      refreshPendingSemanticEnrichmentEventPayload: vi.fn((
+      refreshActiveSemanticEnrichmentEventPayload: vi.fn((
         id: string,
         payloadJson: string,
         semanticTripleCount: number,
@@ -1409,6 +1511,7 @@ describe('best-effort semantic enqueue helper', () => {
           payload_json: payloadJson,
           status: 'pending',
           semantic_triple_count: semanticTripleCount,
+          attempts: 0,
           next_attempt_at: updatedAt,
           lease_owner: null,
           lease_expires_at: null,
@@ -1441,7 +1544,7 @@ describe('best-effort semantic enqueue helper', () => {
     });
 
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
-    expect(dashDb.refreshPendingSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
+    expect(dashDb.refreshActiveSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
       'evt-chat-refresh',
       JSON.stringify(newPayload),
       0,
@@ -1454,6 +1557,7 @@ describe('best-effort semantic enqueue helper', () => {
     expect(row).toMatchObject({
       status: 'pending',
       semantic_triple_count: 0,
+      attempts: 0,
       lease_owner: null,
       lease_expires_at: null,
       last_error: null,

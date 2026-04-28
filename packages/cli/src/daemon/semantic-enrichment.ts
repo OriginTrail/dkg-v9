@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
@@ -365,6 +365,16 @@ function parseSemanticEnrichmentEventPayload(raw: string): SemanticEnrichmentEve
   }
 }
 
+function semanticEnrichmentPayloadHash(payloadJson: string): string {
+  return createHash('sha256').update(payloadJson).digest('hex');
+}
+
+function normalizePayloadHash(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return /^[a-f0-9]{64}$/i.test(trimmed) ? trimmed.toLowerCase() : undefined;
+}
+
 function parseExtractionStatusSnapshotRecord(raw: string): ExtractionStatusRecord | undefined {
   try {
     const parsed = JSON.parse(raw) as ExtractionStatusRecord;
@@ -639,7 +649,7 @@ function refreshActiveChatSemanticEventPayloadIfNeeded(
     return undefined;
   }
 
-  const refreshed = dashDb.refreshPendingSemanticEnrichmentEventPayload(
+  const refreshed = dashDb.refreshActiveSemanticEnrichmentEventPayload(
     row.id,
     payloadJson,
     semanticTripleCount,
@@ -653,6 +663,7 @@ function refreshActiveChatSemanticEventPayloadIfNeeded(
       payload_json: payloadJson,
       status: 'pending',
       semantic_triple_count: semanticTripleCount,
+      attempts: 0,
       lease_owner: null,
       lease_expires_at: null,
       last_error: null,
@@ -931,11 +942,17 @@ export function buildSemanticAppendQuads(args: {
   return quads;
 }
 
-function rowLeaseOwnedBy(row: SemanticEnrichmentEventRow, leaseOwner: string, now = Date.now()): boolean {
+function rowLeaseOwnedBy(
+  row: SemanticEnrichmentEventRow,
+  leaseOwner: string,
+  options: { now?: number; payloadHash?: string } = {},
+): boolean {
+  const now = options.now ?? Date.now();
   return row.status === 'leased'
     && row.lease_owner === leaseOwner
     && typeof row.lease_expires_at === 'number'
-    && row.lease_expires_at > now;
+    && row.lease_expires_at > now
+    && (!options.payloadHash || semanticEnrichmentPayloadHash(row.payload_json) === options.payloadHash);
 }
 
 function failLeasedSemanticEvent(
@@ -1034,6 +1051,7 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         leaseOwner: claimed.lease_owner,
         leaseExpiresAt: claimed.lease_expires_at,
         nextAttemptAt: claimed.next_attempt_at,
+        payloadHash: semanticEnrichmentPayloadHash(claimed.payload_json),
         lastError: claimed.last_error ?? undefined,
       },
     });
@@ -1042,7 +1060,13 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/renew') {
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const payloadHash = normalizePayloadHash(payload.payloadHash);
     if (!eventId || !leaseOwner) return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
+    const row = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!row || !rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
+      return jsonResponse(res, 409, { renewed: false });
+    }
     const renewed = dashDb.renewSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
     return jsonResponse(res, renewed ? 200 : 409, { renewed });
   }
@@ -1050,9 +1074,12 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/release') {
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const payloadHash = normalizePayloadHash(payload.payloadHash);
     if (!eventId || !leaseOwner) return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { released: false });
     const released = dashDb.releaseSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
     if (!released) return jsonResponse(res, 409, { released: false });
     const updated = dashDb.getSemanticEnrichmentEvent(eventId);
@@ -1071,10 +1098,12 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/complete') {
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const payloadHash = normalizePayloadHash(payload.payloadHash);
     if (!eventId || !leaseOwner) return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner)) return jsonResponse(res, 409, { completed: false });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { completed: false });
     const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
     if (!eventPayload) return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
     const now = Date.now();
@@ -1128,12 +1157,14 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
     const errorMessage = typeof payload.error === 'string' ? payload.error.trim() : '';
+    const payloadHash = normalizePayloadHash(payload.payloadHash);
     if (!eventId || !leaseOwner || !errorMessage) {
       return jsonResponse(res, 400, { error: 'Missing "eventId", "leaseOwner", or "error"' });
     }
+    if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner)) return jsonResponse(res, 409, { status: null });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { status: null });
     const status = failLeasedSemanticEvent(dashDb, row, leaseOwner, errorMessage);
     if (!status) return jsonResponse(res, 409, { status: null });
     const updated = dashDb.getSemanticEnrichmentEvent(eventId);
@@ -1155,15 +1186,17 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/append') {
     const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
     const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const payloadHash = normalizePayloadHash(payload.payloadHash);
     const triples = normalizeSemanticTripleInputs(payload.triples);
     if (!eventId || !leaseOwner || !triples) {
       return jsonResponse(res, 400, { error: 'Missing "eventId", "leaseOwner", or valid "triples"' });
     }
+    if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
     const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
     if (!eventPayload) return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner)) {
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
       if (row.status === 'completed') {
         const semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);
         return jsonResponse(res, 200, {

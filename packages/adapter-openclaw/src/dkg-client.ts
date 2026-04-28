@@ -145,6 +145,7 @@ export interface SemanticEnrichmentEventLease {
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
   nextAttemptAt?: number;
+  payloadHash?: string;
   lastError?: string;
 }
 
@@ -519,17 +520,27 @@ export class DkgDaemonClient {
     return this.post('/api/semantic-enrichment/events/claim', { leaseOwner });
   }
 
-  async renewSemanticEnrichmentEvent(eventId: string, leaseOwner: string): Promise<{ renewed: boolean }> {
-    return this.post('/api/semantic-enrichment/events/renew', { eventId, leaseOwner });
+  async renewSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    payloadHash?: string,
+  ): Promise<{ renewed: boolean }> {
+    return this.post('/api/semantic-enrichment/events/renew', {
+      eventId,
+      leaseOwner,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
   }
 
   async releaseSemanticEnrichmentEvent(
     eventId: string,
     leaseOwner: string,
+    payloadHash?: string,
   ): Promise<{ released: boolean; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
     return this.post('/api/semantic-enrichment/events/release', {
       eventId,
       leaseOwner,
+      ...(payloadHash ? { payloadHash } : {}),
     });
   }
 
@@ -537,6 +548,7 @@ export class DkgDaemonClient {
     eventId: string,
     leaseOwner: string,
     triples: SemanticTripleInput[],
+    payloadHash?: string,
   ): Promise<{
     applied: boolean;
     alreadyApplied?: boolean;
@@ -547,6 +559,7 @@ export class DkgDaemonClient {
       eventId,
       leaseOwner,
       triples,
+      ...(payloadHash ? { payloadHash } : {}),
     });
   }
 
@@ -554,11 +567,13 @@ export class DkgDaemonClient {
     eventId: string,
     leaseOwner: string,
     semanticTripleCount = 0,
+    payloadHash?: string,
   ): Promise<{ completed: boolean; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
     return this.post('/api/semantic-enrichment/events/complete', {
       eventId,
       leaseOwner,
       semanticTripleCount,
+      ...(payloadHash ? { payloadHash } : {}),
     });
   }
 
@@ -566,11 +581,13 @@ export class DkgDaemonClient {
     eventId: string,
     leaseOwner: string,
     error: string,
+    payloadHash?: string,
   ): Promise<{ status: 'pending' | 'dead_letter' | null; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
     return this.post('/api/semantic-enrichment/events/fail', {
       eventId,
       leaseOwner,
       error,
+      ...(payloadHash ? { payloadHash } : {}),
     });
   }
 

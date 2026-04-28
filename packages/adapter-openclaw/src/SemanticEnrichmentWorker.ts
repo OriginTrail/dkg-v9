@@ -764,7 +764,7 @@ export class SemanticEnrichmentWorker {
     event: SemanticEnrichmentEventLease,
     subagent: OpenClawRuntimeSubagent,
   ): Promise<void> {
-    const leaseHeartbeat = this.startLeaseHeartbeat(event.id);
+    const leaseHeartbeat = this.startLeaseHeartbeat(event.id, event.payloadHash);
     let leaseLost = false;
     let stoppedDuringRun = false;
     const syncLeaseState = (): boolean => {
@@ -804,11 +804,18 @@ export class SemanticEnrichmentWorker {
       }
       const triples = mergeSemanticTriples(tripleGroups);
       if (syncLeaseState() || syncStopState()) return;
-      const appendResult = await this.client.appendSemanticEnrichmentEvent(
-        event.id,
-        this.workerInstanceId,
-        triples,
-      );
+      const appendResult = event.payloadHash
+        ? await this.client.appendSemanticEnrichmentEvent(
+          event.id,
+          this.workerInstanceId,
+          triples,
+          event.payloadHash,
+        )
+        : await this.client.appendSemanticEnrichmentEvent(
+          event.id,
+          this.workerInstanceId,
+          triples,
+        );
       if (!appendResult.completed && !appendResult.alreadyApplied) {
         throw new Error(`Semantic append did not complete for ${event.id}`);
       }
@@ -817,13 +824,14 @@ export class SemanticEnrichmentWorker {
       const message = err?.message ?? String(err);
       leaseLost = isSemanticLeaseConflict(message);
       if (!leaseLost) {
-        await this.client
-          .failSemanticEnrichmentEvent(event.id, this.workerInstanceId, message)
-          .catch((failErr: any) => {
-            this.api.logger.warn?.(
-              `[semantic-enrichment] failed to record event failure for ${event.id}: ${failErr?.message ?? String(failErr)}`,
-            );
-          });
+        const failPromise = event.payloadHash
+          ? this.client.failSemanticEnrichmentEvent(event.id, this.workerInstanceId, message, event.payloadHash)
+          : this.client.failSemanticEnrichmentEvent(event.id, this.workerInstanceId, message);
+        await failPromise.catch((failErr: any) => {
+          this.api.logger.warn?.(
+            `[semantic-enrichment] failed to record event failure for ${event.id}: ${failErr?.message ?? String(failErr)}`,
+          );
+        });
       }
       this.api.logger.warn?.(
         `[semantic-enrichment] execution failed for ${event.kind}:${event.id}: ${message}`,
@@ -831,20 +839,20 @@ export class SemanticEnrichmentWorker {
     } finally {
       leaseHeartbeat.stop();
       if (stoppedDuringRun && !leaseLost) {
-        await this.client
-          .releaseSemanticEnrichmentEvent(event.id, this.workerInstanceId)
-          .then((result) => {
-            if (!result.released) {
-              this.api.logger.warn?.(
-                `[semantic-enrichment] stop could not release lease for ${event.kind}:${event.id}; another worker may need to wait for reclaim`,
-              );
-            }
-          })
-          .catch((err: any) => {
+        const releasePromise = event.payloadHash
+          ? this.client.releaseSemanticEnrichmentEvent(event.id, this.workerInstanceId, event.payloadHash)
+          : this.client.releaseSemanticEnrichmentEvent(event.id, this.workerInstanceId);
+        await releasePromise.then((result) => {
+          if (!result.released) {
             this.api.logger.warn?.(
-              `[semantic-enrichment] failed to release lease for ${event.kind}:${event.id} during shutdown: ${err?.message ?? String(err)}`,
+              `[semantic-enrichment] stop could not release lease for ${event.kind}:${event.id}; another worker may need to wait for reclaim`,
             );
-          });
+          }
+        }).catch((err: any) => {
+          this.api.logger.warn?.(
+            `[semantic-enrichment] failed to release lease for ${event.kind}:${event.id} during shutdown: ${err?.message ?? String(err)}`,
+          );
+        });
       }
       if (stoppedDuringRun) return;
       if (leaseLost) {
@@ -952,7 +960,7 @@ export class SemanticEnrichmentWorker {
     return controller;
   }
 
-  private startLeaseHeartbeat(eventId: string): LeaseHeartbeatController {
+  private startLeaseHeartbeat(eventId: string, payloadHash?: string): LeaseHeartbeatController {
     let stopped = false;
     let leaseLost = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -975,7 +983,9 @@ export class SemanticEnrichmentWorker {
     const renew = async (): Promise<void> => {
       if (stopped || this.stopped) return;
       try {
-        const result = await this.client.renewSemanticEnrichmentEvent(eventId, this.workerInstanceId);
+        const result = payloadHash
+          ? await this.client.renewSemanticEnrichmentEvent(eventId, this.workerInstanceId, payloadHash)
+          : await this.client.renewSemanticEnrichmentEvent(eventId, this.workerInstanceId);
         if (!result.renewed) {
           markLeaseLost();
           return;

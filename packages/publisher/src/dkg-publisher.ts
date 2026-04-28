@@ -31,6 +31,50 @@ import { ethers } from 'ethers';
 import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+/**
+ * PR #229 bot review (r31-10 — dkg-publisher.ts:141).
+ *
+ * On POSIX filesystems, `fsync(fd)` on a file's contents is NOT
+ * sufficient to make a `rename()` or `unlink()` directory-entry
+ * change crash-durable: the metadata that names the file lives in
+ * the parent directory inode, and a power loss between
+ * `renameSync(tmp, target)` and the next dirent flush can leave
+ * the post-rename directory state un-persisted even though the
+ * temp file's bytes hit the platter. After restart the WAL would
+ * "resurrect" the pre-rename state — exactly the
+ * dropped-then-reappearing entry the WAL is meant to prevent.
+ *
+ * Mirror the standard SQLite/etcd/PostgreSQL durability dance:
+ * after a rename or unlink that mutates the directory entry,
+ * fsync the parent directory FD too.
+ *
+ * Best-effort on Windows: `_fsync` on a directory handle isn't
+ * supported (Node throws EISDIR / EACCES). Windows isn't a
+ * supported production target for the publisher daemon, so we
+ * degrade silently rather than block the durability dance on
+ * platforms where the kernel guarantees rename atomicity through a
+ * different mechanism (NTFS journaling).
+ */
+function fsyncDirSync(dirPath: string): void {
+  if (process.platform === 'win32') return;
+  let fd: number | undefined;
+  try {
+    fd = openSync(dirPath, 'r');
+    fsyncSync(fd);
+  } catch {
+    // Best-effort: a kernel that refuses dir fsync (rare) or a dir
+    // that vanished between rename and fsync (race with cleanup)
+    // both degrade to "post-rename dir entry might not be durable
+    // until the next sync(2)". This is strictly an improvement
+    // over the pre-r31-10 behaviour where the dir was NEVER
+    // explicitly synced, so we tolerate the failure.
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* dir-fd close best-effort */ }
+    }
+  }
+}
+
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
 /**
@@ -73,28 +117,81 @@ export function readWalEntriesSync(filePath: string): PreBroadcastJournalEntry[]
       continue;
     }
     if (!isValidJournalEntry(parsed)) continue;
-    out.push(parsed);
+    // r31-10 back-compat: legacy WAL rows may lack the new fields.
+    // Hydrate them to empty strings so the consumer's strict type
+    // (`PreBroadcastJournalEntry` declares both as `string`) is
+    // still honoured. Callers that need the real value MUST check
+    // for the empty-string sentinel before using it.
+    const hydrated: PreBroadcastJournalEntry = {
+      ...parsed,
+      v10ContextGraphId: parsed.v10ContextGraphId ?? '',
+      publishDigest: parsed.publishDigest ?? '',
+    };
+    out.push(hydrated);
   }
   return out;
 }
 
+/**
+ * PR #229 bot review (r31-10 — dkg-publisher.ts:87).
+ *
+ * `v10ContextGraphId` and `publishDigest` are NEW WAL fields added
+ * AFTER the original r6 fsync-based WAL implementation shipped. WAL
+ * files written by the earlier implementation do NOT contain those
+ * two fields, so requiring them in the validator silently dropped
+ * every legacy entry on startup — defeating the whole point of the
+ * WAL recovery path on the very upgrade where it matters most
+ * (process killed mid-broadcast, restarted with the new build, the
+ * surviving intent vanishes because the validator rejects it).
+ *
+ * Both fields are write-only metadata at the persistence boundary —
+ * the only consumer that needs them is the publisher's own future-
+ * write path, and the recovery lookup keys are `merkleRoot` +
+ * `publisherAddress`, both of which legacy entries already carry.
+ * So the safe back-compat behaviour is: relax these two fields to
+ * OPTIONAL during read, and let `readWalEntriesSync` hydrate
+ * legacy entries with empty-string defaults so the consumer's
+ * type contract still holds.
+ *
+ * Recovery still works for legacy entries because the merkleRoot-
+ * based lookup is independent of the new fields. Any callsite that
+ * needs `v10ContextGraphId` / `publishDigest` must check for the
+ * empty-string sentinel and degrade gracefully.
+ *
+ * The remaining 10 fields stay REQUIRED — they were present in r6
+ * and constitute the minimum viable recovery record. Dropping any
+ * of them would surface as a partial/torn line, and the existing
+ * "skips records missing required fields" test pins that contract.
+ */
 function isValidJournalEntry(value: unknown): value is PreBroadcastJournalEntry {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
-  return (
-    typeof v.publishOperationId === 'string' &&
-    typeof v.contextGraphId === 'string' &&
-    typeof v.v10ContextGraphId === 'string' &&
-    typeof v.identityId === 'string' &&
-    typeof v.publisherAddress === 'string' &&
-    typeof v.merkleRoot === 'string' &&
-    typeof v.publishDigest === 'string' &&
-    typeof v.ackCount === 'number' &&
-    typeof v.kaCount === 'number' &&
-    typeof v.publicByteSize === 'string' &&
-    typeof v.tokenAmount === 'string' &&
-    typeof v.createdAt === 'number'
-  );
+  if (
+    typeof v.publishOperationId !== 'string' ||
+    typeof v.contextGraphId !== 'string' ||
+    typeof v.identityId !== 'string' ||
+    typeof v.publisherAddress !== 'string' ||
+    typeof v.merkleRoot !== 'string' ||
+    typeof v.ackCount !== 'number' ||
+    typeof v.kaCount !== 'number' ||
+    typeof v.publicByteSize !== 'string' ||
+    typeof v.tokenAmount !== 'string' ||
+    typeof v.createdAt !== 'number'
+  ) {
+    return false;
+  }
+  // r31-10 back-compat: tolerate missing v10ContextGraphId /
+  // publishDigest on legacy WAL rows. They MUST be string when
+  // present (a non-string value is corruption, not a legacy row),
+  // but their absence is fine and `readWalEntriesSync` fills them
+  // with empty strings so the public type stays satisfied.
+  if (v.v10ContextGraphId !== undefined && typeof v.v10ContextGraphId !== 'string') {
+    return false;
+  }
+  if (v.publishDigest !== undefined && typeof v.publishDigest !== 'string') {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -114,8 +211,9 @@ function isValidJournalEntry(value: unknown): value is PreBroadcastJournalEntry 
  * amounts must not leak beyond the node operator).
  */
 function rewriteWalSync(filePath: string, entries: PreBroadcastJournalEntry[]): void {
+  const parentDir = dirname(filePath);
   try {
-    mkdirSync(dirname(filePath), { recursive: true });
+    mkdirSync(parentDir, { recursive: true });
   } catch {
     /* best-effort; openSync below will surface the real error */
   }
@@ -125,7 +223,16 @@ function rewriteWalSync(filePath: string, entries: PreBroadcastJournalEntry[]): 
     // `readWalEntriesSync`, and skipping the rewrite avoids a
     // spurious zero-byte file lingering on disk.
     if (existsSync(filePath)) {
-      try { unlinkSync(filePath); } catch { /* tolerate races */ }
+      try {
+        unlinkSync(filePath);
+        // r31-10 (dkg-publisher.ts:141): unlink mutates the parent
+        // directory entry; fsync the dir to make the deletion
+        // crash-durable. Without this a power loss between
+        // `unlinkSync` and the next dirent flush could resurrect
+        // the WAL on restart and the recovery path would replay
+        // an entry the operator already meant to retire.
+        fsyncDirSync(parentDir);
+      } catch { /* tolerate races */ }
     }
     return;
   }
@@ -139,6 +246,14 @@ function rewriteWalSync(filePath: string, entries: PreBroadcastJournalEntry[]): 
     closeSync(fd);
   }
   renameSync(tmp, filePath);
+  // r31-10 (dkg-publisher.ts:141): fsyncing the temp file alone is
+  // not enough — the rename mutates the parent directory entry,
+  // and on POSIX the dir-entry update is not durable until the
+  // parent dir's inode is fsync'd too. Without this, a power loss
+  // between `renameSync` and the next dir flush can roll the WAL
+  // back to its pre-rewrite state on restart, resurrecting any
+  // entries this rewrite was supposed to drop.
+  fsyncDirSync(parentDir);
 }
 
 function appendWalEntrySync(filePath: string, entry: PreBroadcastJournalEntry): void {

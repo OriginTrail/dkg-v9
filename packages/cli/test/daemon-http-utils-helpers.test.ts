@@ -486,5 +486,131 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body.path).toBe('/var/data/dkg/manifest.txt');
       expect(body.endpoint).toBe('http://localhost:7777/api/query');
     });
+
+    // -----------------------------------------------------------
+    // PR #229 bot review (r31-10 — http-utils.ts:343). The 3-step
+    // last-mile regex chain (the .replace(/\\n\s+at .../g, "") /
+    // expanded `at … (…)` / standalone `at file:NUM:NUM` cleanup
+    // pass) used to run on EVERY response body unconditionally.
+    // CodeQL js/stack-trace-exposure is a data-flow alert about
+    // err.message → res.end(body): exclusively an error-path
+    // concern. So when a successful (status < 400) payload
+    // legitimately CONTAINED v8-frame-shaped substrings — e.g. a
+    // search result for an issue title that copy-pastes a stack
+    // trace, a SPARQL literal embedding "at fn (file:10:5)", or a
+    // logging tool surfacing user-submitted error reports — the
+    // regex would silently elide those substrings from the
+    // response, with NO indication of the rewrite. The fix
+    // gates the regex chain on `status >= 400`. These tests pin
+    // both the gate (success-path verbatim round-trip) AND the
+    // non-regression (error-path stripping still fires).
+    // -----------------------------------------------------------
+    it('[r31-10] success (200) body containing v8-shaped frames round-trips VERBATIM (CodeQL pacifier must NOT corrupt successful payloads)', () => {
+      // The bot's exact concern: a 200 response with literal text
+      // containing v8 frame syntax. Pre-r31-10 the third
+      // last-mile regex (`/\s+at\s+[^\s()":]+:\d+:\d+/g`) would
+      // have stripped " at fn:10:5" from the title — silently
+      // mutating the user's data.
+      const data = {
+        ok: true,
+        results: [
+          {
+            title: 'Bug report: crash at handler:10:5',
+            body: 'Trace shows handler:10:5 invoking parser:42:13 invoking lexer:7:2',
+          },
+        ],
+      };
+      const { body } = captureJsonResponse(200, data);
+      expect(body).toEqual(data);
+    });
+
+    it('[r31-10] success (200) body with multi-line v8 frame text round-trips VERBATIM', () => {
+      // The first last-mile regex (`/\\n\s+at [^"\n]+/g`) used
+      // to chew through any "\n   at <text>" continuation lines
+      // — including legitimate multi-line user content. Pin
+      // the success-path round-trip.
+      const data = {
+        ok: true,
+        log: 'Search result:\n   at module/foo (frame 1)\n   at module/bar (frame 2)',
+      };
+      const { body } = captureJsonResponse(200, data);
+      expect(body).toEqual(data);
+    });
+
+    it('[r31-10] success (201, 204, 302, 399) all preserve v8-shaped frame text — full success/redirect range is gated off', () => {
+      // The gate is `status >= 400`, so the entire 1xx / 2xx /
+      // 3xx range must round-trip user data verbatim. Hammer
+      // the boundary to make sure no off-by-one regression
+      // (e.g. `> 400`) ever leaks the regex pass into the
+      // success/redirect range.
+      const successStatuses = [100, 200, 201, 204, 301, 302, 308, 399];
+      for (const status of successStatuses) {
+        const data = {
+          ok: true,
+          msg: 'reads at config:42:7 then writes at output:1:1',
+        };
+        const { body } = captureJsonResponse(status, data);
+        expect(body, `status ${status} preserves v8-shaped frame text`).toEqual(data);
+      }
+    });
+
+    it('[r31-10] error (400) STILL strips v8-shaped frames — gate must FIRE at the boundary', () => {
+      // 400 is the lower boundary of the gate. The regex chain
+      // must engage exactly at `status === 400` so the CodeQL
+      // pacifier responsibility is preserved on error responses.
+      const errMsg = 'parse failed at handler (/srv/app/handler.js:42:7) bailing out';
+      const { body } = captureJsonResponse(400, { ok: false, error: errMsg });
+      expect(body.error).not.toMatch(/handler\.js/);
+      expect(body.error).not.toMatch(/:42:7/);
+      expect(body.error).toContain('parse failed');
+    });
+
+    it('[r31-10] error (500, 502, 503) STILL strips bare `at file:LINE:COL` frames — gate must fire across the error range', () => {
+      // The third last-mile regex (`/\s+at\s+[^\s()":]+:\d+:\d+/g`)
+      // is the one that previously corrupted success bodies. Pin
+      // that it CONTINUES to fire on the error range.
+      const errorStatuses = [500, 502, 503];
+      for (const status of errorStatuses) {
+        const errMsg = 'crash at handler:10:5 then bailout';
+        const { body } = captureJsonResponse(status, { ok: false, error: errMsg });
+        expect(body.error, `status ${status} still strips bare frame`).not.toMatch(/at handler:10:5/);
+        expect(body.error).toContain('crash');
+        expect(body.error).toContain('bailout');
+      }
+    });
+
+    it('[r31-10] error (500) STILL strips multi-line `\\n   at <fn>` continuation frames', () => {
+      // The first last-mile regex (`/\\n\s+at [^"\n]+/g`)
+      // strips serialised continuation lines from JSON-encoded
+      // error strings — must continue to fire on errors.
+      const errMsg = 'parse failed\n   at handler\n   at lexer\n   at runner';
+      const { body } = captureJsonResponse(500, { ok: false, error: errMsg });
+      expect(body.error).toContain('parse failed');
+      expect(body.error).not.toMatch(/at handler/);
+      expect(body.error).not.toMatch(/at lexer/);
+      expect(body.error).not.toMatch(/at runner/);
+    });
+
+    it('[r31-10] CodeQL js/stack-trace-exposure compliance: an `err.message` carrying a real v8 stack still gets scrubbed when surfaced as a 500 error response', () => {
+      // The end-to-end CodeQL alert path: `try { ... } catch (e) {
+      // jsonResponse(res, 500, { error: e.message }) }` where
+      // `e.message` is a real Node.js error with full v8 stack.
+      // Pin that this scrub still happens after the r31-10
+      // narrowing.
+      const realErrorMessage =
+        'ENOENT: no such file or directory, open \'/srv/app/missing.json\'\n' +
+        '    at Object.openSync (node:fs:603:3)\n' +
+        '    at readFileSync (node:fs:471:35)\n' +
+        '    at handler (/srv/app/dist/handler.js:42:7)\n' +
+        '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)';
+      const { body } = captureJsonResponse(500, {
+        ok: false,
+        error: realErrorMessage,
+      });
+      expect(body.error).toContain('ENOENT');
+      expect(body.error).not.toMatch(/node:fs/);
+      expect(body.error).not.toMatch(/handler\.js/);
+      expect(body.error).not.toMatch(/processTicksAndRejections/);
+    });
   });
 });

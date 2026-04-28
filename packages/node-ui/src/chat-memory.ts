@@ -963,12 +963,39 @@ export class ChatMemoryManager {
           ? turnId.slice(HEADLESS_PREFIX.length)
           : turnId;
       };
+      // PR #229 bot review (r31-10 — chat-memory.ts:971). The
+      // r31-5 dedupe is between the HEADLESS assistant variant
+      // (`msg:agent-headless:K`) and the CANONICAL assistant
+      // variant (`msg:agent:K`) — it is exclusively an
+      // assistant-side concern. The previous predicate used
+      // `!m.isHeadlessAssistant` (i.e. ANY non-headless message
+      // proves the canonical assistant exists), which falsely
+      // counted the ALWAYS-non-headless USER turn (`schema:author`
+      // includes "user", `dkg:headlessAssistantMessage` is never
+      // emitted on user messages) as evidence that a canonical
+      // assistant message also exists for the same turn key.
+      // Consequence: a session that has only [user-turn,
+      // headless-assistant-reply] for a given turn key would set
+      // `groupHasNonHeadless[key] = true` from the user turn,
+      // hit the canonical-wins branch in the filter below
+      // (line ~995), and DROP the lone headless assistant — the
+      // session would render with the user message and no agent
+      // reply at all (the original ILd- repro).
+      //
+      // Fix: only an actual non-headless ASSISTANT message
+      // (`schema:author` includes "agent" AND
+      // `dkg:headlessAssistantMessage` is unset/false) counts as
+      // proof of a canonical assistant variant. User messages
+      // never participate in the canonical-vs-headless dedupe and
+      // must not influence its outcome.
       const groupHasNonHeadless = new Map<string, boolean>();
       const groupHasSupersedingHeadless = new Map<string, boolean>();
       for (const m of rawMessages) {
         const key = canonicalTurnKey(m.turnId);
         if (key === null) continue;
-        if (!m.isHeadlessAssistant) groupHasNonHeadless.set(key, true);
+        if (!m.isHeadlessAssistant && m.author === 'agent') {
+          groupHasNonHeadless.set(key, true);
+        }
         if (m.isHeadlessAssistant && m.supersedesCanonicalAssistant) {
           groupHasSupersedingHeadless.set(key, true);
         }

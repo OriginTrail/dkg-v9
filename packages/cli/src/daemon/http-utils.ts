@@ -340,13 +340,35 @@ export function jsonResponse(
   // (`:`, `<anonymous>`, `native`) and each character class has a
   // unique role per branch — the same anti-backtracking shape as
   // the existing `stripStackFrames` regex (CodeQL alerts 56 / 57).
-  const body = rawBody
-    .replace(/\\n\s+at [^"\n]+/g, "")
-    .replace(
-      /\s+at\s+(?:[^\s()"]+\s+)?\((?:[^)"\n]*?:\d+(?::\d+)?|<anonymous>|native|eval[^)"\n]*)\)/g,
-      "",
-    )
-    .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "");
+  //
+  // PR #229 bot review (r31-10 — http-utils.ts:343). The previous
+  // revision applied this last-mile regex chain to EVERY response
+  // body unconditionally. That meant successful 2xx payloads like
+  // a `/api/query` SELECT result that legitimately carries a string
+  // literal containing v8-frame-shaped text (e.g. an indexed user
+  // tweet, an issue title that copy-pastes a stack trace, a SPARQL
+  // literal embedding source-position metadata) would have those
+  // substrings silently elided from the response — the data
+  // returned to the client would not match what the route handler
+  // actually emitted, with NO indication of the rewrite. CodeQL's
+  // js/stack-trace-exposure data-flow concern is about `err.message`
+  // → `data` → `res.end(body)`, which is exclusively an error-path
+  // concern. Successful responses do not have err.message reaching
+  // the response sink (no `try/catch` injects err.message into a
+  // 2xx body in this codebase), so the pacifier only needs to run
+  // on error responses (status >= 400). Scoping it there preserves
+  // the CodeQL silence on the flagged sink while making
+  // success-path payload corruption impossible.
+  const isErrorResponse = status >= 400;
+  const body = isErrorResponse
+    ? rawBody
+        .replace(/\\n\s+at [^"\n]+/g, "")
+        .replace(
+          /\s+at\s+(?:[^\s()"]+\s+)?\((?:[^)"\n]*?:\d+(?::\d+)?|<anonymous>|native|eval[^)"\n]*)\)/g,
+          "",
+        )
+        .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
+    : rawBody;
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),

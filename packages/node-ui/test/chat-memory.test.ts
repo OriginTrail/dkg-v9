@@ -734,6 +734,177 @@ describe('ChatMemoryManager', () => {
     expect(queryText).toMatch(/supersedesCanonicalAssistant>\s+\?supersedesCanonicalFlag/);
   });
 
+  // -----------------------------------------------------------------------
+  // PR #229 bot review (r31-10 — node-ui/src/chat-memory.ts:971).
+  //
+  // The r31-5 dedupe is exclusively an ASSISTANT-side concern: when
+  // BOTH `msg:agent:K` (canonical) AND `msg:agent-headless:K` exist
+  // for the same turn key, drop the headless duplicate. The previous
+  // predicate `if (!m.isHeadlessAssistant)` falsely treated the
+  // ALWAYS-non-headless USER message (`msg:user:K`,
+  // `dkg:headlessAssistantMessage` never set) as proof that a
+  // canonical assistant message also exists. Consequence: a session
+  // that only has [user-turn, headless-assistant-reply] (the
+  // proactive / recovery path AFTER a user-turn replay sequence) had
+  // its headless reply dropped — the chat would render the user
+  // message and NO agent reply at all, exactly the original ILd-
+  // repro the bot called out.
+  //
+  // Fix: only count an actual non-headless ASSISTANT message
+  // (`schema:author` includes "agent" AND `dkg:headlessAssistantMessage`
+  // unset/false) as canonical-assistant evidence. User messages
+  // never participate in the canonical-vs-headless dedupe.
+  // -----------------------------------------------------------------------
+  it('[r31-10] headless assistant reply SURVIVES when the user-turn replayed but NO canonical assistant exists for the same turn key (the ILd- repro)', async () => {
+    // The exact pre-fix bug: user message is non-headless and shares
+    // the canonical turn key `K-l1` with the headless assistant
+    // reply (turnId `headless:K-l1`). Pre-fix the user message would
+    // set groupHasNonHeadless[K-l1] = true and the headless reply
+    // would be dropped at the canonical-wins branch. Post-fix the
+    // user message is correctly excluded from the canonical-assistant
+    // tally and the headless reply survives.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K-l1',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hello"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-l1"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-l1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"hi! how can I help?"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"headless:K-l1"',
+            headlessAssistantFlag: '"true"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-10-headless-survives');
+    expect(session).not.toBeNull();
+    const uris = session!.messages.map((m) => m.uri);
+    // Both messages MUST surface — the session would otherwise
+    // render as agent-less chat (the original ILd- repro: "session
+    // loses its only assistant message").
+    expect(uris).toContain('urn:dkg:chat:msg:user:K-l1');
+    expect(uris).toContain('urn:dkg:chat:msg:agent-headless:K-l1');
+    expect(session!.messages).toHaveLength(2);
+    // Anti-regression: the surviving message must carry the actual
+    // assistant text (not be silently re-routed to a stub).
+    const agent = session!.messages.find((m) => m.author === 'agent')!;
+    expect(agent.text).toBe('hi! how can I help?');
+  });
+
+  it('[r31-10] r31-5 canonical-wins dedupe STILL FIRES when the canonical ASSISTANT message exists alongside the headless variant (anti-regression)', async () => {
+    // Anti-regression for r31-5: the r31-10 fix narrows the "what
+    // counts as canonical" predicate to ASSISTANT messages only —
+    // it must not regress the original r31-5 dedupe, which requires
+    // dropping the headless variant when a CANONICAL ASSISTANT for
+    // the same turn key exists. This is the same fixture as the
+    // first r31-5 test but re-pinned under r31-10 to guarantee the
+    // narrowing didn't widen the survivor set in the canonical-
+    // assistant-present case.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K-l2',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-l2"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-l2',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"headless (provisional)"',
+            ts: '"2026-01-01T12:00:00.500Z"',
+            turnId: '"headless:K-l2"',
+            headlessAssistantFlag: '"true"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent:K-l2',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"final canonical reply"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"K-l2"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-10-r31-5-survives');
+    expect(session).not.toBeNull();
+    const uris = session!.messages.map((m) => m.uri);
+    // r31-5 dedupe still fires: headless dropped, canonical wins.
+    expect(uris).toEqual([
+      'urn:dkg:chat:msg:user:K-l2',
+      'urn:dkg:chat:msg:agent:K-l2',
+    ]);
+    expect(uris).not.toContain('urn:dkg:chat:msg:agent-headless:K-l2');
+  });
+
+  it('[r31-10] a HEADLESS-ONLY session (proactive-agent flow with no user-turn at all) still surfaces the assistant reply', async () => {
+    // Belt-and-braces for the original r31-5 "no canonical
+    // counterpart" case: a session with a single headless
+    // assistant message must surface regardless of whether a
+    // sibling user message exists. Pre-r31-10 a sibling user
+    // message was enough to drop the headless reply; this case
+    // (no user message) was never broken, but pinning it here
+    // ensures the r31-10 fix did not accidentally regress it.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-l3',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"proactive reply, no user-turn"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"headless:K-l3"',
+            headlessAssistantFlag: '"true"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-10-headless-only');
+    expect(session).not.toBeNull();
+    expect(session!.messages.map((m) => m.uri)).toEqual([
+      'urn:dkg:chat:msg:agent-headless:K-l3',
+    ]);
+  });
+
+  it('[r31-10] a USER-only session (no assistant reply yet) renders the user message untouched (anti-regression: r31-10 must not affect user-side rendering)', async () => {
+    // The r31-10 narrowing changes only how non-headless ASSISTANT
+    // messages are counted — user messages must continue to render
+    // exactly as before. This pins that the user-side surface is
+    // unaffected by the r31-10 predicate change.
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K-l4',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"only the user has spoken"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-l4"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-10-user-only');
+    expect(session).not.toBeNull();
+    expect(session!.messages.map((m) => m.uri)).toEqual([
+      'urn:dkg:chat:msg:user:K-l4',
+    ]);
+  });
+
   it('getSession returns null when session has no messages', async () => {
     mockQuery.returns.push(
       { bindings: [] },

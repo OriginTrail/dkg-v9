@@ -216,37 +216,61 @@ jobs:
           echo "::warning::blazegraph never became ready within 60s; ST-1 parity test will report"
         continue-on-error: true
 
-      - name: Create Blazegraph quads-mode namespace
+      - name: Create Blazegraph quads-mode namespaces
         # The `kb` namespace shipped by lyrasis/blazegraph defaults to
         # triples mode (quads=false), so any GRAPH <…> { … } clause is
         # silently dropped on insert and the conformance suite gets
         # surprising results (deleteByPattern over-deletes because all
         # triples land in the default graph regardless of intent).
-        # Create a dedicated quads-mode namespace `dkgq` so the rest of
-        # the suite exercises real named-graph semantics — same
-        # behavior as production deployments. continue-on-error so a
-        # failure here surfaces as the storage suite's missing-engine
-        # error rather than a separate red lane.
+        #
+        # PR #229 bot review (r31-10 — ci.yml:256). We provision TWO
+        # quads-mode namespaces, not one. Vitest runs files in parallel
+        # by default, and `storage.test.ts` issues `DROP ALL` before
+        # every Blazegraph conformance test in its suite — pointing
+        # `adapter-parity-extra.test.ts` at the SAME namespace meant
+        # the conformance suite's `DROP ALL` could fire mid-parity and
+        # wipe its inserted fixture, making the parity lane flaky.
+        # Isolating per file (not per worker) is sufficient: vitest
+        # serialises tests WITHIN a file, so the conformance suite's
+        # `DROP ALL` between its own tests is fine, and the parity
+        # suite holds exclusive ownership of its own namespace.
+        #
+        # `dkgq`         → conformance / general storage suite
+        #                 (storage.test.ts and other DROP-ALL tests)
+        # `dkgq-parity`  → adapter-parity-extra.test.ts (real Oxigraph
+        #                 ↔ Blazegraph parity), keyed off
+        #                 `BLAZEGRAPH_PARITY_URL` so the parity test
+        #                 runs against an isolated namespace and
+        #                 cannot be wiped mid-run.
+        #
+        # continue-on-error so a failure here surfaces as the storage
+        # suite's missing-engine error rather than a separate red lane.
         run: |
           set -e
-          # Quads mode requires disabling inference (NoAxioms) and truth
-          # maintenance — Blazegraph rejects the namespace creation
-          # otherwise with: "com.bigdata.rdf.store.AbstractTripleStore.quads
-          # does not support inference".
-          {
-            echo 'com.bigdata.rdf.store.AbstractTripleStore.quads=true'
-            echo 'com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers=false'
-            echo 'com.bigdata.rdf.store.AbstractTripleStore.axiomsClass=com.bigdata.rdf.axioms.NoAxioms'
-            echo 'com.bigdata.rdf.sail.truthMaintenance=false'
-            echo 'com.bigdata.rdf.sail.namespace=dkgq'
-          } > /tmp/dkgq.props
-          echo '--- /tmp/dkgq.props ---' && cat /tmp/dkgq.props && echo '---'
-          curl -fsS -X POST -H 'Content-Type: text/plain' \
-            --data-binary @/tmp/dkgq.props \
-            http://localhost:9999/bigdata/namespace
-          # Verify the namespace responds to SPARQL.
-          curl -fsS "http://localhost:9999/bigdata/namespace/dkgq/sparql?query=ASK%20%7B%7D" >/dev/null
-          echo "blazegraph dkgq (quads) namespace ready"
+          create_namespace() {
+            local ns="$1"
+            local props="/tmp/${ns}.props"
+            # Quads mode requires disabling inference (NoAxioms) and truth
+            # maintenance — Blazegraph rejects the namespace creation
+            # otherwise with: "com.bigdata.rdf.store.AbstractTripleStore.quads
+            # does not support inference".
+            {
+              echo 'com.bigdata.rdf.store.AbstractTripleStore.quads=true'
+              echo 'com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers=false'
+              echo 'com.bigdata.rdf.store.AbstractTripleStore.axiomsClass=com.bigdata.rdf.axioms.NoAxioms'
+              echo 'com.bigdata.rdf.sail.truthMaintenance=false'
+              echo "com.bigdata.rdf.sail.namespace=${ns}"
+            } > "$props"
+            echo "--- ${props} ---" && cat "$props" && echo '---'
+            curl -fsS -X POST -H 'Content-Type: text/plain' \
+              --data-binary @"$props" \
+              http://localhost:9999/bigdata/namespace
+            # Verify the namespace responds to SPARQL.
+            curl -fsS "http://localhost:9999/bigdata/namespace/${ns}/sparql?query=ASK%20%7B%7D" >/dev/null
+            echo "blazegraph ${ns} (quads) namespace ready"
+          }
+          create_namespace "dkgq"
+          create_namespace "dkgq-parity"
         continue-on-error: true
 
       - name: "Core (442 tests)"
@@ -254,6 +278,10 @@ jobs:
       - name: "Storage (78 tests)"
         env:
           BLAZEGRAPH_URL: http://localhost:9999/bigdata/namespace/dkgq/sparql
+          # r31-10 (ci.yml:256): isolated namespace for the parity
+          # suite so parallel vitest workers can't have one file's
+          # `DROP ALL` wipe another's fixture mid-test.
+          BLAZEGRAPH_PARITY_URL: http://localhost:9999/bigdata/namespace/dkgq-parity/sparql
         run: pnpm --filter @origintrail-official/dkg-storage test
       - name: "Chain unit (46 tests)"
         run: pnpm --filter @origintrail-official/dkg-chain test

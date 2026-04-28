@@ -147,6 +147,155 @@ describe('readWalEntriesSync', () => {
     );
     expect(readWalEntriesSync(walPath).map(e => e.publishOperationId)).toEqual(['op-a', 'op-b']);
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r31-10 — dkg-publisher.ts:87).
+  //
+  // `v10ContextGraphId` and `publishDigest` are NEW WAL fields,
+  // added AFTER the original r6 fsync-based WAL implementation
+  // shipped. Pre-r31-10 the validator required them unconditionally,
+  // so legacy WAL rows (written by the older publisher build before
+  // either field existed) were silently DROPPED on every startup.
+  // That defeated the WAL recovery contract on the very upgrade
+  // where it matters most: the operator updates the publisher
+  // mid-flight, restarts, and the surviving "we signed and were
+  // about to broadcast" entries vanish — exactly the original
+  // ILeC repro.
+  //
+  // The fix relaxes those two fields to OPTIONAL during read and
+  // hydrates them with empty-string defaults so the consumer's
+  // strict `PreBroadcastJournalEntry` type (which still declares
+  // both as `string`) is satisfied. The remaining 10 fields stay
+  // REQUIRED — they were present in the very first r6 WAL
+  // implementation, so absence indicates corruption, not a legacy
+  // row.
+  // ─────────────────────────────────────────────────────────────────
+  describe('legacy WAL back-compat (r31-10)', () => {
+    /** Build a "legacy r6-era" WAL row that lacks the new r31-10 fields. */
+    function legacyEntryJson(overrides: Record<string, unknown> = {}): string {
+      return JSON.stringify({
+        publishOperationId: 'op-legacy',
+        contextGraphId: 'cg:legacy',
+        identityId: '7',
+        publisherAddress: '0x000000000000000000000000000000000000beef',
+        merkleRoot: '0x' + 'aa'.repeat(32),
+        ackCount: 1,
+        kaCount: 1,
+        publicByteSize: '64',
+        tokenAmount: '0',
+        createdAt: 1_700_000_000_000,
+        ...overrides,
+      });
+    }
+
+    it('legacy entries WITHOUT v10ContextGraphId/publishDigest are recovered (NOT silently dropped)', async () => {
+      // The bot's exact concern: an undrained pre-r31-10 WAL must
+      // still surface its surviving intent on the new build, or
+      // crashed-mid-broadcast records vanish on operator upgrade.
+      await writeFile(walPath, legacyEntryJson() + '\n', 'utf-8');
+      const loaded = readWalEntriesSync(walPath);
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0].publishOperationId).toBe('op-legacy');
+      // Hydrated to empty-string sentinels so consumers that read
+      // these fields don't crash on `undefined.toLowerCase()` etc.
+      // The recovery lookup keys (merkleRoot + publisherAddress)
+      // still hold the real values, so promotion still works.
+      expect(loaded[0].v10ContextGraphId).toBe('');
+      expect(loaded[0].publishDigest).toBe('');
+      expect(loaded[0].merkleRoot).toBe('0x' + 'aa'.repeat(32));
+      expect(loaded[0].publisherAddress).toBe(
+        '0x000000000000000000000000000000000000beef',
+      );
+    });
+
+    it('legacy entries are recoverable via findWalEntryByMerkleRoot — the actual chain-event lookup key', async () => {
+      // End-to-end pin: the entire point of WAL recovery is that
+      // the chain poller can match an observed
+      // `KnowledgeBatchCreated.merkleRoot` back to a surviving
+      // intent. A legacy entry must remain reachable through that
+      // lookup.
+      await writeFile(walPath, legacyEntryJson() + '\n', 'utf-8');
+      const publisher = makePublisher(walPath);
+      const match = publisher.findWalEntryByMerkleRoot(
+        '0x' + 'AA'.repeat(32), // case-insensitive
+      );
+      expect(match?.publishOperationId).toBe('op-legacy');
+      expect(match?.v10ContextGraphId).toBe('');
+      expect(match?.publishDigest).toBe('');
+    });
+
+    it('mixed legacy + new entries coexist (operator upgrade with partially-drained WAL)', async () => {
+      const legacy = legacyEntryJson({
+        publishOperationId: 'op-legacy',
+        merkleRoot: '0x' + 'aa'.repeat(32),
+      });
+      const modern = JSON.stringify(
+        makeEntry({
+          publishOperationId: 'op-modern',
+          merkleRoot: '0x' + 'bb'.repeat(32),
+        }),
+      );
+      await writeFile(walPath, legacy + '\n' + modern + '\n', 'utf-8');
+      const loaded = readWalEntriesSync(walPath);
+      expect(loaded.map(e => e.publishOperationId)).toEqual([
+        'op-legacy',
+        'op-modern',
+      ]);
+      // Legacy hydrated to empty strings; modern keeps its real values.
+      expect(loaded[0].v10ContextGraphId).toBe('');
+      expect(loaded[0].publishDigest).toBe('');
+      expect(loaded[1].v10ContextGraphId).toBe('1');
+      expect(loaded[1].publishDigest).toBe(
+        '0xabc1230000000000000000000000000000000000000000000000000000000000',
+      );
+    });
+
+    it('the OTHER 10 r6-era required fields are still STRICTLY required (corruption is NOT silently legacied)', async () => {
+      // Anti-regression: relaxing v10ContextGraphId / publishDigest
+      // must not turn the validator into a free-for-all. Dropping
+      // ANY r6-era required field still rejects the row, which is
+      // what the existing "skips records missing required fields"
+      // test pins. Here we hit each required field individually so
+      // a future contributor that adds another field accidentally
+      // can't turn the validator into a sieve.
+      const requiredFields = [
+        'publishOperationId',
+        'contextGraphId',
+        'identityId',
+        'publisherAddress',
+        'merkleRoot',
+        'ackCount',
+        'kaCount',
+        'publicByteSize',
+        'tokenAmount',
+        'createdAt',
+      ] as const;
+      for (const field of requiredFields) {
+        const broken = JSON.parse(legacyEntryJson()) as Record<string, unknown>;
+        delete broken[field];
+        await writeFile(walPath, JSON.stringify(broken) + '\n', 'utf-8');
+        const loaded = readWalEntriesSync(walPath);
+        expect(
+          loaded,
+          `expected entry missing "${field}" to be REJECTED, but it was loaded`,
+        ).toEqual([]);
+      }
+    });
+
+    it('rejects rows where v10ContextGraphId or publishDigest is present but NOT a string (corruption, not legacy)', async () => {
+      // r31-10 relaxes "must be present" but NOT "must be string
+      // when present" — a non-string value is corruption (e.g. a
+      // number where the writer always emits a string). Treating
+      // it as legacy would mask a real WAL corruption.
+      const corruptV10 = legacyEntryJson({ v10ContextGraphId: 42 });
+      await writeFile(walPath, corruptV10 + '\n', 'utf-8');
+      expect(readWalEntriesSync(walPath)).toEqual([]);
+
+      const corruptDigest = legacyEntryJson({ publishDigest: { hex: '0xabc' } });
+      await writeFile(walPath, corruptDigest + '\n', 'utf-8');
+      expect(readWalEntriesSync(walPath)).toEqual([]);
+    });
+  });
 });
 
 describe('DKGPublisher WAL recovery on construction', () => {
@@ -1014,5 +1163,158 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot — tentative→confirmed prom
     });
     expect(observed).toHaveLength(1);
     expect(observed[0].promotedUal).toBe(ual);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #229 bot review (r31-10 — dkg-publisher.ts:141): durability dance
+// for `rewriteWalSync`. The previous implementation `fsync`'d the temp
+// file's BYTES then `renameSync`'d into place — but on POSIX the dir
+// entry that names the file is part of the parent directory inode,
+// and a power loss between `rename(2)` and the next dirent flush can
+// roll the rename back even though the file's contents are durable.
+// Same hazard applies to the `unlinkSync` path (zero-entry compaction):
+// unlink mutates the parent directory entry too. The fix wraps the
+// post-rename / post-unlink path with an explicit `fsync(parentDir)`,
+// matching the SQLite/etcd/Postgres durability dance.
+//
+// We can't directly observe `fsync` from a portable test, so we (a)
+// pin the SOURCE so any future revision that drops the dir-fsync
+// regresses here, and (b) exercise the rewrite/unlink paths
+// end-to-end to confirm the dir-fsync helper neither throws nor
+// leaks file descriptors on the test platform (the WAL must remain
+// usable after a recovery + compaction).
+// ---------------------------------------------------------------------------
+describe('rewriteWalSync parent-dir fsync durability dance (r31-10)', () => {
+  it('source-level pin: rewriteWalSync calls fsyncDirSync after BOTH renameSync and the empty-WAL unlinkSync paths', async () => {
+    // Read the on-disk implementation back so the assertion fires
+    // even if a future refactor relocates the helper or renames it
+    // — the WAL durability contract is what's being pinned, not the
+    // exact symbol name. The regex shapes accept any whitespace and
+    // any intervening identifier suffix, but require fsyncDirSync
+    // (or any future replacement that contains "fsync" + "dir") to
+    // appear in the same lexical scope as the renameSync/unlinkSync
+    // call.
+    const srcUrl = new URL('../src/dkg-publisher.ts', import.meta.url);
+    const src = await readFile(srcUrl, 'utf-8');
+
+    // 1. The helper itself must be defined — anti-deletion guard.
+    expect(src).toMatch(/function\s+fsyncDirSync\s*\(/);
+
+    // 2. The helper must use the standard openSync('r') + fsyncSync
+    //    + closeSync sequence on the directory FD. This is the only
+    //    portable way to fsync a directory on POSIX; if a future
+    //    refactor drops to a no-op, this assertion catches it.
+    const helperBody = src.slice(
+      src.indexOf('function fsyncDirSync'),
+      src.indexOf('function fsyncDirSync')
+        + src.slice(src.indexOf('function fsyncDirSync')).indexOf('\n}\n')
+        + 2,
+    );
+    expect(helperBody).toMatch(/openSync\(\s*\w+\s*,\s*['"]r['"]\s*\)/);
+    expect(helperBody).toMatch(/fsyncSync\(/);
+    expect(helperBody).toMatch(/closeSync\(/);
+    expect(helperBody).toMatch(/process\.platform\s*===\s*['"]win32['"]/);
+
+    // 3. The rewriteWalSync body must call fsyncDirSync after BOTH
+    //    the renameSync (post-rewrite path) and the unlinkSync
+    //    (zero-entry compaction path). Slice the rewriteWalSync body
+    //    out so the assertion is local — a stray fsyncDirSync call
+    //    elsewhere in the file doesn't satisfy the post-rename/
+    //    post-unlink durability contract here.
+    const rewriteIdx = src.indexOf('function rewriteWalSync');
+    expect(rewriteIdx).toBeGreaterThan(-1);
+    // Find the matching closing brace for the function body. The
+    // shape is `function rewriteWalSync(...): void {`. Count braces.
+    let depth = 0;
+    let start = -1;
+    let end = -1;
+    for (let i = rewriteIdx; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === '{') {
+        if (start === -1) start = i;
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const rewriteBody = src.slice(start, end);
+
+    // The rewrite body MUST contain BOTH a renameSync and a
+    // following fsyncDirSync. The unlinkSync branch (entries.length
+    // === 0) MUST also be followed by fsyncDirSync.
+    expect(rewriteBody).toMatch(/renameSync\([^)]+\);[\s\S]*?fsyncDirSync\(/);
+    // Distinct unlinkSync → fsyncDirSync pair.
+    expect(rewriteBody).toMatch(/unlinkSync\([^)]+\);[\s\S]*?fsyncDirSync\(/);
+  });
+
+  it('rewrite path remains functional end-to-end after the durability dance (no exception, file FD count stable)', async () => {
+    // Behavioural pin: exercise the path that hits BOTH the
+    // unlinkSync (zero-entry compaction) and renameSync branches
+    // through `recoverFromWalByMerkleRoot`. If `fsyncDirSync`
+    // throws, leaks an FD, or otherwise breaks the rewrite, the
+    // expectation that the surviving entry is gone fails — and a
+    // long-lived test process leaking dir FDs would eventually run
+    // out of file handles, which we'd notice as test-runner
+    // failures across the suite.
+    const target = makeEntry({
+      publishOperationId: 'op-r31-10-rewrite-survives',
+      merkleRoot: '0x' + '21'.repeat(32),
+    });
+    await writeFile(walPath, JSON.stringify(target) + '\n', 'utf-8');
+
+    const publisher = makePublisher(walPath);
+    expect(publisher.preBroadcastJournal).toHaveLength(1);
+
+    const recovered = await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+      publisherAddress: target.publisherAddress,
+      startKAId: 1n,
+      endKAId: 1n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-r31-10-rewrite-survives');
+    // Zero-entry compaction → the unlinkSync branch fired and
+    // fsyncDirSync did NOT throw. The file is gone (or treated as
+    // empty by the next read).
+    expect(readWalEntriesSync(walPath)).toEqual([]);
+  });
+
+  it('rewrite path with a SURVIVOR entry triggers the renameSync branch (durable post-rename state)', async () => {
+    // Hits the OTHER side of the durability dance: a non-empty
+    // entries array → tmp file write → fsync → rename → dir fsync.
+    // The post-rename file content must match the survivor we
+    // expect, AND the read-back must succeed (the dir fsync must
+    // not have left the parent in a state that prevents the
+    // immediate read).
+    const target = makeEntry({
+      publishOperationId: 'op-r31-10-rename-target',
+      merkleRoot: '0x' + '32'.repeat(32),
+    });
+    const survivor = makeEntry({
+      publishOperationId: 'op-r31-10-rename-survivor',
+      merkleRoot: '0x' + '43'.repeat(32),
+    });
+    await writeFile(
+      walPath,
+      JSON.stringify(survivor) + '\n' + JSON.stringify(target) + '\n',
+      'utf-8',
+    );
+
+    const publisher = makePublisher(walPath);
+    const recovered = await publisher.recoverFromWalByMerkleRoot(target.merkleRoot, {
+      publisherAddress: target.publisherAddress,
+      startKAId: 0n,
+      endKAId: 0n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-r31-10-rename-target');
+    const onDisk = readWalEntriesSync(walPath);
+    expect(onDisk.map(e => e.publishOperationId)).toEqual([
+      'op-r31-10-rename-survivor',
+    ]);
   });
 });

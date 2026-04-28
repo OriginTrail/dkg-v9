@@ -1585,15 +1585,28 @@ export class DkgNodePlugin {
         );
         return;
       }
-      const address = loadAgentEthAddressSync(undefined, { explicitAddress });
+      // T42 — explicit `config.dkgHome` lets operators point at the
+      // daemon's home dir when it differs from the gateway process's
+      // own `DKG_HOME` (e.g., `dkg start --home /custom/path`,
+      // service-unit-managed daemon, container-isolated daemon).
+      // Undefined falls through to `dkgHomeDir()` which honors the
+      // env. Localhost gate above still applies — operators with a
+      // remote daemon must use `DKG_AGENT_ADDRESS` directly.
+      const dkgHomeOverride = this.config.dkgHome;
+      const address = loadAgentEthAddressSync(dkgHomeOverride, { explicitAddress });
       if (address) {
         this.nodeAgentAddress = address;
         return;
       }
+      const homeLabel = dkgHomeOverride
+        ? `\`${dkgHomeOverride}/agent-keystore.json\``
+        : '`<DKG_HOME>/agent-keystore.json`';
       api.logger.warn?.(
-        '[dkg-memory] Agent eth address not found — `<DKG_HOME>/agent-keystore.json` is missing or empty. ' +
+        `[dkg-memory] Agent eth address not found — ${homeLabel} is missing or empty. ` +
         'Working-memory reads and writes will return needs_clarification until the daemon provisions an identity. ' +
-        'If running with a non-default DKG_HOME, ensure it points at the live daemon home.',
+        'If the daemon was started with a custom home dir (e.g. `dkg start --home /path`), ' +
+        'set the adapter `dkgHome` config field or DKG_HOME env to that path. ' +
+        'If the daemon is in a separate container/service unit, set `DKG_AGENT_ADDRESS` to the daemon\'s active agent eth address.',
       );
     } catch (err: any) {
       if (err instanceof MultipleAgentsError) {

@@ -4025,6 +4025,38 @@ describe('DkgNodePlugin', () => {
       }
     });
 
+    it('config.dkgHome overrides DKG_HOME for the keystore read (T42)', async () => {
+      // T42 — Operator runs `dkg start --home /custom/path` (or daemon
+      // is service-unit-managed with its own home). Gateway process's
+      // DKG_HOME points elsewhere (or default). Explicit `dkgHome`
+      // config field must reach the keystore read so the adapter
+      // resolves the right identity without env-level coordination.
+      const otherHome = path.join(require('os').tmpdir(), `dkg-other-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      fs.mkdirSync(otherHome, { recursive: true });
+      try {
+        // Write keystore at OTHER home; leave the env-DKG_HOME tempHome empty.
+        fs.writeFileSync(
+          path.join(otherHome, 'agent-keystore.json'),
+          JSON.stringify({ [ETH_PRIMARY]: { authToken: 'tok' } }),
+        );
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://localhost:9200',
+          dkgHome: otherHome,
+          memory: { enabled: true },
+          channel: { enabled: false },
+        });
+        try {
+          plugin.register(makeMockApi());
+          await (plugin as any).ensureNodeAgentAddress();
+          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        try { fs.rmSync(otherHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+
     it('honors DKG_AGENT_ADDRESS even when daemonUrl is remote (T38)', async () => {
       // T38 — Operator escape hatch: setting DKG_AGENT_ADDRESS lets
       // remote-daemon deployments scope WM correctly without waiting

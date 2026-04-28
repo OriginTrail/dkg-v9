@@ -53,6 +53,7 @@ let readFileCalls: [any, ...any[]][] = [];
 let writeFileCalls: [any, any, ...any[]][] = [];
 let mkdirCalls: any[][] = [];
 let rmCalls: any[][] = [];
+let readdirCalls: any[][] = [];
 let copyFileCalls: any[][] = [];
 let chmodCalls: any[][] = [];
 let statCalls: any[][] = [];
@@ -76,6 +77,18 @@ let execImpl: (cmd: string, opts?: any) => Promise<any> = async () => ({ stdout:
 let execFileImpl: (file: string, args: string[], opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
 let swapSlotImpl: (slot: 'a' | 'b') => Promise<void> = async () => {};
 let fetchImpl: (...args: any[]) => Promise<any> = async () => ({ ok: true, json: async () => ({}) });
+// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo}`.
+// Default to a couple of canned package entries so the full flow runs end-to-end
+// in tests that don't care; tests targeting the cleaner override this directly.
+const DEFAULT_READDIR_PKG_ENTRIES = [
+  { name: 'core', isDirectory: () => true },
+  { name: 'cli', isDirectory: () => true },
+  { name: 'README.md', isDirectory: () => false },
+];
+let readdirImpl: (path: any, opts?: any) => Promise<any[]> = async (path: any) => {
+  if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+  return [];
+};
 
 let mockActiveSlot = 'a';
 
@@ -84,6 +97,7 @@ function resetMocks() {
   writeFileCalls = [];
   mkdirCalls = [];
   rmCalls = [];
+  readdirCalls = [];
   copyFileCalls = [];
   chmodCalls = [];
   statCalls = [];
@@ -106,6 +120,10 @@ function resetMocks() {
   execFileImpl = async (_file, _args, _opts) => ({ stdout: '', stderr: '' });
   swapSlotImpl = async () => {};
   fetchImpl = async () => ({ ok: true, json: async () => ({}) });
+  readdirImpl = async (path: any) => {
+    if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+    return [];
+  };
 }
 
 function installMocks() {
@@ -119,6 +137,10 @@ function installMocks() {
   }) as any;
   _autoUpdateIo.mkdir = (async (...args: any[]) => { mkdirCalls.push(args); }) as any;
   _autoUpdateIo.rm = (async (...args: any[]) => { rmCalls.push(args); }) as any;
+  _autoUpdateIo.readdir = (async (path: any, opts?: any) => {
+    readdirCalls.push([path, opts]);
+    return readdirImpl(path, opts);
+  }) as any;
   _autoUpdateIo.chmod = (async (...args: any[]) => { chmodCalls.push(args); }) as any;
   _autoUpdateIo.copyFile = (async (...args: any[]) => { copyFileCalls.push(args); }) as any;
   _autoUpdateIo.stat = (async (...args: any[]) => { statCalls.push(args); return { mode: 0o755 }; }) as any;
@@ -1480,27 +1502,28 @@ describe('autoupdater hardening', () => {
   it('clears stale dist/ + tsconfig.tsbuildinfo before build (preserves node_modules + Hardhat caches)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
+    // Default readdir mock returns two packages: 'core' and 'cli'. Each must
+    // get its `dist/` and `tsconfig.tsbuildinfo` rm'd — and nothing else.
     await performUpdate(AU, () => {});
-    const findCalls = getExecFileCalls().filter(c => c.file === 'find');
-    const wipesDist = findCalls.some(c =>
-      c.args.includes('packages') &&
-      c.args.includes('-name') && c.args.includes('dist') &&
-      c.args.includes('-exec') && c.args.includes('rm'),
-    );
-    const wipesTsBuildInfo = findCalls.some(c =>
-      c.args.includes('packages') &&
-      c.args.includes('-name') && c.args.includes('tsconfig.tsbuildinfo') &&
-      c.args.includes('-delete'),
-    );
-    expect(wipesDist).toBe(true);
-    expect(wipesTsBuildInfo).toBe(true);
-    // Sanity: no node_modules wipe and no Hardhat cache wipe.
-    const touchesNodeModules = findCalls.some(c => c.args.some(a => a.includes('node_modules')));
-    const touchesHardhatCache = findCalls.some(c =>
-      c.args.some(a => a === 'cache' || a === 'artifacts'),
+    const rmTargets = rmCalls.map(args => String(args[0]));
+    const wipesDistCore = rmTargets.some(p => p.endsWith('/packages/core/dist'));
+    const wipesDistCli = rmTargets.some(p => p.endsWith('/packages/cli/dist'));
+    const wipesTsBuildInfoCore = rmTargets.some(p => p.endsWith('/packages/core/tsconfig.tsbuildinfo'));
+    const wipesTsBuildInfoCli = rmTargets.some(p => p.endsWith('/packages/cli/tsconfig.tsbuildinfo'));
+    expect(wipesDistCore).toBe(true);
+    expect(wipesDistCli).toBe(true);
+    expect(wipesTsBuildInfoCore).toBe(true);
+    expect(wipesTsBuildInfoCli).toBe(true);
+    // Sanity: no node_modules wipe and no Hardhat cache/artifacts wipe.
+    const touchesNodeModules = rmTargets.some(p => p.includes('node_modules'));
+    const touchesHardhatCache = rmTargets.some(p =>
+      p.endsWith('/cache') || p.endsWith('/artifacts'),
     );
     expect(touchesNodeModules).toBe(false);
     expect(touchesHardhatCache).toBe(false);
+    // Sanity: we did NOT shell out to `find` (the legacy implementation).
+    const findCalls = getExecFileCalls().filter(c => c.file === 'find');
+    expect(findCalls.length).toBe(0);
   });
 
   it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {
@@ -1541,6 +1564,13 @@ describe('autoupdater hardening', () => {
   it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
+    // readdir() must succeed and return entries — otherwise cleanGeneratedOutputs
+    // returns early ("nothing to pre-clean") on ENOENT and never reaches rm,
+    // which would silently bypass this regression test.
+    readdirImpl = async (path: any) => {
+      if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+      return [];
+    };
     // Force the Node-based clean to throw on rm of dist (EACCES-ish), and
     // also force the git clean -fdx fallback to fail. Update must abort.
     _autoUpdateIo.rm = (async () => {

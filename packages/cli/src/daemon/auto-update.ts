@@ -847,9 +847,8 @@ async function cleanGeneratedOutputs(
   targetDir: string,
   log: (m: string) => void,
 ): Promise<void> {
-  const { execFile: execFileAsync, rm } = _autoUpdateIo;
+  const { execFile: execFileAsync, readdir, rm } = _autoUpdateIo;
   try {
-    const { readdir } = await import('node:fs/promises');
     const packagesDir = join(targetDir, 'packages');
     let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
     try {

@@ -111,7 +111,24 @@ export class DkgNodePlugin {
   // is false); on a same-api `setup-runtime → full` upgrade the retry
   // branch must install it then. Without this flag a `full → full`
   // re-register would double-install the prompt section.
+  // T12 — Lifecycle of the flag is tied to the api object: the prompt
+  // section is registered against a specific `api` registry, so on an
+  // api swap (apiChanged in `installHooksIfNeeded`) or a `stop() ->
+  // register()` cycle the flag must be reset so the new gateway
+  // instance gets the section installed too.
   private promptSectionInstalled = false;
+  // T13 — Single-flight guard for W3 `before_prompt_build` auto-recall.
+  // Keyed by `sessionKey`. The 250ms `Promise.race` timeout below stops
+  // *waiting* for the SPARQL fan-out, but doesn't cancel it — without
+  // backpressure a slow daemon would accumulate overlapping background
+  // queries every turn and amplify its own load. While a recall is
+  // in flight for a session, subsequent `before_prompt_build` fires
+  // for that session skip the recall (return undefined). The set
+  // entry is cleared when the underlying `searchNarrow()` actually
+  // settles (success OR error), not when the timeout fires.
+  // Plan N4 will additionally thread an AbortSignal through
+  // `client.query()` so the daemon-side queries can be cancelled.
+  private autoRecallInFlight: Set<string> = new Set();
   private chatTurnWriter: ChatTurnWriter | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -453,6 +470,11 @@ export class DkgNodePlugin {
         this.hookSurface.destroy();
         this.hookSurface = null;
         this.hookSurfaceApi = null;
+        // T12 — Prompt section was registered against the old api;
+        // the new api gets a fresh registry, so the install must
+        // re-run. Reset the idempotency flag so the rebuild path
+        // below installs the section against the new api too.
+        this.promptSectionInstalled = false;
       } else {
         // Same api. Retry INTERNAL hook installs that previously failed
         // (e.g. gateway hadn't created the internal-hook map yet at
@@ -992,6 +1014,17 @@ export class DkgNodePlugin {
     // the surface from scratch.
     this.hookSurface = null;
     this.hookSurfaceApi = null;
+    // T12 — Reset the prompt-section idempotency flag so a later
+    // `register()` after this `stop()` re-installs the section
+    // against the new (or same) api registry. Without this, a
+    // gateway restart cycle leaves the new instance without the
+    // DKG Memory prompt guidance.
+    this.promptSectionInstalled = false;
+    // T13 — Drop any in-flight auto-recall reservations. The hook
+    // surface is destroyed; no new prompt-build fires can land,
+    // and clearing the set means a future `register()` doesn't
+    // start with stale entries that would suppress the first turn.
+    this.autoRecallInFlight.clear();
     // `flush()` (vs `flushSync()`) awaits in-flight `storeChatTurn` jobs
     // and any pending session resets before committing the watermark
     // file. Without the await, a shutdown immediately after a reply
@@ -1888,6 +1921,14 @@ export class DkgNodePlugin {
         ? rawQuery.slice(0, AUTO_RECALL_QUERY_MAX_CHARS)
         : rawQuery;
 
+    // T13 — Single-flight guard. If a previous turn's auto-recall is
+    // still running on the daemon (the 250ms race below stopped *waiting*
+    // but the underlying SPARQL queries kept executing), skip this turn's
+    // recall to avoid amplifying load. The next turn that fires after
+    // the in-flight recall settles gets fresh recall.
+    const recallSessionKey = ctx?.sessionKey ?? '__default__';
+    if (this.autoRecallInFlight.has(recallSessionKey)) return undefined;
+
     try {
       const manager = new DkgMemorySearchManager({
         client: this.client,
@@ -1900,8 +1941,22 @@ export class DkgNodePlugin {
       // queries may complete in the background after we've returned —
       // acceptable v1 trade-off; tighter AbortSignal threading is a
       // follow-up (plan N4 would thread through client.query).
+      // T13 — The single-flight set entry is held until the underlying
+      // `searchNarrow` ACTUALLY settles, not until the 250ms race
+      // completes. This is what bounds amplification — without
+      // tracking the underlying promise, two consecutive turns with
+      // sub-250ms gaps could both bypass the guard and pile on the
+      // daemon.
+      const recallPromise = manager.searchNarrow(query, { maxResults: 5 });
+      this.autoRecallInFlight.add(recallSessionKey);
+      // Fire-and-forget cleanup tied to the underlying promise. Survives
+      // success, timeout, AND error.
+      recallPromise
+        .catch(() => undefined)
+        .finally(() => { this.autoRecallInFlight.delete(recallSessionKey); });
+
       const hits = await Promise.race([
-        manager.searchNarrow(query, { maxResults: 5 }),
+        recallPromise.catch(() => null),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
       ]);
       if (!hits || hits.length === 0) return undefined;

@@ -2592,6 +2592,152 @@ describe('DkgNodePlugin', () => {
     expect(sessionEndAfter2).toBe(2); // one per register, not unbounded
   });
 
+  it('T12 — stop() resets promptSectionInstalled so a later register() reinstalls the section', async () => {
+    // Regression for T12: pre-fix, `promptSectionInstalled` was a global
+    // boolean on the plugin instance. After `stop() -> register()` (or
+    // any api swap), the flag stayed `true` and the new gateway api
+    // never received the DKG Memory prompt guidance.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(mockApi);
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+
+    await plugin.stop();
+    plugin.register(mockApi);
+    // Post-stop, the second register MUST install the section again
+    // because the api registry was effectively reset by the stop+restart
+    // cycle (and in production a different api object would be passed).
+    expect(promptSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('T12 — apiChanged path resets promptSectionInstalled so the new api gets the section', () => {
+    // Regression for T12: api swap (different api object on second
+    // register) destroys the surface and rebuilds it, but pre-fix left
+    // `promptSectionInstalled = true`, so the prompt section was
+    // registered against the OLD api registry and never against the new.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const promptSpy1 = vi.fn();
+    const api1: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy1,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(api1);
+    expect(promptSpy1).toHaveBeenCalledTimes(1);
+
+    // Second register with a DIFFERENT api object (gateway swapped registry).
+    const promptSpy2 = vi.fn();
+    const api2: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy2,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(api2);
+    // The new api MUST get the section installed against its own registry.
+    expect(promptSpy2).toHaveBeenCalledTimes(1);
+  });
+
+  it('T13 — auto-recall single-flight: a second turn fired while the first is in flight skips recall', async () => {
+    // Regression for T13: pre-fix, the 250ms `Promise.race` timeout in
+    // `handleBeforePromptBuild` only stopped *waiting*; the underlying
+    // SPARQL fan-out kept running. Successive turns fired during a slow
+    // daemon would all start their own searches, amplifying load.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    // Stub the daemon so searchNarrow's underlying queries hang until
+    // we explicitly release them. Track ALL pending resolvers so a
+    // single release call clears every in-flight query (the searchNarrow
+    // fan-out issues multiple queries per call).
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    const releaseQueries = () => { while (pendingResolvers.length) pendingResolvers.shift()!(); };
+    // Give the manager a peer ID so the recall preflight doesn't early-return.
+    (plugin as any).nodePeerId = '12D3KooWTestSingleFlight';
+
+    const event = { messages: [{ role: 'user', content: 'find something interesting' }] };
+    const ctx = { sessionKey: 'test-session-1' };
+
+    // Turn 1: hangs in searchNarrow, returns undefined after 250ms timeout.
+    const turn1 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    // Wait for the timeout race to settle (~300ms).
+    await new Promise((r) => setTimeout(r, 300));
+    const result1 = await turn1;
+    expect(result1).toBeUndefined();
+    const queriesAfterTurn1 = queryCalls;
+    expect(queriesAfterTurn1).toBeGreaterThan(0); // some queries fired
+
+    // Turn 2: fires while turn 1's underlying queries still hang. The
+    // single-flight guard MUST short-circuit before manager.searchNarrow
+    // runs again, so queryCalls does NOT increase.
+    const result2 = await (plugin as any).handleBeforePromptBuild(event, ctx);
+    expect(result2).toBeUndefined();
+    expect(queryCalls).toBe(queriesAfterTurn1); // no new queries
+
+    // Release turn 1's hanging queries so the in-flight set clears.
+    releaseQueries();
+    // Wait for the underlying promise's finally hook to clear the
+    // single-flight reservation. Two macrotask hops are enough — first
+    // resolves the inner queries, second runs the .finally cleanup.
+    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Turn 3: fires AFTER turn 1 settled. Single-flight has cleared; new
+    // queries fire as normal.
+    const result3 = await (plugin as any).handleBeforePromptBuild(event, ctx);
+    expect(queryCalls).toBeGreaterThan(queriesAfterTurn1);
+
+    await plugin.stop();
+  });
+
   it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {
     // Regression for R23.2: pre-fix, stop() called hookSurface.destroy()
     // but left this.hookSurface and this.hookSurfaceApi populated.

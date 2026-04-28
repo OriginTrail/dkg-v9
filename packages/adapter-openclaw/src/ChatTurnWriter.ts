@@ -263,11 +263,20 @@ export class ChatTurnWriter {
     if (wrote) {
       // Only NOW commit the swap. Subsequent normal writes via
       // `writeWatermarkFile()` (no explicit target) will hit the new
-      // path. Best-effort delete the old file as the last step.
-      const oldWatermarkFilePath = this.watermarkFilePath;
+      // path.
+      //
+      // T35 — DO NOT unlink the old file. The old path is typically
+      // the home-dir fallback (`~/.openclaw/dkg-adapter/...`), which
+      // is potentially shared with OTHER writer processes that haven't
+      // migrated yet (any process whose `runtime.state.resolveStateDir()`
+      // / `OPENCLAW_STATE_DIR` / `api.workspaceDir` are all unavailable
+      // falls back there). Deleting the shared file would silently wipe
+      // those other processes' watermark state on their next disk read,
+      // causing W4a backfill replays. Operators can clean up orphaned
+      // fallback files manually after confirming no live process still
+      // depends on them.
       this.stateDir = newStateDir;
       this.watermarkFilePath = newWatermarkFilePath;
-      try { fs.unlinkSync(oldWatermarkFilePath); } catch { /* best effort */ }
     } else {
       // T23/T27 — Internal state stays at the OLD path so a future
       // setStateDir(newStateDir) retry re-attempts the write. The
@@ -1095,6 +1104,22 @@ export class ChatTurnWriter {
           // be skipped as already-saved on the next agent_end. Skip the
           // orphan, leave the watermark untouched, mirror W4b's
           // R21.2 drop-orphan-assistant invariant on the W4a side.
+          continue;
+        }
+        if (!text) {
+          // T37 — Symmetric to T28's empty-user skip and W4b's
+          // R20.1 empty-assistant guard. Attachment-only / non-text
+          // assistant outputs (image generation, structured tool-
+          // emitted artifacts that surface as non-text content
+          // parts) produce `extractText() === ""`. Persisting
+          // `(user, "")` pollutes chat memory/search and breaks the
+          // "one user-visible turn = one pair" invariant. Mirror
+          // W4b's `onMessageSent` empty-assistant bail (R20.1):
+          // skip the pair, leave `pendingUsers` intact (the next
+          // textual assistant reply pairs with them), do NOT
+          // advance `pairIndex`. The R22.1 watermark-doesn't-drift
+          // logic above handles the consequence — pairIndex stays
+          // put so a later real reply gets the same index.
           continue;
         }
         const userText = pendingUsers.join("\n");

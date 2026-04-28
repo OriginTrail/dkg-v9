@@ -893,6 +893,22 @@ export class DkgNodePlugin {
       const installedAt = this.hookSurfaceInstalledAt.get(surface) ?? now;
       if (now - installedAt < DkgNodePlugin.HOOK_SURFACE_STALE_THRESHOLD_MS) continue;
       const stats = surface.getDispatchStats();
+      // T36 — Exempt the surface that currently owns the live process-
+      // global internal-hook registration. New surfaces skip installing
+      // internal hooks via `internalHooksAreLive()` (T32), so destroying
+      // the only owner — even if its typed/legacy hooks have never
+      // fired — would unsubscribe the global wrappers and silently
+      // disable W4b cross-channel persistence permanently. The
+      // owning surface is never the latest one when it gets here
+      // (the latest is exempted above), so the only way to release
+      // the global registration is via `stop()`, which destroys all
+      // surfaces deliberately.
+      if (
+        stats['internal:message:received']?.installedVia === 'globalThis' ||
+        stats['internal:message:sent']?.installedVia === 'globalThis'
+      ) {
+        continue;
+      }
       let totalFires = 0;
       for (const stat of Object.values(stats)) {
         totalFires += stat.fireCount ?? 0;

@@ -15,6 +15,7 @@ import {
   hasConfiguredLocalAgentChat,
   hasOpenClawChatTurnContent,
   isLoopbackClientIp,
+  isSafeBridgeTokenWakeUrl,
   isOpenClawMemorySlotElected,
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
@@ -47,6 +48,7 @@ import {
   resolveChatTurnsAssertionAgentAddress,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
+  inferSafeLocalAgentWakeAuthFromUrl,
 } from '../src/daemon.js';
 import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
@@ -427,6 +429,35 @@ describe('local agent semantic wake helper', () => {
             transport: {
               kind: 'openclaw-channel',
               wakeUrl: 'https://example.com/semantic-enrichment/wake',
+              wakeAuth: 'bridge-token',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not send bridge-token wake requests to unexpected loopback paths', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/custom/wake',
               wakeAuth: 'bridge-token',
             },
           },
@@ -3130,6 +3161,44 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.healthUrl).toBe('http://127.0.0.1:9301/health');
     expect(integration.transport.wakeUrl).toBe('http://127.0.0.1:9301/semantic-enrichment/wake');
     expect(integration.transport.wakeAuth).toBe('bridge-token');
+  });
+
+  it('restricts wake transport metadata to known endpoint and auth-mode combinations', () => {
+    const config = makeConfig();
+
+    expect(isSafeBridgeTokenWakeUrl('http://127.0.0.1:9301/custom/wake')).toBe(false);
+    expect(inferSafeLocalAgentWakeAuthFromUrl('http://127.0.0.1:9301/semantic-enrichment/wake')).toBe('bridge-token');
+    expect(inferSafeLocalAgentWakeAuthFromUrl('http://127.0.0.1:9301/api/dkg-channel/semantic-enrichment/wake')).toBe('gateway');
+
+    const customPath = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        wakeUrl: 'http://127.0.0.1:9301/custom/wake',
+        wakeAuth: 'bridge-token',
+      },
+    });
+    expect(customPath.transport.wakeUrl).toBeUndefined();
+    expect(customPath.transport.wakeAuth).toBeUndefined();
+
+    const mismatchedAuth = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        wakeUrl: 'http://127.0.0.1:9301/api/dkg-channel/semantic-enrichment/wake',
+        wakeAuth: 'bridge-token',
+      },
+    });
+    expect(mismatchedAuth.transport.wakeUrl).toBeUndefined();
+    expect(mismatchedAuth.transport.wakeAuth).toBeUndefined();
+
+    const gatewayAuth = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        wakeUrl: 'http://127.0.0.1:9301/api/dkg-channel/semantic-enrichment/wake',
+        wakeAuth: 'gateway',
+      },
+    });
+    expect(gatewayAuth.transport.wakeUrl).toBe('http://127.0.0.1:9301/api/dkg-channel/semantic-enrichment/wake');
+    expect(gatewayAuth.transport.wakeAuth).toBe('gateway');
   });
 
   it('drops custom non-loopback wake metadata from integration updates', () => {

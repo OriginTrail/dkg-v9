@@ -46,7 +46,7 @@ import {
 import {
   getLocalAgentIntegration,
   getStoredLocalAgentIntegrations,
-  isSafeBridgeTokenWakeUrl,
+  inferSafeLocalAgentWakeAuthFromUrl,
   isPlainRecord,
   normalizeIntegrationId,
 } from './local-agents.js';
@@ -100,9 +100,11 @@ export async function notifyLocalAgentIntegrationWake(
     : fallbackTransport;
   const wakeUrl = wakeTransport?.wakeUrl?.trim();
   if (!wakeUrl) return { status: 'skipped', reason: 'wake_unavailable' };
-  if (!isSafeBridgeTokenWakeUrl(wakeUrl)) return { status: 'skipped', reason: 'wake_unavailable' };
+  const inferredWakeAuth = inferSafeLocalAgentWakeAuthFromUrl(wakeUrl);
+  if (!inferredWakeAuth) return { status: 'skipped', reason: 'wake_unavailable' };
 
-  const wakeAuth = wakeTransport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
+  const wakeAuth = wakeTransport?.wakeAuth ?? inferredWakeAuth;
+  if (wakeAuth !== inferredWakeAuth) return { status: 'skipped', reason: 'wake_unavailable' };
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (wakeAuth === 'gateway') {
     // The daemon does not currently own OpenClaw gateway credentials. Treat
@@ -131,22 +133,6 @@ export async function notifyLocalAgentIntegrationWake(
     return { status: 'delivered' };
   } catch (err: any) {
     return { status: 'failed', reason: err?.message ?? String(err) };
-  }
-}
-
-function inferWakeAuthFromUrl(wakeUrl: string): 'bridge-token' | 'gateway' | 'none' {
-  const trimmed = wakeUrl.trim();
-  if (!trimmed) return 'none';
-  const matchPath = (pathname: string): 'bridge-token' | 'gateway' | 'none' => {
-    const normalized = pathname.replace(/\/+$/, '');
-    if (normalized.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
-    if (normalized.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
-    return 'none';
-  };
-  try {
-    return matchPath(new URL(trimmed).pathname);
-  } catch {
-    return matchPath(trimmed);
   }
 }
 
@@ -211,11 +197,13 @@ export function requestLocalAgentWakeTransport(
     return undefined;
   }
   const wakeUrl = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-url'])?.trim();
-  if (!wakeUrl || !isSafeBridgeTokenWakeUrl(wakeUrl)) return undefined;
+  const inferredWakeAuth = wakeUrl ? inferSafeLocalAgentWakeAuthFromUrl(wakeUrl) : undefined;
+  if (!wakeUrl || !inferredWakeAuth) return undefined;
   const wakeAuthHeader = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-auth'])?.trim();
-  const wakeAuth = wakeAuthHeader === 'bridge-token' || wakeAuthHeader === 'none'
+  const wakeAuth = wakeAuthHeader === 'bridge-token' || wakeAuthHeader === 'gateway' || wakeAuthHeader === 'none'
     ? wakeAuthHeader
-    : inferWakeAuthFromUrl(wakeUrl);
+    : inferredWakeAuth;
+  if (wakeAuth !== inferredWakeAuth) return undefined;
   return { wakeUrl, wakeAuth };
 }
 

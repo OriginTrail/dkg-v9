@@ -130,10 +130,16 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
   const wakeUrl = typeof input.wakeUrl === 'string' && input.wakeUrl.trim()
     ? trimTrailingSlashes(input.wakeUrl.trim())
     : undefined;
-  const safeWakeUrl = wakeUrl && isSafeBridgeTokenWakeUrl(wakeUrl) ? wakeUrl : undefined;
-  if (input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none') {
-    if (!wakeUrl || safeWakeUrl) {
-      transport.wakeAuth = input.wakeAuth;
+  const inferredWakeAuth = wakeUrl ? inferSafeLocalAgentWakeAuthFromUrl(wakeUrl) : undefined;
+  const requestedWakeAuth = input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none'
+    ? input.wakeAuth
+    : undefined;
+  const safeWakeUrl = wakeUrl && inferredWakeAuth && (!requestedWakeAuth || requestedWakeAuth === inferredWakeAuth)
+    ? wakeUrl
+    : undefined;
+  if (requestedWakeAuth) {
+    if (!wakeUrl || (safeWakeUrl && requestedWakeAuth === inferredWakeAuth)) {
+      transport.wakeAuth = requestedWakeAuth;
     }
   }
   if (safeWakeUrl) {
@@ -143,16 +149,26 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
 }
 
 export function isSafeBridgeTokenWakeUrl(value: string): boolean {
+  return inferSafeLocalAgentWakeAuthFromUrl(value) !== undefined;
+}
+
+export function inferSafeLocalAgentWakeAuthFromUrl(value: string): 'bridge-token' | 'gateway' | undefined {
   try {
     const parsed = new URL(value);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return undefined;
     const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    return hostname === 'localhost'
+    const isLoopback = hostname === 'localhost'
       || hostname === '::1'
       || hostname === '0:0:0:0:0:0:0:1'
       || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+    if (!isLoopback) return undefined;
+    const normalizedPath = trimTrailingSlashes(parsed.pathname);
+    if (normalizedPath === '/semantic-enrichment/wake') return 'bridge-token';
+    if (normalizedPath === '/api/dkg-channel/semantic-enrichment/wake') return 'gateway';
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 

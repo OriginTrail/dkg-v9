@@ -940,6 +940,7 @@ export class DkgDaemonClient {
   }
 
   private localAgentHeaders(): Record<string, string> {
+    if (!isLoopbackDaemonUrl(this.baseUrl)) return {};
     const integrationId = this.localAgentRequestContext?.integrationId?.trim();
     if (!integrationId) return {};
     const semanticEnrichmentSupported = this.localAgentRequestContext?.semanticEnrichmentSupported;
@@ -963,4 +964,17 @@ function stripTrailingSlashes(value: string): string {
     end -= 1;
   }
   return value.slice(0, end);
+}
+
+function isLoopbackDaemonUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  } catch {
+    return false;
+  }
 }

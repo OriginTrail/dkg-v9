@@ -490,6 +490,35 @@ describe('DkgDaemonClient', () => {
     });
   });
 
+  it('does not send local-agent request hints to non-loopback daemon URLs', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+
+    const remoteClient = new DkgDaemonClient({
+      baseUrl: 'https://daemon.example.internal',
+      apiToken: 'node-token',
+    });
+    remoteClient.setLocalAgentRequestContext({
+      integrationId: 'openclaw',
+      semanticEnrichmentSupported: true,
+      wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      wakeAuth: 'bridge-token',
+    });
+
+    await remoteClient.storeChatTurn('session-remote', 'Hello', 'Hi there', { turnId: 'turn-remote' });
+
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers).toMatchObject({
+      Authorization: 'Bearer node-token',
+    });
+    expect(headers).not.toHaveProperty('X-DKG-Bridge-Token');
+    expect(headers).not.toHaveProperty('X-DKG-Local-Agent-Integration');
+    expect(headers).not.toHaveProperty('X-DKG-Local-Agent-Semantic-Enrichment');
+    expect(headers).not.toHaveProperty('X-DKG-Local-Agent-Wake-Url');
+    expect(headers).not.toHaveProperty('X-DKG-Local-Agent-Wake-Auth');
+  });
+
   // ---------------------------------------------------------------------------
   // Memory stats
   // ---------------------------------------------------------------------------

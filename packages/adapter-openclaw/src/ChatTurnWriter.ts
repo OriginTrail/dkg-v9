@@ -704,11 +704,16 @@ export class ChatTurnWriter {
    */
   private stripRecalledMemory(text: string): string {
     if (!text) return "";
-    // Sentinel attribute requirement: `data-source="dkg-auto-recall"`. The
-    // attribute may appear anywhere inside the tag's attribute list, so the
-    // pattern is anchored on the tag name + a flexible attr scan that
-    // requires the sentinel before the closing `>`.
-    const sentinelOpen = /<recalled-memory\b(?=[^>]*\bdata-source\s*=\s*"dkg-auto-recall")[^>]*>/i;
+    // Sentinel attribute requirement: `data-source="dkg-auto-recall"` or
+    // `data-source='dkg-auto-recall'`. The attribute may appear anywhere
+    // inside the tag's attribute list, so the pattern is anchored on the
+    // tag name + a flexible attr scan that requires the sentinel before
+    // the closing `>`.
+    // R23.3 — Match BOTH single- and double-quoted forms. A model echoing
+    // the injected block with `data-source='dkg-auto-recall'` (single
+    // quotes) would otherwise survive the strip and boomerang back into
+    // future recall queries.
+    const sentinelOpen = /<recalled-memory\b(?=[^>]*\bdata-source\s*=\s*(?:"dkg-auto-recall"|'dkg-auto-recall'))[^>]*>/i;
     // (a) well-formed sentinel pairs
     let out = text.replace(
       new RegExp(sentinelOpen.source + /[\s\S]*?<\/recalled-memory>/.source, "gi"),

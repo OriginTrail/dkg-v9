@@ -899,6 +899,16 @@ export class DkgNodePlugin {
     // invocations dispatch; the loop in `flush()` then waits out the
     // handlers that were already in flight when `destroy()` ran.
     try { this.hookSurface?.destroy(); } catch { /* best effort */ }
+    // R23.2 — Null out the hook-surface refs after destroy. Without this,
+    // a later `register()` on the same plugin instance with the same `api`
+    // object hits the existing-surface fast path in `installHooksIfNeeded()`
+    // and skips the rebuild. The old surface is permanently inert
+    // (`destroyed=true`, internal handlers removed from the globalThis
+    // map), so W3 / W4a / W4b would silently never re-install. Clearing
+    // both refs forces the next `installHooksIfNeeded()` call to rebuild
+    // the surface from scratch.
+    this.hookSurface = null;
+    this.hookSurfaceApi = null;
     // `flush()` (vs `flushSync()`) awaits in-flight `storeChatTurn` jobs
     // and any pending session resets before committing the watermark
     // file. Without the await, a shutdown immediately after a reply

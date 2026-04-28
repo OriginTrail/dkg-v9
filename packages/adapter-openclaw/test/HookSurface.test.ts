@@ -173,6 +173,33 @@ describe("HookSurface", () => {
       expect(userHandler).toHaveBeenCalledTimes(1);
     });
 
+    it("R23.1 — internal handler short-circuits after destroy() even if dispatcher snapshotted the array pre-destroy", () => {
+      // Regression for R23.1: the OpenClaw runtime can snapshot
+      // `globalThis[hookSym].get(event)` into a local array BEFORE
+      // invoking each handler. If `destroy()` runs after the snapshot
+      // but before dispatch reaches the wrapper, the wrapper still
+      // gets called even though we already pulled it from the live
+      // array. The destroyed-flag short-circuit prevents the late
+      // dispatch from re-entering ChatTurnWriter.
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const userHandler = vi.fn();
+      hs.install("internal", "message:sent", userHandler);
+      // Capture the wrapped handler from the globalThis hook map.
+      const wrappers = hookMapSym.get("message:sent")!;
+      expect(wrappers).toHaveLength(1);
+      const wrapped = wrappers[0] as (...args: any[]) => unknown;
+      // Pre-destroy: invocation reaches user handler.
+      wrapped({});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      // Destroy.
+      hs.destroy();
+      // Post-destroy: invoking the captured wrapped (simulating a late
+      // dispatch from a pre-destroy snapshot) must short-circuit.
+      wrapped({});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+    });
+
     it("R21.1 — legacy handler short-circuits after destroy() (registerHook has no unsubscribe)", async () => {
       const api = mkApi();
       const hs = new HookSurface(api, mkLogger());

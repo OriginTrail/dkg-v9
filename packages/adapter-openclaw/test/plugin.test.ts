@@ -2427,6 +2427,47 @@ describe('DkgNodePlugin', () => {
     expect((plugin as any).chatTurnWriter).toBeNull();
   });
 
+  it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {
+    // Regression for R23.2: pre-fix, stop() called hookSurface.destroy()
+    // but left this.hookSurface and this.hookSurfaceApi populated.
+    // A later register() on the same plugin instance with the same api
+    // hit the existing-surface fast path in installHooksIfNeeded() and
+    // skipped reinstalling hooks. The old surface is permanently inert
+    // (destroyed=true), so W3 / W4a / W4b would silently never re-install.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const onSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    // Initial register installed hooks.
+    expect((plugin as any).hookSurface).not.toBeNull();
+    const onCallCountAfterInitial = onSpy.mock.calls.length;
+    expect(onCallCountAfterInitial).toBeGreaterThan(0);
+
+    // Shutdown.
+    await plugin.stop();
+    // The hookSurface refs MUST be cleared by stop().
+    expect((plugin as any).hookSurface).toBeNull();
+    expect((plugin as any).hookSurfaceApi).toBeNull();
+
+    // Re-register on the same plugin instance.
+    plugin.register(mockApi);
+    // Hooks must have been reinstalled — api.on count goes up.
+    expect(onSpy.mock.calls.length).toBeGreaterThan(onCallCountAfterInitial);
+    expect((plugin as any).hookSurface).not.toBeNull();
+  });
+
   it('R17.2 — setup-only → full re-entry constructs ChatTurnWriter and installs hooks', () => {
     // Regression for the qa-engineer-flagged R17.2 follow-up: the
     // first `setup-only` call correctly skips ChatTurnWriter construction

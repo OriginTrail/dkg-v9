@@ -345,6 +345,17 @@ export class HookSurface {
     if (!hookMap.has(event)) hookMap.set(event, []);
 
     const wrapped: HookHandler = (...args: any[]) => {
+      // R23.1 — Soft-destroyed gate, also for internal hooks. Even though
+      // the unsubscribe lambda below removes the wrapper from the
+      // globalThis array, the OpenClaw dispatcher can SNAPSHOT
+      // `hookMap.get(event)` into a local array BEFORE invoking each
+      // handler. If `destroy()` runs after the snapshot but before
+      // dispatch reaches this handler, the wrapper still gets called
+      // even though we already pulled it from the live array. Mirror
+      // the typed/legacy short-circuit so a late `message:received` /
+      // `message:sent` doesn't enqueue work into a torn-down
+      // `chatTurnWriter` after `flush()` has decided it's done.
+      if (this.destroyed) return;
       this.recordFire(key);
       return handler(...args);
     };

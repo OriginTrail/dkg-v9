@@ -135,6 +135,32 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toContain("suffix");
   });
 
+  it("R23.3 — stripRecalledMemory matches sentinel with single-quoted attribute value", async () => {
+    // Regression for R23.3: pre-fix, the sentinel regex required
+    // double-quoted `data-source="dkg-auto-recall"`. A model echoing
+    // the injected block as `data-source='dkg-auto-recall'` (single
+    // quotes) survived the strip and boomeranged into chat memory.
+    const event = {
+      sessionId: "test",
+      messages: [
+        { role: "user" as const, content: "Recall something" },
+        {
+          role: "assistant" as const,
+          content:
+            "prefix <recalled-memory data-source='dkg-auto-recall'>\n[1] (agent-context-wm) secret\n</recalled-memory> suffix",
+        },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    // Single-quoted sentinel must be stripped just like the double-quoted
+    // form — no `recalled-memory` substring should survive in the persist.
+    expect(call[2]).not.toContain("recalled-memory");
+    expect(call[2]).not.toContain("secret");
+    expect(call[2]).toContain("prefix");
+  });
+
   it("R15.3 — preserves user-emitted plain <recalled-memory> literals (no sentinel) in assistant text", async () => {
     // Regression for R15.3: stripping must only target the auto-injected
     // block carrying `data-source=\"dkg-auto-recall\"`. Plain literals an

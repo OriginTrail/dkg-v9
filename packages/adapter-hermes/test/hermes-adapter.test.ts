@@ -573,6 +573,26 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
+  it('does not create adapter setup state when disconnecting an unconfigured profile', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const plan = disconnectHermesProfile({ hermesHome });
+    await runDisconnect({ hermesHome });
+
+    expect(plan.actions).toEqual([
+      expect.objectContaining({
+        type: 'skip',
+        reason: 'Hermes adapter is not configured for this profile',
+      }),
+    ]);
+    expect(existsSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'))).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('removes the managed provider block when switching to tools-only mode', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
 
@@ -629,6 +649,37 @@ describe('Hermes profile setup helpers', () => {
     expect(state.daemonUrl).toBe('https://dkg.example.com');
     expect(state.bridge).toEqual(config.bridge);
     expect(state.profile.memoryMode).toBe('tools-only');
+  });
+
+  it('reconnect can override stale persisted daemon and bridge settings', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({
+      hermesHome,
+      memoryMode: 'tools-only',
+      daemonUrl: 'https://stale-dkg.example.com',
+      gatewayUrl: 'https://stale-hermes.example.com',
+      bridgeHealthUrl: 'https://stale-hermes.example.com/health',
+    });
+    disconnectHermesProfile({ hermesHome });
+
+    await runReconnect({
+      hermesHome,
+      daemonUrl: 'https://fresh-dkg.example.com/',
+      gatewayUrl: 'https://fresh-hermes.example.com/',
+      bridgeHealthUrl: 'https://fresh-hermes.example.com/health/',
+      start: false,
+      verify: false,
+    });
+
+    const config = JSON.parse(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8'));
+    const state = JSON.parse(readFileSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'), 'utf-8'));
+    expect(config.daemon_url).toBe('https://fresh-dkg.example.com');
+    expect(config.bridge).toEqual({
+      gatewayUrl: 'https://fresh-hermes.example.com',
+      healthUrl: 'https://fresh-hermes.example.com/health',
+    });
+    expect(state.daemonUrl).toBe('https://fresh-dkg.example.com');
+    expect(state.bridge).toEqual(config.bridge);
   });
 
   it('rejects unsupported non-interactive ask memory mode', async () => {

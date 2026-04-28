@@ -342,7 +342,13 @@ async function persistHermesTurnUnlocked(
 ): Promise<HermesPersistRouteResult> {
   const { agent, memoryManager } = ctx;
   try {
-    if (await hasPersistedHermesTurn(memoryManager, payload.sessionId, payload.turnId)) {
+    let duplicate = false;
+    try {
+      duplicate = await hasPersistedHermesTurn(memoryManager, payload.sessionId, payload.turnId);
+    } catch {
+      duplicate = false;
+    }
+    if (duplicate) {
       return {
         statusCode: 200,
         body: {

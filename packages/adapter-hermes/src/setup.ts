@@ -236,6 +236,17 @@ export function disconnectHermesProfile(options: HermesSetupOptions = {}): Herme
   const profile = resolveHermesProfile(options);
   const existingState = readSetupState(profile);
   const plan = planHermesSetup({ ...options, dryRun: options.dryRun });
+  if (!existingState) {
+    plan.actions = [
+      {
+        type: 'skip',
+        path: join(profile.stateDir, 'setup-state.json'),
+        reason: 'Hermes adapter is not configured for this profile',
+      },
+    ];
+    plan.warnings.push(`Hermes adapter setup state was not found at ${join(profile.stateDir, 'setup-state.json')}`);
+    return plan;
+  }
   plan.actions = [
     { type: 'update', path: profile.configPath, reason: 'remove adapter-managed provider election block' },
     { type: 'update', path: join(profile.stateDir, 'setup-state.json'), reason: 'mark adapter disconnected' },
@@ -245,7 +256,7 @@ export function disconnectHermesProfile(options: HermesSetupOptions = {}): Herme
   removeManagedProviderBlock(profile.configPath);
   const now = new Date().toISOString();
   const nextState: HermesSetupState = {
-    ...(existingState ?? plan.state),
+    ...existingState,
     status: 'disconnected',
     updatedAt: now,
   };
@@ -326,7 +337,7 @@ export async function runDisconnect(options: HermesCliOptions = {}): Promise<voi
   const setupOptions = toSetupOptions(options);
   const plan = disconnectHermesProfile(setupOptions);
   printPlan('Hermes disconnect', plan);
-  if (!plan.dryRun) {
+  if (!plan.dryRun && plan.actions.some((action) => action.type !== 'skip')) {
     await disconnectDaemonBestEffort(setupOptions.daemonUrl);
   }
 }

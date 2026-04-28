@@ -849,7 +849,7 @@ describe('Hermes daemon routes', () => {
     expect(importMemories).toHaveBeenCalledWith('hi', 'hermes-session:hermes:default:turn:turn-1');
   });
 
-  it('fails without storing when duplicate detection cannot query the turn id', async () => {
+  it('persists when duplicate detection cannot query the turn id', async () => {
     const memoryManager = {
       hasChatTurn: vi.fn(async () => {
         throw new Error('query offline');
@@ -865,9 +865,15 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(500);
-    expect(JSON.parse(res.body)).toEqual({ error: 'query offline' });
-    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledWith(
+      'hermes:default',
+      'hello',
+      'hi',
+      undefined,
+      expect.objectContaining({ turnId: 'turn-1' }),
+    );
   });
 
   it('probes Hermes bridge health with the bridge token header', async () => {

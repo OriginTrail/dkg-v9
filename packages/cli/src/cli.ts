@@ -1798,20 +1798,31 @@ for (const [commandName, candidates, description] of [
   ['reconnect', ['runReconnect', 'reconnect'], 'Reconnect this node to a Hermes profile'],
   ['uninstall', ['runUninstall', 'uninstall'], 'Uninstall the Hermes adapter wiring'],
 ] as const) {
-  hermesCmd
+  const command = hermesCmd
     .command(commandName)
     .description(description)
     .option('--profile <name>', 'Hermes profile name')
-    .option('--dry-run', 'Preview changes without writing anything')
-    .action(async (opts) => {
-      const action = await loadHermesAdapterAction(commandName, candidates);
-      try {
-        await action(opts);
-      } catch (err: any) {
-        console.error(`\n[hermes ${commandName}] ERROR: ${err?.message ?? err}\n`);
-        process.exit(1);
-      }
-    });
+    .option('--dry-run', 'Preview changes without writing anything');
+  if (commandName === 'reconnect') {
+    command
+      .option('--daemon-url <url>', 'DKG daemon URL')
+      .option('--bridge-url <url>', 'Hermes loopback bridge URL for local same-host chat')
+      .option('--gateway-url <url>', 'Hermes gateway URL for WSL2 or remote chat')
+      .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
+      .option('--port <port>', 'Override daemon API port (default: 9200)')
+      .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
+      .option('--no-verify', 'Skip post-reconnect verification')
+      .option('--no-start', 'Skip daemon start (configure only)');
+  }
+  command.action(async (opts) => {
+    const action = await loadHermesAdapterAction(commandName, candidates);
+    try {
+      await action(opts);
+    } catch (err: any) {
+      console.error(`\n[hermes ${commandName}] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
 }
 
 const cclCmd = program

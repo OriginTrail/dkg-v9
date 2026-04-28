@@ -478,6 +478,28 @@ export class PrivateContentStore {
    * Run `fn` while holding an exclusive lock on `graphUri`. The lock
    * is released when `fn` resolves OR rejects; queued waiters then
    * fire in order.
+   *
+   * PR #229 bot review (r31-14 — private-store.ts:491). The lock chain
+   * MUST decouple from the predecessor's success/failure: pre-r31-14
+   * the chain was `prev.then(() => next)` and `await prev` was
+   * outside the try/finally. If any prior writer rejected, `prev`
+   * was a rejected promise — every subsequent waiter inherited the
+   * rejection on `await prev` BEFORE entering the try{} that calls
+   * `release()`. That left `next` pending forever, the in-flight
+   * `chained` rejected, and the `perGraphWriteLocks` entry was never
+   * cleaned up because the cleanup also sat in the `finally`. Net
+   * effect: a single failed `storePrivateTriples()` permanently
+   * BRICKED that graph until process restart — every later writer
+   * for the same graph either threw on the rejected predecessor
+   * before doing anything OR enqueued behind a permanently-pending
+   * `next`.
+   *
+   * Fix: build the chain off `prev.catch(() => {})` so the queue is
+   * resilient to a predecessor's rejection. The lock is purely a
+   * mutex over `fn()`; the success/failure of the previous writer's
+   * own `fn()` is its caller's concern, not the queue's. Also
+   * `await safePrev` (the catch-wrapped variant) so the wait can
+   * never throw before we register the cleanup-on-finally.
    */
   private async withGraphWriteLock<T>(
     graphUri: string,
@@ -486,9 +508,13 @@ export class PrivateContentStore {
     const prev = this.perGraphWriteLocks.get(graphUri) ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((resolve) => { release = resolve; });
-    const chained = prev.then(() => next);
+    // Swallow predecessor rejections so the queue keeps draining.
+    // The previous writer's caller already saw (or chose to ignore)
+    // the rejection; the lock has no business re-throwing here.
+    const safePrev = prev.catch(() => undefined);
+    const chained = safePrev.then(() => next);
     this.perGraphWriteLocks.set(graphUri, chained);
-    await prev;
+    await safePrev;
     try {
       return await fn();
     } finally {

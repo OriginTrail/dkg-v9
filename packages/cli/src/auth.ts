@@ -43,11 +43,19 @@ function generateToken(): string {
 export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
   const tokens = new Set<string>();
   const fileTokens = new Set<string>();
+  // PR #229 bot review (r31-14 — auth.ts:203). Track config-pinned
+  // tokens separately from file-derived ones so reconciliation /
+  // rotation can preserve them when a token happens to live in BOTH
+  // sources (a real-world rollout shape — operators sync the same
+  // admin token across config and `auth.token`).
+  const configTokens = new Set<string>();
 
-  // Add any config-defined tokens
   if (authConfig?.tokens) {
     for (const t of authConfig.tokens) {
-      if (t.length > 0) tokens.add(t);
+      if (t.length > 0) {
+        tokens.add(t);
+        configTokens.add(t);
+      }
     }
   }
 
@@ -92,6 +100,7 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
       size: st.size,
       contentHash,
       fileTokens,
+      configTokens,
     });
   } catch {
     /* file vanished mid-load — next verifyToken call will reconcile */
@@ -138,9 +147,26 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
  * with what's now on disk, removes the stale file tokens, and adds
  * the new ones — without touching tokens that never came from disk.
  */
+// PR #229 bot review (r31-14 — auth.ts:203). The snapshot now also
+// remembers `configTokens` — the tokens supplied via
+// `loadTokens({ tokens: [...] })` (config-pinned). Without this,
+// reconcileFileTokens could not tell whether a "file token" was ALSO
+// pinned by config, and a normal rotate path would `validTokens.delete(t)`
+// on a value that the config still wanted, silently revoking a
+// configured admin token until restart whenever the same secret
+// happened to be both file-backed AND config-backed (a documented and
+// supported overlap — operators frequently pre-seed `auth.token` with
+// the same value they write into config so both `dkg auth` flows stay
+// consistent during a config rollout).
 const lastFileSnapshot = new WeakMap<
   Set<string>,
-  { mtimeMs: number; size: number; contentHash: string; fileTokens: Set<string> }
+  {
+    mtimeMs: number;
+    size: number;
+    contentHash: string;
+    fileTokens: Set<string>;
+    configTokens: Set<string>;
+  }
 >();
 
 function reconcileFileTokens(validTokens: Set<string>): void {
@@ -164,7 +190,18 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     if (err && err.code === 'ENOENT') {
       const snapshot = lastFileSnapshot.get(validTokens);
       if (snapshot) {
-        for (const oldTok of snapshot.fileTokens) validTokens.delete(oldTok);
+        // PR #229 bot review (r31-14 — auth.ts:203). When the token
+        // file vanishes, every token that was BACKED ONLY by the
+        // file is now stale; tokens that are ALSO config-pinned
+        // remain valid because the config never went away. Pre-r31-14
+        // this branch deleted the entire `fileTokens` set, which on
+        // the overlap shape ("same admin token in both auth.token
+        // and config.auth.tokens") silently revoked a configured
+        // admin credential until process restart.
+        for (const oldTok of snapshot.fileTokens) {
+          if (snapshot.configTokens.has(oldTok)) continue;
+          validTokens.delete(oldTok);
+        }
         lastFileSnapshot.delete(validTokens);
       }
     }
@@ -190,6 +227,7 @@ function reconcileFileTokens(validTokens: Set<string>): void {
         size,
         contentHash,
         fileTokens: snapshot.fileTokens,
+        configTokens: snapshot.configTokens,
       });
     }
     return;
@@ -200,12 +238,34 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     if (t.length > 0 && !t.startsWith('#')) newFileTokens.add(t);
   }
   if (snapshot) {
+    // PR #229 bot review (r31-14 — auth.ts:203). Preserve config-pinned
+    // tokens during file rotation. Pre-r31-14 the loop only checked
+    // `!newFileTokens.has(oldTok)` and deleted from `validTokens`
+    // unconditionally — but `loadTokens()` merges config-pinned and
+    // file-derived tokens into the SAME `Set` (and into `fileTokens`
+    // when the value happens to appear on disk too). A normal rotate
+    // that drops the value from `auth.token` would then revoke the
+    // configured admin token in-memory until restart. Track config
+    // provenance separately and skip deletion when the token is still
+    // pinned by config.
     for (const oldTok of snapshot.fileTokens) {
-      if (!newFileTokens.has(oldTok)) validTokens.delete(oldTok);
+      if (newFileTokens.has(oldTok)) continue;
+      if (snapshot.configTokens.has(oldTok)) continue;
+      validTokens.delete(oldTok);
     }
   }
   for (const t of newFileTokens) validTokens.add(t);
-  lastFileSnapshot.set(validTokens, { mtimeMs, size, contentHash, fileTokens: newFileTokens });
+  lastFileSnapshot.set(validTokens, {
+    mtimeMs,
+    size,
+    contentHash,
+    fileTokens: newFileTokens,
+    // configTokens are immutable for the lifetime of `validTokens` —
+    // they're sourced from the AuthConfig handed to loadTokens(). If
+    // no snapshot exists yet (loadTokens crashed mid-stat), fall back
+    // to an empty set — that just means we have nothing to preserve.
+    configTokens: snapshot?.configTokens ?? new Set<string>(),
+  });
 }
 
 /**
@@ -254,13 +314,39 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
   );
   await chmod(filePath, 0o600);
   if (previous) {
-    for (const oldTok of previous.fileTokens) validTokens.delete(oldTok);
+    // PR #229 bot review (r31-14 — auth.ts:203). Same overlap-aware
+    // delete: tokens that are ALSO config-pinned MUST NOT be removed
+    // from the in-memory set just because they no longer appear in
+    // the rotated file. Operators rely on config-pinned admin tokens
+    // staying valid across `dkg auth rotate`.
+    for (const oldTok of previous.fileTokens) {
+      if (previous.configTokens.has(oldTok)) continue;
+      validTokens.delete(oldTok);
+    }
   }
   // Force the next reconcile to actually re-read the file even if the
   // OS reused the previous mtime (e.g. on filesystems with low
   // resolution like ext3 / FAT32 / certain CI tmpfs).
   lastFileSnapshot.delete(validTokens);
   reconcileFileTokens(validTokens);
+  // PR #229 bot review (r31-14 — auth.ts:203). The reconcile above ran
+  // with no snapshot, so the new snapshot it just wrote has an EMPTY
+  // configTokens set (reconcile uses `snapshot?.configTokens ??
+  // new Set()`). Re-seed the configTokens from the pre-rotation
+  // snapshot so subsequent rotates / reconciles still know which
+  // tokens are config-pinned.
+  if (previous && previous.configTokens.size > 0) {
+    const post = lastFileSnapshot.get(validTokens);
+    if (post) {
+      lastFileSnapshot.set(validTokens, {
+        mtimeMs: post.mtimeMs,
+        size: post.size,
+        contentHash: post.contentHash,
+        fileTokens: post.fileTokens,
+        configTokens: new Set(previous.configTokens),
+      });
+    }
+  }
   return fresh;
 }
 
@@ -326,14 +412,24 @@ export async function revokeToken(
       if (err && err.code === 'ENOENT') {
         let removedAny = false;
         if (snapshot) {
+          // PR #229 bot review (r31-14 — auth.ts:203). Bulk-revoke
+          // file-derived tokens, but preserve overlap with config —
+          // a token that happened to live in BOTH `auth.token` and
+          // `config.auth.tokens` should remain valid because the
+          // config never went away. The explicitly-revoked `token`
+          // is still removed below regardless of provenance (the
+          // operator asked for that one specifically).
           for (const fileTok of snapshot.fileTokens) {
+            if (snapshot.configTokens.has(fileTok)) continue;
             if (validTokens.delete(fileTok)) removedAny = true;
           }
         }
         // Belt-and-suspenders: also delete the explicitly-revoked
         // token in case the caller passed something not present in
         // the snapshot (e.g. a config-pinned token that happened to
-        // collide with the file's prior contents).
+        // collide with the file's prior contents). The operator
+        // explicitly named THIS token — honour the request even if
+        // it's config-pinned.
         if (validTokens.delete(token)) removedAny = true;
         lastFileSnapshot.delete(validTokens);
         return removedAny;

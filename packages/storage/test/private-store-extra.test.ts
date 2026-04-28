@@ -369,6 +369,235 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
       .sort();
     expect(roundTripped).toEqual([`"${SECRET}"`, `"OTHER_SECRET"`].sort());
   });
+
+  // =======================================================================
+  // PR #229 bot review (r31-14 — private-store.ts:491, KwH_): the
+  // per-graph write lock built its chain off `prev.then(() => next)`
+  // and `await prev` was OUTSIDE the try/finally that would call
+  // `release()`. A single rejected `storePrivateTriples()` therefore:
+  //   1. left `next` permanently pending (try block never ran →
+  //      release() never called)
+  //   2. set `chained = prev.then(...)` which forwarded the rejection
+  //      to every subsequent waiter for the SAME graph
+  //   3. the next waiter's `await prev` threw before reaching its own
+  //      try/finally, so its release() never fired either
+  // Net effect: ONE failed write permanently bricked the graph until
+  // process restart. Fix: chain off `prev.catch(() => undefined)` so
+  // a predecessor's rejection is decoupled from queue progress.
+  // =======================================================================
+  it('r31-14 (KwH_): a rejected storePrivateTriples does NOT brick the per-graph write lock — subsequent writers still drain', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    // Force the FIRST write to throw INSIDE the lock-held region by
+    // monkey-patching `store.insert`, which `storePrivateTriples`
+    // calls inside the `withGraphWriteLock` block. The first insert
+    // throws; subsequent inserts behave normally.
+    const realInsert = store.insert.bind(store);
+    let insertCallCount = 0;
+    (store as any).insert = async (quads: any) => {
+      insertCallCount += 1;
+      if (insertCallCount === 1) {
+        throw new Error('simulated fault inside the locked region');
+      }
+      return realInsert(quads);
+    };
+
+    const goodQuad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/ssn',
+      object: `"${SECRET}"`,
+      graph: '',
+    };
+
+    // 1. First write throws (the simulated fault), and the lock MUST
+    //    NOT permanently brick. Pre-r31-14 this leaked a pending
+    //    `next` — every subsequent caller hung forever.
+    await expect(
+      ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [goodQuad]),
+    ).rejects.toThrow(/simulated fault inside the locked region/);
+
+    // 2. Second write must succeed. The pre-fix code rejected here
+    //    on `await prev` (because prev was rejected), bypassing the
+    //    try/finally that would have released the lock. Use a
+    //    timeout to detect the hang and surface a clear error.
+    const timeoutPromise = new Promise((_resolve, reject) =>
+      setTimeout(() => reject(new Error('TIMED OUT — lock is bricked')), 5_000),
+    );
+    await expect(
+      Promise.race([
+        ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [goodQuad]),
+        timeoutPromise,
+      ]),
+    ).resolves.toBeUndefined();
+
+    // 3. Third write — the lock map cleanup path must also work:
+    //    the queue has fully drained, and a fresh write should grab
+    //    a clean lock entry. This catches the secondary symptom
+    //    where the recovered lock entry never gets `delete()`d
+    //    from `perGraphWriteLocks` and accumulates over time.
+    await expect(
+      ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [goodQuad]),
+    ).resolves.toBeUndefined();
+
+    // The good quad survives at-rest exactly once (idempotent).
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.length).toBe(1);
+    expect(decrypted[0].object).toBe(`"${SECRET}"`);
+  });
+
+  it('r31-14 (KwH_): concurrent waiters queued behind a rejecting writer all complete (no waiter inherits the rejection)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const realInsert = store.insert.bind(store);
+    let insertCallCount = 0;
+    let unblockFirstWriter: () => void = () => {};
+    const firstWriterGate = new Promise<void>((resolve) => {
+      unblockFirstWriter = resolve;
+    });
+    (store as any).insert = async (quads: any) => {
+      insertCallCount += 1;
+      if (insertCallCount === 1) {
+        // Hold the lock until we've enqueued the followup writers,
+        // then throw. This pins the queueing order: writers 2 and 3
+        // are waiting on `prev` (the lock chain) when the first
+        // writer rejects.
+        await firstWriterGate;
+        throw new Error('simulated rejected first writer');
+      }
+      return realInsert(quads);
+    };
+
+    const sharedQuad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/ssn',
+      object: `"${SECRET}"`,
+      graph: '',
+    };
+
+    const writerA = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
+    // Force the lock chain to register two more queued waiters
+    // BEFORE the first writer rejects. Pre-r31-14 these inherited
+    // the rejected `prev` and never even started.
+    const writerB = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
+    const writerC = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
+
+    // Yield to make sure writerB / writerC are properly queued.
+    await new Promise((r) => setImmediate(r));
+    unblockFirstWriter();
+
+    await expect(writerA).rejects.toThrow(/simulated rejected first writer/);
+    // Both queued waiters MUST complete normally (no rejection
+    // inherited from the bad predecessor). Use a Promise.race
+    // against a timeout to surface a hang explicitly.
+    const timeoutPromise = new Promise((_resolve, reject) =>
+      setTimeout(() => reject(new Error('TIMED OUT — queued waiter inherited rejection')), 5_000),
+    );
+    await expect(Promise.race([writerB, timeoutPromise])).resolves.toBeUndefined();
+    await expect(Promise.race([writerC, timeoutPromise])).resolves.toBeUndefined();
+
+    // Idempotent dedup still works end-to-end.
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.length).toBe(1);
+  });
+
+  it('r31-14 (KwH_): a poisoned (rejected) predecessor in the lock map does NOT cascade-reject queued writers', async () => {
+    // White-box test for the strongest bug variant (cli/private-store.ts:491).
+    // The fix's defensive contract is: even if a rejected promise ends
+    // up as the predecessor in `perGraphWriteLocks` (whether by
+    // future refactor, an unhandled rejection in the lock plumbing,
+    // or a poisoning by an adversarial caller), every subsequently-
+    // queued writer for that graph MUST still run cleanly. The
+    // pre-fix code did `await prev` outside the try/finally, so a
+    // rejected `prev` skipped `release()` and the queued writer never
+    // got to start. The fix's `safePrev = prev.catch(() => undefined)`
+    // guarantees the queue keeps draining.
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    // Reach into the private lock map and seed it with a directly-
+    // rejected promise. This is the most aggressive simulation of a
+    // poisoned predecessor — it pins that the lock layer itself is
+    // rejection-resilient. The graph URI used by storePrivateTriples
+    // is `<contextGraphPrivateUri(CONTEXT_GRAPH)>` (the production
+    // helper resolves it identically each call).
+    const targetGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
+    const poisoned = Promise.reject(new Error('poisoned predecessor'));
+    // Attach a no-op handler so Node doesn't surface this as an
+    // unhandled-rejection log line in CI; the lock impl itself
+    // catches via `safePrev` so no test-side handler is required at
+    // runtime, but vitest's listeners still complain about the
+    // bare rejection literal we're synthesising.
+    poisoned.catch(() => undefined);
+    (ps as any).perGraphWriteLocks.set(targetGraph, poisoned);
+
+    const goodQuad = {
+      subject: ROOT,
+      predicate: 'http://schema.org/ssn',
+      object: `"${SECRET}"`,
+      graph: '',
+    };
+
+    // Pre-fix: this hung forever (await prev threw before try{};
+    // release() never fired; subsequent writers also hung). Race it
+    // against a hard timeout to surface a regression as a clear
+    // error rather than vitest's generic test timeout.
+    const timeout = new Promise((_resolve, reject) =>
+      setTimeout(() => reject(new Error('TIMED OUT — rejected predecessor poisoned the lock')), 5_000),
+    );
+    await expect(
+      Promise.race([
+        ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [goodQuad]),
+        timeout,
+      ]),
+    ).resolves.toBeUndefined();
+
+    // Round-trip succeeds.
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.length).toBe(1);
+    expect(decrypted[0].object).toBe(`"${SECRET}"`);
+  });
+
+  it('r31-14 (KwH_): per-graph rejection does NOT poison OTHER graphs (independent locks stay clean)', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
+    const realInsert = store.insert.bind(store);
+    let insertCallCount = 0;
+    (store as any).insert = async (quads: any) => {
+      insertCallCount += 1;
+      // Reject the very first insert (graph-A's first write); all
+      // subsequent inserts go through. The other graph's lock chain
+      // is independent and must continue working regardless of what
+      // the bad graph's queue is doing.
+      if (insertCallCount === 1) {
+        throw new Error('simulated fault on graph A');
+      }
+      return realInsert(quads);
+    };
+
+    const quadA = { subject: ROOT, predicate: 'http://schema.org/a', object: `"A"`, graph: '' };
+    const quadB = { subject: ROOT, predicate: 'http://schema.org/b', object: `"B"`, graph: '' };
+
+    await expect(
+      ps.storePrivateTriples('graph-A', ROOT, [quadA]),
+    ).rejects.toThrow(/simulated fault on graph A/);
+
+    // Different graph — totally separate lock chain. MUST work.
+    await expect(
+      ps.storePrivateTriples('graph-B', ROOT, [quadB]),
+    ).resolves.toBeUndefined();
+
+    // The originally-bricked graph is also recoverable on its own.
+    await expect(
+      ps.storePrivateTriples('graph-A', ROOT, [quadA]),
+    ).resolves.toBeUndefined();
+  });
 });
 
 // =======================================================================

@@ -372,6 +372,147 @@ describe('rotateToken / revokeToken', () => {
     expect(verifyToken(tokenB, tokens)).toBe(true);
   });
 
+  // -------------------------------------------------------------
+  // PR #229 bot review (r31-14 — auth.ts:203, KwIE). Pre-fix the
+  // file-vs-config provenance was lost: `loadTokens()` merges both
+  // sources into one `Set` AND tracks them all in `snapshot.fileTokens`
+  // when the value happens to also appear on disk (a real-world
+  // overlap shape — operators routinely seed `auth.token` with the
+  // same value pinned in `config.auth.tokens` so the two control
+  // surfaces don't drift during a rollout). Reconciliation then
+  // deleted those tokens from `validTokens` whenever the file rotation
+  // removed them from disk, silently revoking a configured admin
+  // credential until restart.
+  //
+  // Fix: `lastFileSnapshot` now carries a separate `configTokens`
+  // set, populated from the AuthConfig at load time, and every
+  // delete path (`reconcileFileTokens`, `rotateToken`, the ENOENT
+  // branch of `revokeToken`) skips tokens that are still pinned by
+  // config. Tests below pin the four corners.
+  // -------------------------------------------------------------
+  describe('r31-14 (KwIE) — config provenance survives file reconciliation', () => {
+    it('reconcileFileTokens does NOT revoke a token that lives in BOTH auth.token and config.auth.tokens when the file rewrite removes it', async () => {
+      const { verifyToken } = await import('../src/auth.js');
+      const tokPath = join(tempDir, 'auth.token');
+      const overlap = 'overlap-tok-' + randomBytes(8).toString('hex');
+      const fileOnly = 'file-only-tok-' + randomBytes(8).toString('hex');
+      // Both tokens sit on disk; one is ALSO config-pinned.
+      await writeFile(tokPath, `${overlap}\n${fileOnly}\n`, { mode: 0o600 });
+
+      const tokens = await loadTokens({ tokens: [overlap] });
+      expect(tokens.has(overlap)).toBe(true);
+      expect(tokens.has(fileOnly)).toBe(true);
+
+      // Operator runs `dkg auth rotate`-style flow: rewrite the file
+      // to a single fresh token (overlap+fileOnly are both gone from
+      // the file). Bump mtime so the reconciler re-reads.
+      const fresh = 'fresh-rotated-' + randomBytes(8).toString('hex');
+      await writeFile(tokPath, `${fresh}\n`, { mode: 0o600 });
+      const later = new Date(Date.now() + 60_000);
+      await utimes(tokPath, later, later);
+
+      // verifyToken triggers reconcileFileTokens. Pre-r31-14: overlap
+      // gets revoked because it disappeared from `auth.token` and
+      // config provenance was unknown. Post-r31-14: overlap stays
+      // valid because it's still pinned by config.
+      expect(verifyToken(overlap, tokens)).toBe(true);
+      // The file-only token, with no config backing, IS revoked.
+      expect(verifyToken(fileOnly, tokens)).toBe(false);
+      // The new file-derived token took effect.
+      expect(verifyToken(fresh, tokens)).toBe(true);
+    });
+
+    it('rotateToken does NOT revoke a config-pinned token even when it was previously also in auth.token', async () => {
+      const tokPath = join(tempDir, 'auth.token');
+      const overlap = 'overlap-rot-' + randomBytes(8).toString('hex');
+      // Overlap shape: same value in BOTH config and file.
+      await writeFile(tokPath, `${overlap}\n`, { mode: 0o600 });
+      const tokens = await loadTokens({ tokens: [overlap] });
+
+      const fresh = await rotateToken(tokens);
+      // Post-r31-14 contract:
+      //   - the rotation introduced a new file-derived token
+      //   - the overlap token survives because config still pins it
+      //     (pre-fix this assertion FAILED — overlap was removed from
+      //     `validTokens` because reconcileFileTokens couldn't see
+      //     that config also wanted it).
+      expect(tokens.has(fresh)).toBe(true);
+      expect(tokens.has(overlap), 'config-pinned token must survive rotate').toBe(true);
+
+      // Re-rotating once more must STILL preserve the config token —
+      // this catches a subtle bug where the rotation loses the
+      // configTokens snapshot after the first rotate (the post-rotate
+      // re-seed step).
+      const fresh2 = await rotateToken(tokens);
+      expect(tokens.has(fresh)).toBe(false);
+      expect(tokens.has(fresh2)).toBe(true);
+      expect(tokens.has(overlap), 'config-pinned token must survive successive rotates').toBe(true);
+    });
+
+    it('revokeToken ENOENT branch preserves config-pinned tokens that ALSO appeared in auth.token (overlap shape)', async () => {
+      const tokPath = join(tempDir, 'auth.token');
+      const overlap = 'enoent-overlap-' + randomBytes(8).toString('hex');
+      const fileOnly = 'enoent-file-only-' + randomBytes(8).toString('hex');
+      await writeFile(tokPath, `${overlap}\n${fileOnly}\n`, { mode: 0o600 });
+
+      const tokens = await loadTokens({ tokens: [overlap] });
+      expect(tokens.has(overlap)).toBe(true);
+      expect(tokens.has(fileOnly)).toBe(true);
+
+      // File vanishes (rm + race, common during `dkg auth wipe`).
+      await unlink(tokPath);
+
+      // Operator revokes the file-only token. Pre-r31-14 the ENOENT
+      // path bulk-revoked snapshot.fileTokens, which included
+      // `overlap` because it was present on disk too — the
+      // configured admin credential was silently nuked. Post-r31-14
+      // the bulk-revoke loop skips entries that are also config-
+      // pinned.
+      expect(await revokeToken(fileOnly, tokens)).toBe(true);
+      expect(tokens.has(fileOnly), 'file-only token must be revoked').toBe(false);
+      expect(tokens.has(overlap), 'config-pinned overlap must survive ENOENT cascade').toBe(true);
+    });
+
+    it('revokeToken explicitly targeting a config-pinned token still removes it (operator intent overrides provenance)', async () => {
+      const tokPath = join(tempDir, 'auth.token');
+      const configPinned = 'explicit-config-' + randomBytes(8).toString('hex');
+      await writeFile(tokPath, `${configPinned}\n`, { mode: 0o600 });
+
+      const tokens = await loadTokens({ tokens: [configPinned] });
+      await unlink(tokPath);
+
+      // Operator explicitly asks: kill THIS token. Provenance does
+      // not matter — operator intent wins. Post-r31-14 the
+      // belt-and-suspenders `validTokens.delete(token)` at the end
+      // of the ENOENT branch ensures the explicitly-named target is
+      // always removed, even if it's config-pinned.
+      expect(await revokeToken(configPinned, tokens)).toBe(true);
+      expect(tokens.has(configPinned)).toBe(false);
+    });
+
+    it('rotateToken on a SET that has only config-pinned tokens (no file overlap) leaves them alone', async () => {
+      // No `auth.token` file at start. loadTokens auto-creates one
+      // because the in-memory set was empty after consuming config.
+      // Wait — actually, a config token DOES count, so loadTokens
+      // does NOT auto-generate. Verify by snapshotting the file.
+      const tokPath = join(tempDir, 'auth.token');
+      const configOnly = 'cfg-only-' + randomBytes(8).toString('hex');
+      const tokens = await loadTokens({ tokens: [configOnly] });
+      expect(tokens.has(configOnly)).toBe(true);
+
+      // Now rotate. The config token MUST survive even though it has
+      // never been in `auth.token` (no overlap, pure config provenance).
+      const fresh = await rotateToken(tokens);
+      expect(tokens.has(fresh)).toBe(true);
+      expect(tokens.has(configOnly), 'pure-config token must survive rotate').toBe(true);
+      // The new file contains only the rotated token (config tokens
+      // are NOT persisted to disk on rotate — they live in config).
+      const after = await readFile(tokPath, 'utf-8');
+      expect(after).toContain(fresh);
+      expect(after).not.toContain(configOnly);
+    });
+  });
+
   it('r19-4: revokeToken on a config-pinned (non-file) token leaves the file alone', async () => {
     const fileToken = 'file-tok-' + randomBytes(8).toString('hex');
     const tokPath = join(tempDir, 'auth.token');

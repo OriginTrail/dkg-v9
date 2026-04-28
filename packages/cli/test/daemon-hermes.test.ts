@@ -58,8 +58,13 @@ function makeJsonResponse() {
   return res;
 }
 
-function makeHermesRouteContext(payload: unknown, memoryManager: any, configOverrides: Partial<DkgConfig> = {}) {
-  const req = makeJsonRequest('POST', '/api/hermes-channel/persist-turn', payload);
+function makeHermesRouteContext(
+  payload: unknown,
+  memoryManager: any,
+  configOverrides: Partial<DkgConfig> = {},
+  path = '/api/hermes-channel/persist-turn',
+) {
+  const req = makeJsonRequest('POST', path, payload);
   const res = makeJsonResponse();
   return {
     ctx: {
@@ -79,7 +84,7 @@ function makeHermesRouteContext(payload: unknown, memoryManager: any, configOver
       memoryManager,
       bridgeAuthToken: 'bridge-token',
       extractionStatus: new Map(),
-      path: '/api/hermes-channel/persist-turn',
+      path,
       requestAgentAddress: '0x0000000000000000000000000000000000000001',
     } as any,
     res,
@@ -275,19 +280,17 @@ describe('Hermes local-agent registry lifecycle', () => {
 });
 
 describe('Hermes daemon routes', () => {
-  it('fails closed when Hermes local-agent chat is not enabled', async () => {
+  it('fails closed for chat send when Hermes local-agent chat is not enabled', async () => {
     const { ctx, res } = makeHermesRouteContext({
-      sessionId: 'hermes:default',
-      userMessage: 'hello',
-      assistantReply: 'hi',
+      text: 'hello',
     }, {
-      getSession: vi.fn(async () => null),
+      hasChatTurn: vi.fn(async () => false),
       storeChatExchange: vi.fn(async () => {}),
     }, {
       localAgentIntegrations: {
         hermes: { enabled: false },
       },
-    });
+    }, '/api/hermes-channel/send');
 
     await handleHermesRoutes(ctx);
 
@@ -297,10 +300,32 @@ describe('Hermes daemon routes', () => {
     });
   });
 
+  it('accepts authenticated persist-turn even when UI chat is not enabled', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    }, {
+      localAgentIntegrations: {
+        hermes: { enabled: false },
+      },
+    });
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ ok: true });
+    expect(storeChatExchange).toHaveBeenCalled();
+  });
+
   it('persists a Hermes turn through ChatMemoryManager with a normalized stable turn id', async () => {
     const storeChatExchange = vi.fn(async () => {});
     const memoryManager = {
-      getSession: vi.fn(async () => null),
+      hasChatTurn: vi.fn(async () => false),
       storeChatExchange,
     };
     const { ctx, res } = makeHermesRouteContext({
@@ -329,10 +354,7 @@ describe('Hermes daemon routes', () => {
 
   it('treats a repeated Hermes turn id as an idempotent duplicate', async () => {
     const memoryManager = {
-      getSession: vi.fn(async () => ({
-        session: 'hermes:default',
-        messages: [{ turnId: 'turn-1', author: 'user', text: 'hello', ts: new Date().toISOString(), uri: 'urn:test' }],
-      })),
+      hasChatTurn: vi.fn(async () => true),
       storeChatExchange: vi.fn(async () => {}),
     };
     const { ctx, res } = makeHermesRouteContext({
@@ -346,6 +368,28 @@ describe('Hermes daemon routes', () => {
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
+    expect(memoryManager.hasChatTurn).toHaveBeenCalledWith('hermes:default', 'turn-1');
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+  });
+
+  it('fails without storing when duplicate detection cannot query the turn id', async () => {
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => {
+        throw new Error('query offline');
+      }),
+      storeChatExchange: vi.fn(async () => {}),
+    };
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      turnId: 'turn-1',
+    }, memoryManager);
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: 'query offline' });
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
   });
 

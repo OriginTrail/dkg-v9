@@ -141,15 +141,76 @@ export class HermesDkgClient {
 }
 
 export function redact(value: string, token?: string): string {
-  let out = value.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]');
+  let out = redactBearerTokens(value);
   if (token) {
     out = out.split(token).join('[REDACTED]');
   }
   return out;
 }
 
+function redactBearerTokens(value: string): string {
+  const lower = value.toLowerCase();
+  let out = '';
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    const found = lower.indexOf('bearer', cursor);
+    if (found === -1) {
+      out += value.slice(cursor);
+      break;
+    }
+
+    out += value.slice(cursor, found);
+    out += value.slice(found, found + 'bearer'.length);
+
+    let next = found + 'bearer'.length;
+    const whitespaceStart = next;
+    while (next < value.length && isAsciiWhitespace(value.charCodeAt(next))) {
+      next += 1;
+    }
+    if (next === whitespaceStart) {
+      cursor = next;
+      continue;
+    }
+
+    const tokenStart = next;
+    while (next < value.length && isBearerTokenChar(value.charCodeAt(next))) {
+      next += 1;
+    }
+    if (next === tokenStart) {
+      out += value.slice(whitespaceStart, next);
+    } else {
+      out += ' [REDACTED]';
+    }
+    cursor = next;
+  }
+
+  return out;
+}
+
+function isAsciiWhitespace(code: number): boolean {
+  return code === 9 || code === 10 || code === 11 || code === 12 || code === 13 || code === 32;
+}
+
+function isBearerTokenChar(code: number): boolean {
+  return (code >= 48 && code <= 57)
+    || (code >= 65 && code <= 90)
+    || (code >= 97 && code <= 122)
+    || code === 43
+    || code === 45
+    || code === 46
+    || code === 47
+    || code === 61
+    || code === 95
+    || code === 126;
+}
+
 function stripTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, '');
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 function consumeSseBuffer(

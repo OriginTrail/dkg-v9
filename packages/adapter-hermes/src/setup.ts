@@ -172,8 +172,10 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
 export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVerifyResult {
   const profile = resolveHermesProfile(options);
   const errors: string[] = [];
-  const warnings = detectProviderConflict(profile, options.memoryMode ?? profile.memoryMode);
   const state = readSetupState(profile);
+  const effectiveMemoryMode = options.memoryMode ?? state?.profile.memoryMode ?? profile.memoryMode;
+  const effectiveProfile = { ...profile, memoryMode: effectiveMemoryMode };
+  const warnings = detectProviderConflict(effectiveProfile, effectiveMemoryMode);
 
   if (!existsSync(profile.hermesHome)) {
     errors.push(`Hermes profile directory does not exist: ${profile.hermesHome}`);
@@ -187,11 +189,15 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
   if (existsSync(dkgConfigPath) && !isOwnedJson(dkgConfigPath)) {
     warnings.push(`Existing dkg.json is not ownership-marked: ${dkgConfigPath}`);
   }
+  const pluginDir = join(profile.hermesHome, 'plugins', 'dkg');
+  if (state && !isOwnedPluginDir(pluginDir)) {
+    errors.push(`DKG Hermes provider plugin is missing or not ownership-marked: ${pluginDir}`);
+  }
 
   return {
     ok: errors.length === 0,
     status: errors.length ? 'error' : warnings.length ? 'degraded' : 'configured',
-    profile,
+    profile: effectiveProfile,
     warnings,
     errors,
     state: state ?? undefined,
@@ -322,9 +328,15 @@ function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
     profileName: trimmed(options.profileName ?? options.profile),
     hermesHome: trimmed(options.hermesHome),
     daemonUrl: stripTrailingSlashes(trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:9200')),
-    memoryMode: options.memoryMode === 'tools-only' ? 'tools-only' : 'provider',
+    memoryMode: normalizeCliMemoryMode(options.memoryMode),
     dryRun: options.dryRun === true,
   };
+}
+
+function normalizeCliMemoryMode(value: HermesCliOptions['memoryMode']): HermesMemoryMode | undefined {
+  if (value === 'tools-only') return 'tools-only';
+  if (value === 'provider' || value === 'primary' || value === 'ask') return 'provider';
+  return undefined;
 }
 
 function normalizePort(value: string | number | undefined): number | undefined {
@@ -337,7 +349,7 @@ function normalizePort(value: string | number | undefined): number | undefined {
 }
 
 async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string | undefined): Promise<void> {
-  const apiToken = process.env.DKG_API_TOKEN ?? process.env.DKG_AUTH_TOKEN;
+  const apiToken = loadDkgAuthToken();
   const client = new HermesDkgClient({
     baseUrl: daemonUrl,
     apiToken,
@@ -363,6 +375,18 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
     });
   } catch (err: any) {
     console.warn(`Hermes local-agent registration skipped: ${redact(err?.message ?? String(err), apiToken)}`);
+  }
+}
+
+function loadDkgAuthToken(): string | undefined {
+  const envToken = trimmed(process.env.DKG_API_TOKEN) ?? trimmed(process.env.DKG_AUTH_TOKEN);
+  if (envToken) return envToken;
+
+  const dkgHome = resolve(expandHome(trimmed(process.env.DKG_HOME) ?? join(homedir(), '.dkg')));
+  try {
+    return trimmed(readFileSync(join(dkgHome, 'auth.token'), 'utf-8'));
+  } catch {
+    return undefined;
   }
 }
 
@@ -572,7 +596,11 @@ function trimmed(value: unknown): string | undefined {
 }
 
 function stripTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, '');
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 function escapeRegExp(value: string): string {

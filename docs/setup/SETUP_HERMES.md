@@ -118,9 +118,14 @@ but the UI should show a degraded/offline bridge state.
 - DKG daemon API calls use bearer auth from the node.
 - The Python Hermes provider reads the DKG token from `$DKG_HOME/auth.token` or
   `~/.dkg/auth.token`.
+- Setup registration uses an explicit token environment variable when present,
+  then falls back to `$DKG_HOME/auth.token` or `~/.dkg/auth.token`.
 - Standalone loopback bridge calls use `x-dkg-bridge-token`. Non-loopback
   `bridgeUrl` values are ignored; use `gatewayUrl` for remote transports.
   Gateway targets do not receive that bridge token.
+- Hermes `send` and `stream` require an enabled local-agent registration.
+  `persist-turn` remains bearer-authenticated for provider persistence even
+  when UI chat registration is unavailable.
 - Adapter setup stores non-secret settings in `dkg.json`.
 - Direct `dkg_publish` is guarded by default and should remain
   operator-reviewed unless explicitly enabled.

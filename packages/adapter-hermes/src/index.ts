@@ -2,7 +2,7 @@
  * @origintrail-official/dkg-adapter-hermes
  *
  * Connects Hermes AI agents to a DKG V10 node for verifiable shared memory.
- * The Hermes Python plugin (plugins/memory/dkg/) talks to this adapter
+ * The Hermes Python plugin installed into $HERMES_HOME/plugins/dkg talks to this adapter
  * via HTTP. All knowledge goes through DKG Working Memory assertions.
  */
 

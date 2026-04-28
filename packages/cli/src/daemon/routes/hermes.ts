@@ -252,8 +252,6 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   }
 
   if (req.method === 'POST' && path === '/api/hermes-channel/persist-turn') {
-    if (!ensureHermesIntegrationEnabled(config, res)) return;
-
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: unknown;
     try {

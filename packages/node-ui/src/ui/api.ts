@@ -774,6 +774,8 @@ export interface LocalAgentHealthResponse {
     error?: string;
   };
   status?: string;
+  bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
+  gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
 
 function buildLocalAgentChatBody(
@@ -1208,6 +1210,30 @@ function isDegradedLocalAgentHealth(
     || (typeof memory === 'object' && memory != null && memory.conflict === true);
 }
 
+function isHealthObject(value: unknown): value is Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeLocalAgentHealth(health: LocalAgentHealthResponse | null): LocalAgentHealthResponse | null {
+  if (!health) return null;
+  const targetDetails = health.target === 'bridge'
+    ? health.bridge
+    : health.target === 'gateway'
+      ? health.gateway
+      : undefined;
+  if (!isHealthObject(targetDetails)) return health;
+  const targetOk = typeof targetDetails.ok === 'boolean' ? targetDetails.ok : undefined;
+  return {
+    ...targetDetails,
+    ...health,
+    ok: health.ok === false ? false : targetOk ?? health.ok,
+    profile: health.profile ?? targetDetails.profile,
+    memory: health.memory ?? targetDetails.memory,
+    status: health.status ?? targetDetails.status,
+    error: health.error ?? targetDetails.error,
+  };
+}
+
 function hermesDetail(
   record: LocalAgentIntegrationRecord,
   health: LocalAgentHealthResponse | null,
@@ -1238,9 +1264,10 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const configured = record.enabled === true;
   const runtimeStatus = record.runtime?.status;
   const health = configured && hasChatBridge && surface?.fetchHealth
-    ? await surface.fetchHealth().catch(() => null)
+    ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
-  const chatReady = health?.ok === true;
+  const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
+  const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
   const persistentChat = configured && hasChatBridge && (
     chatReady
@@ -1249,28 +1276,27 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     || record.runtime?.ready === true
     || hasLocalAgentTransportHints(record)
   );
-  const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
   const hermesRuntimeDetail = hermesDetail(record, health);
 
   let status: LocalAgentIntegrationStatus;
   let statusLabel: string;
   let detail: string;
-  if (bridgeOnline) {
-    status = 'chat_ready';
-    statusLabel = 'Chat ready';
-    detail = `${record.name} is connected to this node and ready for chat.`;
-  } else if (persistentChat && record.runtime?.status === 'connecting') {
-    status = 'connecting';
-    statusLabel = 'Connecting';
-    detail = record.runtime?.lastError
-      ?? `${record.name} is registered and still starting up.`;
-  } else if (persistentChat && degraded) {
+  if (persistentChat && degraded) {
     status = 'degraded';
     statusLabel = 'Degraded';
     detail = hermesRuntimeDetail
       ?? health?.error
       ?? record.runtime?.lastError
       ?? `${record.name} is attached to this node, but one capability is degraded.`;
+  } else if (persistentChat && record.runtime?.status === 'connecting') {
+    status = 'connecting';
+    statusLabel = 'Connecting';
+    detail = record.runtime?.lastError
+      ?? `${record.name} is registered and still starting up.`;
+  } else if (bridgeOnline) {
+    status = 'chat_ready';
+    statusLabel = 'Chat ready';
+    detail = `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';

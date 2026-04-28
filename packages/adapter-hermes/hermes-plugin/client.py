@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,10 +21,43 @@ _TIMEOUT = 5  # seconds
 
 def redact_text(value: str, token: Optional[str] = None) -> str:
     """Remove bearer tokens from text safe to show in logs/errors."""
-    redacted = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+    redacted = _redact_bearer_tokens(value)
     if token:
         redacted = redacted.replace(token, "[REDACTED]")
     return redacted
+
+
+def _redact_bearer_tokens(value: str) -> str:
+    lower = value.lower()
+    parts = []
+    cursor = 0
+    while cursor < len(value):
+        found = lower.find("bearer", cursor)
+        if found < 0:
+            parts.append(value[cursor:])
+            break
+        parts.append(value[cursor:found])
+        parts.append(value[found:found + len("bearer")])
+        next_index = found + len("bearer")
+        whitespace_start = next_index
+        while next_index < len(value) and value[next_index] in "\t\n\v\f\r ":
+            next_index += 1
+        if next_index == whitespace_start:
+            cursor = next_index
+            continue
+        token_start = next_index
+        while next_index < len(value) and _is_bearer_token_char(value[next_index]):
+            next_index += 1
+        if next_index == token_start:
+            parts.append(value[whitespace_start:next_index])
+        else:
+            parts.append(" [REDACTED]")
+        cursor = next_index
+    return "".join(parts)
+
+
+def _is_bearer_token_char(char: str) -> bool:
+    return char.isascii() and (char.isalnum() or char in "._~+/=-")
 
 
 def _resolve_dkg_home() -> Path:

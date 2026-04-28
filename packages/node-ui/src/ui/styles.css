@@ -741,6 +741,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-agents-stat-dot.connected { background: var(--accent-green); }
 .v10-agents-stat-dot.known { background: var(--text-tertiary); }
 .v10-agents-stat-dot.offline { background: var(--accent-red); }
+.v10-agents-stat-dot.degraded { background: #f59e0b; }
 .v10-agents-refresh {
   margin-left: auto;
   background: var(--bg-surface);
@@ -829,6 +830,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-agent-card-dot.self { background: var(--accent-blue); }
 .v10-agent-card-dot.connected { background: var(--accent-green); }
 .v10-agent-card-dot.known { background: var(--text-tertiary); }
+.v10-agent-card-dot.degraded { background: #f59e0b; }
 .v10-agent-card-name { font-size: 12px; font-weight: 600; color: var(--text-primary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-agent-card-badge {
   font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;

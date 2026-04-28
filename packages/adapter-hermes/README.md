@@ -146,12 +146,16 @@ provenance before forwarding them to Hermes.
 - Non-public DKG daemon routes use the existing bearer token auth.
 - The Python client reads the DKG token from `DKG_HOME`/`~/.dkg`; it does not
   require copying the token into Hermes config.
+- Setup registration uses the same bearer source: explicit token environment
+  variables first, then `$DKG_HOME/auth.token` or `~/.dkg/auth.token`.
 - Standalone loopback Hermes bridge calls use a route-scoped
   `x-dkg-bridge-token` header. Non-loopback `bridgeUrl` values are ignored;
   use `gatewayUrl` for remote transports. Gateway targets do not receive that
   bridge token.
-- Hermes local-agent routes fail closed when the Hermes integration is not
-  enabled in the DKG local-agent registry.
+- Hermes `send` and `stream` routes fail closed when the Hermes integration is
+  not enabled in the DKG local-agent registry. `persist-turn` remains
+  daemon-authenticated so the active Hermes provider can persist completed
+  turns even when UI chat registration is unavailable.
 - The default bridge host is loopback. Treat non-loopback gateway URLs as an
   explicit trust decision and require normal network hardening.
 - Verified Memory publishing is permanent and may cost TRAC; direct publish is

@@ -771,12 +771,15 @@ describe('OpenClaw bridge behavioral tests', () => {
       {
         ok: true,
         json: async () => ({
-          ok: false,
+          ok: true,
           target: 'bridge',
-          profile: 'dkg-smoke',
-          status: 'provider_conflict',
-          memory: { provider: 'honcho', conflict: true },
-          error: 'provider conflict',
+          bridge: {
+            ok: true,
+            profile: 'dkg-smoke',
+            status: 'provider_conflict',
+            memory: { provider: 'honcho', conflict: true },
+            error: 'provider conflict',
+          },
         }),
       },
     ]);
@@ -792,8 +795,59 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeStatusLabel: 'Degraded',
         chatAttachments: true,
       });
+      expect(hermes?.chatReady).toBe(false);
+      expect(hermes?.bridgeOnline).toBe(false);
       expect(hermes?.detail).toContain('profile dkg-smoke');
       expect(hermes?.detail).toContain('memory provider conflict');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations treats nested Hermes bridge failures as not chat-ready', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'bridge',
+          bridge: {
+            ok: false,
+            profile: 'dkg-smoke',
+            error: 'daemon auth failed',
+          },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes).toMatchObject({
+        status: 'bridge_offline',
+        statusLabel: 'Bridge offline',
+        bridgeStatusLabel: 'Unavailable',
+        chatReady: false,
+        bridgeOnline: false,
+      });
+      expect(hermes?.detail).toContain('daemon auth failed');
     } finally {
       globalThis.fetch = original;
     }

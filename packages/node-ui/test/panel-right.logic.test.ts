@@ -269,6 +269,25 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Send');
   });
 
+  it('renders degraded connected-agent status dots', () => {
+    const degraded = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      bridgeOnline: false,
+      chatReady: false,
+      status: 'degraded',
+      statusLabel: 'Degraded',
+      bridgeStatusLabel: 'Degraded',
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [degraded],
+      selectedIntegrationId: 'hermes',
+      selectedIntegration: degraded,
+      selectedSessionId: 'hermes:dkg-ui',
+    });
+    expect(markup).toContain('v10-agents-stat-dot degraded');
+  });
+
   it('renders disconnected history warnings and empty-state messaging', () => {
     const markup = renderConnectedAgentsTab({
       selectedIntegration: integration({ persistentChat: false, chatReady: false, bridgeOnline: false, status: 'available' }),

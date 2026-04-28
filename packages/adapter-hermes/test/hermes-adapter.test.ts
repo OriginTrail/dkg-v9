@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HermesAdapterPlugin } from '../src/HermesAdapterPlugin.js';
@@ -11,6 +11,7 @@ import {
   planHermesSetup,
   resolveHermesProfile,
   runSetup,
+  runVerify,
   setupHermesProfile,
   uninstallHermesProfile,
   verifyHermesProfile,
@@ -80,6 +81,10 @@ function trackingRes() {
   res.json = (body: any) => { calls.push({ json: body }); return res; };
   return { res, calls };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('HermesAdapterPlugin', () => {
   it('registers HTTP routes on first call', () => {
@@ -367,18 +372,23 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '.dkg-adapter-hermes-owner.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
   });
 
-  it('detects provider conflicts and preserves user config on disconnect/uninstall', () => {
+  it('detects provider conflicts and preserves user config on disconnect/uninstall', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     writeFileSync(join(hermesHome, 'config.yaml'), 'memory:\n  provider: mem0\n');
 
     expect(() => setupHermesProfile({ hermesHome, memoryMode: 'provider' })).toThrow('memory.provider: mem0');
 
     const plan = setupHermesProfile({ hermesHome, memoryMode: 'tools-only' });
-    const verify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+    const verify = verifyHermesProfile({ hermesHome });
+    const providerVerify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
 
     expect(plan.warnings).toHaveLength(0);
     expect(verify.ok).toBe(true);
-    expect(verify.warnings[0]).toContain('mem0');
+    expect(verify.profile.memoryMode).toBe('tools-only');
+    expect(verify.warnings).toHaveLength(0);
+    expect(providerVerify.ok).toBe(true);
+    expect(providerVerify.warnings[0]).toContain('mem0');
+    await expect(runVerify({ hermesHome })).resolves.toBeUndefined();
 
     disconnectHermesProfile({ hermesHome });
     uninstallHermesProfile({ hermesHome });
@@ -393,6 +403,17 @@ describe('Hermes profile setup helpers', () => {
     uninstallHermesProfile({ hermesHome, profileName: 'dev' });
 
     expect(existsSync(join(hermesHome, 'plugins', 'dkg'))).toBe(false);
+  });
+
+  it('reports a partially removed provider plugin during verify', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, profileName: 'dev' });
+    rmSync(join(hermesHome, 'plugins', 'dkg'), { recursive: true, force: true });
+
+    const verify = verifyHermesProfile({ hermesHome, profileName: 'dev' });
+
+    expect(verify.ok).toBe(false);
+    expect(verify.errors[0]).toContain('provider plugin is missing');
   });
 
   it('adds a managed provider line inside an existing Hermes memory config', () => {
@@ -413,5 +434,39 @@ describe('Hermes profile setup helpers', () => {
       dryRun: true,
       daemonUrl: 'http://127.0.0.1:9200/',
     })).resolves.toBeUndefined();
+  });
+
+  it('reads the default DKG auth token file for setup daemon registration', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    writeFileSync(join(dkgHome, 'auth.token'), 'file-token\n');
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const oldDkgHome = process.env.DKG_HOME;
+    const oldApiToken = process.env.DKG_API_TOKEN;
+    const oldAuthToken = process.env.DKG_AUTH_TOKEN;
+    process.env.DKG_HOME = dkgHome;
+    delete process.env.DKG_API_TOKEN;
+    delete process.env.DKG_AUTH_TOKEN;
+    try {
+      await runSetup({ hermesHome, verify: false });
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      if (oldApiToken === undefined) delete process.env.DKG_API_TOKEN;
+      else process.env.DKG_API_TOKEN = oldApiToken;
+      if (oldAuthToken === undefined) delete process.env.DKG_AUTH_TOKEN;
+      else process.env.DKG_AUTH_TOKEN = oldAuthToken;
+    }
+
+    expect(calls[0].url).toBe('http://127.0.0.1:9200/api/local-agent-integrations/connect');
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer file-token');
   });
 });

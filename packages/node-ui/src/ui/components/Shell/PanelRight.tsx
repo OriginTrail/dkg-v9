@@ -511,6 +511,7 @@ export function shouldPreserveSelectedLocalAgentTab(args: {
 function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
   if (integration.bridgeOnline) return 'connected';
   if (integration.status === 'connecting') return 'known';
+  if (integration.status === 'degraded') return 'degraded';
   return 'offline';
 }
 

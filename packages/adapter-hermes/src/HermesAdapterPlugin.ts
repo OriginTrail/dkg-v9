@@ -6,7 +6,7 @@
  * - No game plugin
  * - No write-capture (daemon's importMemories handles entity extraction)
  *
- * The Hermes Python plugin (plugins/memory/dkg/) talks to this adapter
+ * The Hermes Python plugin installed into $HERMES_HOME/plugins/dkg talks to this adapter
  * via HTTP at localhost:9200/api/hermes-channel/*. All heavy lifting (triple store,
  * P2P networking, publishing) is delegated to the daemon's DKGAgent.
  */

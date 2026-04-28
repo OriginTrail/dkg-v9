@@ -348,12 +348,11 @@ export function hermesPersistTurnKey(sessionId: string, turnId: string): string 
 }
 
 export async function hasPersistedHermesTurn(
-  memoryManager: Pick<ChatMemoryManager, 'getSession'>,
+  memoryManager: Pick<ChatMemoryManager, 'hasChatTurn'>,
   sessionId: string,
   turnId: string,
 ): Promise<boolean> {
-  const session = await memoryManager.getSession(sessionId, { limit: 500, order: 'desc' });
-  return Boolean(session?.messages.some((message) => message.turnId === turnId));
+  return memoryManager.hasChatTurn(sessionId, turnId);
 }
 
 export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTurnPayload | { error: string } {

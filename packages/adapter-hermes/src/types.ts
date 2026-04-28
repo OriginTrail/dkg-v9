@@ -66,6 +66,7 @@ export interface HermesSetupState {
   agentName?: string;
   bridge?: {
     url?: string;
+    gatewayUrl?: string;
     healthUrl?: string;
   };
   publishGuard: HermesPublishGuardPolicy;
@@ -156,6 +157,7 @@ export interface HermesLocalAgentIntegrationPayload {
   transport?: {
     kind?: 'hermes-channel';
     bridgeUrl?: string;
+    gatewayUrl?: string;
     healthUrl?: string;
   };
   capabilities?: {

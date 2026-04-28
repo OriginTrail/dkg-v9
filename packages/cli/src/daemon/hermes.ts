@@ -56,6 +56,7 @@ export interface HermesChatPayload {
   profile?: string;
   attachmentRefs?: OpenClawAttachmentRef[];
   contextEntries?: OpenClawChatContextEntry[];
+  contextGraphId?: string;
   uiContextGraphId?: string;
   currentAgentAddress?: string;
 }
@@ -334,6 +335,9 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
     return { error: 'Missing "text"' };
   }
 
+  const contextGraphId =
+    optionalTrimmedString(raw.contextGraphId) ?? optionalTrimmedString(raw.uiContextGraphId);
+
   return {
     text,
     correlationId: optionalTrimmedString(raw.correlationId) ?? randomUUID(),
@@ -342,7 +346,8 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
     profile: optionalHermesProfileName(raw),
     attachmentRefs: normalizedAttachmentRefs,
     contextEntries: normalizedContextEntries,
-    uiContextGraphId: optionalTrimmedString(raw.contextGraphId),
+    contextGraphId,
+    uiContextGraphId: contextGraphId,
     currentAgentAddress: optionalTrimmedString(raw.currentAgentAddress),
   };
 }

@@ -73,6 +73,7 @@ provider mode in this PR.
 
 ```bash
 dkg hermes setup --profile research --dry-run
+dkg hermes setup --profile research --gateway-url https://hermes.example.com
 dkg hermes status --profile research
 dkg hermes verify --profile research
 dkg hermes doctor --profile research
@@ -108,6 +109,11 @@ If the local-agent registry has a Hermes gateway URL, the daemon forwards to:
 ```text
 <gateway-url>/api/hermes-channel/{health,send,stream}
 ```
+
+`dkg hermes setup` registers only the Hermes channel kind by default. Use
+`--bridge-url` for a same-host loopback bridge or `--gateway-url` for WSL2 and
+remote Hermes deployments. Do not use a non-loopback `bridgeUrl`; remote
+targets should be registered as gateways.
 
 Node UI chat is considered ready only when the bridge or gateway health route
 responds successfully. When it is unavailable, Hermes may still be registered,

@@ -7,6 +7,9 @@ export interface HermesSetupCliOptions {
   profileName?: string;
   hermesBin?: string;
   daemonUrl?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  bridgeHealthUrl?: string;
   port?: string | number;
   cwd?: string;
   memoryMode?: HermesMemoryMode;
@@ -20,6 +23,9 @@ export interface NormalizedHermesSetupOptions {
   profileName?: string;
   hermesBin?: string;
   daemonUrl?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  bridgeHealthUrl?: string;
   port?: number;
   cwd?: string;
   memoryMode?: HermesMemoryMode;
@@ -61,6 +67,9 @@ export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): Normal
     profileName: trimmed(opts.profileName),
     hermesBin: trimmed(opts.hermesBin),
     daemonUrl: trimmed(opts.daemonUrl),
+    bridgeUrl: trimmed(opts.bridgeUrl),
+    gatewayUrl: trimmed(opts.gatewayUrl),
+    bridgeHealthUrl: trimmed(opts.bridgeHealthUrl),
     port: normalizePort(opts.port),
     cwd: trimmed(opts.cwd),
     memoryMode,

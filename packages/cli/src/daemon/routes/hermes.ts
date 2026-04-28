@@ -84,7 +84,12 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             ...(payload.profile ? { profile: payload.profile } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(payload.contextEntries ? { contextEntries: payload.contextEntries } : {}),
-            ...(payload.uiContextGraphId ? { uiContextGraphId: payload.uiContextGraphId } : {}),
+            ...(payload.contextGraphId ?? payload.uiContextGraphId
+              ? {
+                  contextGraphId: payload.contextGraphId ?? payload.uiContextGraphId,
+                  uiContextGraphId: payload.uiContextGraphId ?? payload.contextGraphId,
+                }
+              : {}),
             ...(payload.currentAgentAddress ?? requestAgentAddress
               ? { currentAgentAddress: payload.currentAgentAddress ?? requestAgentAddress }
               : {}),
@@ -176,7 +181,12 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             ...(payload.profile ? { profile: payload.profile } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(payload.contextEntries ? { contextEntries: payload.contextEntries } : {}),
-            ...(payload.uiContextGraphId ? { uiContextGraphId: payload.uiContextGraphId } : {}),
+            ...(payload.contextGraphId ?? payload.uiContextGraphId
+              ? {
+                  contextGraphId: payload.contextGraphId ?? payload.uiContextGraphId,
+                  uiContextGraphId: payload.uiContextGraphId ?? payload.contextGraphId,
+                }
+              : {}),
             ...(payload.currentAgentAddress ?? requestAgentAddress
               ? { currentAgentAddress: payload.currentAgentAddress ?? requestAgentAddress }
               : {}),
@@ -293,6 +303,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           failureReason: payload.failureReason,
         },
       );
+      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
       return jsonResponse(res, 200, { ok: true, turnId: payload.turnId });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
@@ -311,4 +322,22 @@ function ensureHermesIntegrationEnabled(config: RequestContext['config'], res: R
     code: 'INTEGRATION_DISABLED',
   });
   return false;
+}
+
+async function importHermesAssistantReply(
+  agent: RequestContext['agent'],
+  sessionId: string,
+  turnId: string,
+  assistantReply: string,
+): Promise<void> {
+  if (!assistantReply) return;
+  const importer = (agent as unknown as {
+    importMemories?: (text: string, source?: string) => Promise<unknown>;
+  }).importMemories;
+  if (typeof importer !== 'function') return;
+  try {
+    await importer.call(agent, assistantReply, `hermes-session:${sessionId}:turn:${turnId}`);
+  } catch {
+    // Chat persistence should remain authoritative even if extraction is unavailable.
+  }
 }

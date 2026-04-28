@@ -22,6 +22,9 @@ export interface HermesSetupOptions {
   profileName?: string;
   hermesHome?: string;
   daemonUrl?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  bridgeHealthUrl?: string;
   contextGraph?: string;
   agentName?: string;
   memoryMode?: HermesMemoryMode;
@@ -35,6 +38,9 @@ export interface HermesCliOptions {
   profileName?: string;
   hermesHome?: string;
   daemonUrl?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  bridgeHealthUrl?: string;
   port?: string | number;
   cwd?: string;
   memoryMode?: HermesMemoryMode | 'primary' | 'ask';
@@ -83,6 +89,7 @@ export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPl
   const profile = resolveHermesProfile(options);
   const warnings = detectProviderConflict(profile, options.memoryMode ?? 'provider');
   const daemonUrl = stripTrailingSlashes(options.daemonUrl ?? 'http://127.0.0.1:9200');
+  const bridge = normalizeBridgeConfig(options);
   const publishGuard = normalizePublishGuard(options.publishGuard);
   const managedFiles = [
     join(profile.hermesHome, 'dkg.json'),
@@ -105,6 +112,7 @@ export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPl
     daemonUrl,
     contextGraph: options.contextGraph ?? 'hermes-memory',
     agentName: options.agentName,
+    ...(bridge ? { bridge } : {}),
     publishGuard,
     installedAt: now,
     updatedAt: now,
@@ -141,6 +149,7 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
   writeOwnedJson(dkgConfigPath, {
     managedBy: MANAGED_BY,
     daemon_url: plan.state.daemonUrl,
+    ...(plan.state.bridge ? { bridge: plan.state.bridge } : {}),
     context_graph: plan.state.contextGraph,
     agent_name: plan.state.agentName ?? '',
     memory_mode: plan.profile.memoryMode,
@@ -339,6 +348,9 @@ function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
     profileName: trimmed(options.profileName ?? options.profile),
     hermesHome: trimmed(options.hermesHome),
     daemonUrl: stripTrailingSlashes(trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:9200')),
+    bridgeUrl: stripTrailingSlashes(trimmed(options.bridgeUrl) ?? ''),
+    gatewayUrl: stripTrailingSlashes(trimmed(options.gatewayUrl) ?? ''),
+    bridgeHealthUrl: stripTrailingSlashes(trimmed(options.bridgeHealthUrl) ?? ''),
     memoryMode: normalizeCliMemoryMode(options.memoryMode),
     dryRun: options.dryRun === true,
   };
@@ -373,6 +385,18 @@ function normalizePort(value: string | number | undefined): number | undefined {
 
 async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string | undefined): Promise<void> {
   const apiToken = loadDkgAuthToken();
+  const transport: { kind: 'hermes-channel'; bridgeUrl?: string; gatewayUrl?: string; healthUrl?: string } = {
+    kind: 'hermes-channel',
+  };
+  if (plan.state.bridge?.url) {
+    transport.bridgeUrl = plan.state.bridge.url;
+  }
+  if (plan.state.bridge?.gatewayUrl) {
+    transport.gatewayUrl = plan.state.bridge.gatewayUrl;
+  }
+  if (plan.state.bridge?.healthUrl) {
+    transport.healthUrl = plan.state.bridge.healthUrl;
+  }
   const client = new HermesDkgClient({
     baseUrl: daemonUrl,
     apiToken,
@@ -386,10 +410,7 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
         memoryMode: plan.profile.memoryMode,
         setupState: plan.state.status,
       },
-      transport: {
-        kind: 'hermes-channel',
-        bridgeUrl: 'http://127.0.0.1:9202',
-      },
+      transport,
       runtime: {
         status: plan.state.status === 'degraded' ? 'degraded' : 'configured',
         ready: false,
@@ -399,6 +420,20 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
   } catch (err: any) {
     console.warn(`Hermes local-agent registration skipped: ${redact(err?.message ?? String(err), apiToken)}`);
   }
+}
+
+function normalizeBridgeConfig(
+  options: Pick<HermesSetupOptions, 'bridgeUrl' | 'gatewayUrl' | 'bridgeHealthUrl'>,
+): HermesSetupState['bridge'] | undefined {
+  const url = stripTrailingSlashes(trimmed(options.bridgeUrl) ?? '');
+  const gatewayUrl = stripTrailingSlashes(trimmed(options.gatewayUrl) ?? '');
+  const healthUrl = stripTrailingSlashes(trimmed(options.bridgeHealthUrl) ?? '');
+  if (!url && !gatewayUrl && !healthUrl) return undefined;
+  return {
+    ...(url ? { url } : {}),
+    ...(gatewayUrl ? { gatewayUrl } : {}),
+    ...(healthUrl ? { healthUrl } : {}),
+  };
 }
 
 function loadDkgAuthToken(): string | undefined {

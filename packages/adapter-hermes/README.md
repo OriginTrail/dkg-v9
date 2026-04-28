@@ -63,6 +63,9 @@ Common setup flags:
 | --- | --- |
 | `--profile <name>` | Target `~/.hermes/profiles/<name>` instead of the default profile. |
 | `--daemon-url <url>` | DKG daemon URL. Defaults to `http://127.0.0.1:9200`. |
+| `--bridge-url <url>` | Same-host Hermes bridge URL for local chat. Use loopback addresses only. |
+| `--gateway-url <url>` | Gateway URL for WSL2 or remote Hermes chat. |
+| `--bridge-health-url <url>` | Optional health URL override for the configured bridge/gateway. |
 | `--port <port>` | Shortcut for `http://127.0.0.1:<port>`. |
 | `--memory-mode <mode>` | `primary` is the default provider-election path; use `tools-only` to preserve an existing Hermes memory provider. The current CLI also accepts `ask`, which follows the provider setup path in this PR. |
 | `--dry-run` | Print planned file changes without writing them. |
@@ -135,8 +138,10 @@ Hermes uses Hermes-specific daemon routes for this PR:
 | `POST /api/hermes-channel/persist-turn` | Persist a completed Hermes turn through DKG chat memory with duplicate-turn protection. |
 
 The daemon forwards Node UI chat to a standalone bridge at
-`http://127.0.0.1:9202` by default. If a Hermes gateway URL is configured, the
-daemon uses `<gateway>/api/hermes-channel/{health,send,stream}` instead.
+`http://127.0.0.1:9202` by default. Setup does not persist that fallback as an
+explicit transport. Use `dkg hermes setup --gateway-url <url>` when Hermes is
+reachable through a WSL2 or remote gateway; the daemon then uses
+`<gateway>/api/hermes-channel/{health,send,stream}` instead.
 
 Attachment references are node-owned assertion refs. The daemon verifies their
 provenance before forwarding them to Hermes.

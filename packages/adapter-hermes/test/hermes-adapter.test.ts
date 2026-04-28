@@ -563,5 +563,39 @@ describe('Hermes profile setup helpers', () => {
 
     expect(calls[0].url).toBe('http://127.0.0.1:9200/api/local-agent-integrations/connect');
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer file-token');
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.transport).toEqual({ kind: 'hermes-channel' });
+    expect(body.transport.bridgeUrl).toBeUndefined();
+  });
+
+  it('preserves explicit gateway transport inputs during setup registration', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    await runSetup({
+      hermesHome,
+      verify: false,
+      gatewayUrl: 'https://hermes.example.com/',
+      bridgeHealthUrl: 'https://hermes.example.com/api/hermes-channel/health/',
+    });
+
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.transport).toEqual({
+      kind: 'hermes-channel',
+      gatewayUrl: 'https://hermes.example.com',
+      healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
+    });
+    const state = JSON.parse(readFileSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'), 'utf-8'));
+    expect(state.bridge).toEqual({
+      gatewayUrl: 'https://hermes.example.com',
+      healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
+    });
   });
 });

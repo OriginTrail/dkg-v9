@@ -376,6 +376,63 @@ describe('Hermes daemon routes', () => {
     });
   });
 
+  it('forwards the documented contextGraphId and legacy uiContextGraphId to Hermes send', async () => {
+    const forwardedBodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      forwardedBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ text: 'hi', correlationId: 'corr-1' }), { status: 200 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+      contextGraphId: 'project-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0]).toMatchObject({
+      contextGraphId: 'project-1',
+      uiContextGraphId: 'project-1',
+    });
+  });
+
+  it('forwards the documented contextGraphId and legacy uiContextGraphId to Hermes stream', async () => {
+    const forwardedBodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      forwardedBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ text: 'hi', correlationId: 'corr-1' }), { status: 200 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+      contextGraphId: 'project-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/stream');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['Content-Type']).toContain('text/event-stream');
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0]).toMatchObject({
+      contextGraphId: 'project-1',
+      uiContextGraphId: 'project-1',
+    });
+  });
+
   it('accepts authenticated persist-turn even when UI chat is not enabled', async () => {
     const storeChatExchange = vi.fn(async () => {});
     const { ctx, res } = makeHermesRouteContext({
@@ -400,6 +457,7 @@ describe('Hermes daemon routes', () => {
 
   it('persists a Hermes turn through ChatMemoryManager with a normalized generated turn id', async () => {
     const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
     const memoryManager = {
       hasChatTurn: vi.fn(async () => false),
       storeChatExchange,
@@ -409,6 +467,7 @@ describe('Hermes daemon routes', () => {
       userMessage: 'hello',
       assistantReply: 'hi',
     }, memoryManager);
+    ctx.agent.importMemories = importMemories;
 
     await handleHermesRoutes(ctx);
 
@@ -426,9 +485,11 @@ describe('Hermes daemon routes', () => {
         persistenceState: 'stored',
       }),
     );
+    expect(importMemories).toHaveBeenCalledWith('hi', `hermes-session:hermes:default:turn:${body.turnId}`);
   });
 
   it('treats a repeated Hermes turn id as an idempotent duplicate', async () => {
+    const importMemories = vi.fn(async () => {});
     const memoryManager = {
       hasChatTurn: vi.fn(async () => true),
       storeChatExchange: vi.fn(async () => {}),
@@ -439,6 +500,7 @@ describe('Hermes daemon routes', () => {
       assistantReply: 'hi',
       turnId: 'turn-1',
     }, memoryManager);
+    ctx.agent.importMemories = importMemories;
 
     await handleHermesRoutes(ctx);
 
@@ -446,6 +508,31 @@ describe('Hermes daemon routes', () => {
     expect(JSON.parse(res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
     expect(memoryManager.hasChatTurn).toHaveBeenCalledWith('hermes:default', 'turn-1');
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    expect(importMemories).not.toHaveBeenCalled();
+  });
+
+  it('keeps persist-turn successful when Hermes extraction import fails', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {
+      throw new Error('extract offline');
+    });
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      turnId: 'turn-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    });
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(storeChatExchange).toHaveBeenCalled();
+    expect(importMemories).toHaveBeenCalledWith('hi', 'hermes-session:hermes:default:turn:turn-1');
   });
 
   it('fails without storing when duplicate detection cannot query the turn id', async () => {

@@ -1048,7 +1048,7 @@ class DKGMemoryProvider(MemoryProvider):
 
     def _flush_queued_writes(self) -> None:
         """Flush any writes queued during offline period. Only removes items that succeeded."""
-        queued = self._cache.get("queued_writes", [])
+        queued = list(self._cache.get("queued_writes", []))
         if not queued or self._offline:
             return
 

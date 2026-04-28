@@ -896,7 +896,7 @@ describe('OpenClaw bridge behavioral tests', () => {
       const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
       const result = await fetchLocalAgentIntegrations();
       const hermes = result.integrations.find((item) => item.id === 'hermes');
-      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:transport-[a-z0-9]+$/);
+      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:home-[a-z0-9]+:transport-[a-z0-9]+$/);
     } finally {
       globalThis.fetch = original;
     }

@@ -1250,7 +1250,8 @@ function buildHermesDefaultSessionId(
   ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('|');
   const segments = [
-    profile ? `profile-${sessionSegment(profile)}` : hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
+    profile ? `profile-${sessionSegment(profile)}` : null,
+    hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
     transportSource ? `transport-${stableSessionHash(transportSource)}` : null,
   ].filter((value): value is string => value != null);
   return segments.length

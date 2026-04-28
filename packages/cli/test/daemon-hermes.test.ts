@@ -402,6 +402,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(integration.runtime.status).toBe('ready');
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9444');
     expect(integration.transport.gatewayUrl).toBe('https://hermes.example.com');
+    expect(integration.transport.healthUrl).toBeUndefined();
   });
 
   it('refresh keeps Hermes degraded when health returns ok false with HTTP 200', async () => {

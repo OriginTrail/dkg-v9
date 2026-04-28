@@ -76,6 +76,16 @@ export class HermesDkgClient {
     });
   }
 
+  async getHermesIntegration(): Promise<{
+    integration?: Partial<HermesLocalAgentIntegrationPayload> & {
+      id?: string;
+      enabled?: boolean;
+      metadata?: Record<string, unknown>;
+    };
+  }> {
+    return this.get('/api/local-agent-integrations/hermes');
+  }
+
   async getHermesChannelHealth(): Promise<HermesChannelHealthResponse> {
     return this.get('/api/hermes-channel/health');
   }

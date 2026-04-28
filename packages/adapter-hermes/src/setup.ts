@@ -338,7 +338,7 @@ export async function runDisconnect(options: HermesCliOptions = {}): Promise<voi
   const plan = disconnectHermesProfile(setupOptions);
   printPlan('Hermes disconnect', plan);
   if (!plan.dryRun && plan.actions.some((action) => action.type !== 'skip')) {
-    await disconnectDaemonBestEffort(setupOptions.daemonUrl);
+    await disconnectDaemonBestEffort(setupOptions.daemonUrl, plan.state);
   }
 }
 
@@ -348,10 +348,11 @@ export async function runReconnect(options: HermesCliOptions = {}): Promise<void
 
 export async function runUninstall(options: HermesCliOptions = {}): Promise<void> {
   const setupOptions = toSetupOptions(options);
+  const uninstallState = readSetupState(resolveHermesProfile(setupOptions));
   const plan = uninstallHermesProfile(setupOptions);
   printPlan('Hermes uninstall', plan);
-  if (!plan.dryRun) {
-    await disconnectDaemonBestEffort(setupOptions.daemonUrl);
+  if (!plan.dryRun && uninstallState) {
+    await disconnectDaemonBestEffort(setupOptions.daemonUrl, uninstallState);
   }
 }
 
@@ -465,7 +466,10 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
   }
 }
 
-async function disconnectDaemonBestEffort(daemonUrl: string | undefined): Promise<void> {
+async function disconnectDaemonBestEffort(
+  daemonUrl: string | undefined,
+  setupState: HermesSetupState,
+): Promise<void> {
   const apiToken = loadDkgAuthToken();
   const client = new HermesDkgClient({
     baseUrl: daemonUrl,
@@ -473,10 +477,24 @@ async function disconnectDaemonBestEffort(daemonUrl: string | undefined): Promis
     timeoutMs: 3_000,
   });
   try {
+    const current = await client.getHermesIntegration();
+    if (!daemonHermesIntegrationMatchesProfile(current.integration, setupState)) {
+      console.warn('Hermes local-agent registry disconnect skipped: daemon Hermes integration belongs to a different profile');
+      return;
+    }
     await client.disconnectHermesIntegration();
   } catch (err: any) {
     console.warn(`Hermes local-agent registry disconnect skipped: ${redact(err?.message ?? String(err), apiToken)}`);
   }
+}
+
+function daemonHermesIntegrationMatchesProfile(integration: unknown, setupState: HermesSetupState): boolean {
+  if (!isPlainRecord(integration)) return false;
+  const metadata = isPlainRecord(integration.metadata) ? integration.metadata : undefined;
+  const hermesHome = trimmed(metadata?.hermesHome);
+  if (!hermesHome) return false;
+  return (trimmed(metadata?.profileName) ?? undefined) === (setupState.profile.profileName ?? undefined)
+    && normalizePathForCompare(hermesHome) === normalizePathForCompare(setupState.profile.hermesHome);
 }
 
 function normalizeBridgeConfig(
@@ -783,6 +801,15 @@ function isOwnedPluginDir(path: string): boolean {
 
 function expandHome(path: string): string {
   return path.replace(/^~(?=$|[\\/])/, homedir());
+}
+
+function normalizePathForCompare(path: string): string {
+  const normalized = resolve(expandHome(path)).split('\\').join('/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function trimmed(value: unknown): string | undefined {

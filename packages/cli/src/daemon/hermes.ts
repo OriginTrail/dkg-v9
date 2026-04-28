@@ -132,11 +132,13 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
     : undefined;
   const bridgeLooksLikeGateway =
     explicitBridgeBase?.endsWith('/api/hermes-channel') ?? false;
-  const standaloneBridgeBase = explicitBridgeBase
-    ? bridgeLooksLikeGateway
-      ? undefined
-      : explicitBridgeBase
-    : !explicitGatewayBase
+  const explicitBridgeIsLoopback = isHermesLoopbackUrl(explicitBridgeBase);
+  const standaloneBridgeUsesExplicitBase = !!explicitBridgeBase
+    && explicitBridgeIsLoopback
+    && !bridgeLooksLikeGateway;
+  const standaloneBridgeBase = standaloneBridgeUsesExplicitBase && explicitBridgeBase
+    ? explicitBridgeBase
+    : !explicitGatewayBase && !bridgeLooksLikeGateway
       ? DEFAULT_HERMES_BRIDGE_URL
       : undefined;
   const gatewayBase =
@@ -166,7 +168,9 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
       name: 'bridge',
       inboundUrl: `${standaloneBridgeBase}/send`,
       streamUrl: `${standaloneBridgeBase}/stream`,
-      healthUrl: explicitHealthUrl && !explicitHealthIsGateway
+      healthUrl: explicitHealthUrl
+        && !explicitHealthIsGateway
+        && (standaloneBridgeUsesExplicitBase || !explicitBridgeBase)
         ? explicitHealthUrl
         : `${standaloneBridgeBase}/health`,
     });

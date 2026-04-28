@@ -544,7 +544,15 @@ describe('Hermes profile setup helpers', () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init: init ?? {} });
-      return new Response(JSON.stringify({ ok: true }), {
+      const body = init?.method === 'GET'
+        ? {
+            integration: {
+              id: 'hermes',
+              metadata: { hermesHome },
+            },
+          }
+        : { ok: true };
+      return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -571,6 +579,43 @@ describe('Hermes profile setup helpers', () => {
       expect(body.enabled).toBe(false);
       expect(body.runtime.status).toBe('disconnected');
     }
+  });
+
+  it('does not disable a daemon registry entry owned by a different Hermes profile', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-a-'));
+    const otherHermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-b-'));
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({
+        integration: {
+          id: 'hermes',
+          enabled: true,
+          metadata: {
+            profileName: 'profile-b',
+            hermesHome: otherHermesHome,
+          },
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    setupHermesProfile({
+      hermesHome,
+      profileName: 'profile-a',
+      daemonUrl: 'http://127.0.0.1:9333',
+    });
+
+    await runDisconnect({ hermesHome, profile: 'profile-a' });
+    await runUninstall({ hermesHome, profile: 'profile-a' });
+
+    expect(calls.filter((call) => call.init.method === 'GET')).toHaveLength(2);
+    expect(calls.filter((call) => call.init.method === 'PUT')).toHaveLength(0);
   });
 
   it('does not create adapter setup state when disconnecting an unconfigured profile', async () => {

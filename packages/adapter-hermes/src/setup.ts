@@ -154,6 +154,10 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
     agent_name: plan.state.agentName ?? '',
     memory_mode: plan.profile.memoryMode,
     publish_guard: plan.state.publishGuard,
+    publish_tool: plan.state.publishGuard.defaultToolExposure,
+    allow_direct_publish: plan.state.publishGuard.allowDirectPublish === true,
+    require_explicit_approval: plan.state.publishGuard.requireExplicitApproval !== false,
+    require_wallet_check: plan.state.publishGuard.requireWalletCheck !== false,
   });
 
   installHermesProviderPlugin(plan.profile);
@@ -199,8 +203,17 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
     errors.push('DKG Hermes setup state is not owned by this adapter');
   }
   const dkgConfigPath = join(profile.hermesHome, 'dkg.json');
-  if (existsSync(dkgConfigPath) && !isOwnedJson(dkgConfigPath)) {
-    warnings.push(`Existing dkg.json is not ownership-marked: ${dkgConfigPath}`);
+  if (!existsSync(dkgConfigPath)) {
+    errors.push(`DKG Hermes config not found at ${dkgConfigPath}`);
+  } else if (!isOwnedJson(dkgConfigPath)) {
+    errors.push(`DKG Hermes config is not ownership-marked: ${dkgConfigPath}`);
+  }
+  if (effectiveMemoryMode === 'provider') {
+    if (!existsSync(profile.configPath)) {
+      errors.push(`Hermes provider mode requires config.yaml with managed memory.provider: dkg at ${profile.configPath}`);
+    } else if (!hasManagedDkgProvider(readFileSync(profile.configPath, 'utf-8'))) {
+      errors.push(`Hermes provider mode requires an adapter-managed memory.provider: dkg block in ${profile.configPath}`);
+    }
   }
   const pluginDir = join(profile.hermesHome, 'plugins', 'dkg');
   if (state && !isOwnedPluginDir(pluginDir)) {
@@ -497,6 +510,28 @@ function findConfiguredMemoryProvider(raw: string): string | null {
     if (inline) return inline[1];
   }
   return null;
+}
+
+function hasManagedDkgProvider(raw: string): boolean {
+  const lines = raw.split(/\r?\n/);
+  let inManagedBlock = false;
+  for (const line of lines) {
+    if (line.includes(CONFIG_BEGIN)) {
+      inManagedBlock = true;
+      continue;
+    }
+    if (line.includes(CONFIG_END)) {
+      inManagedBlock = false;
+      continue;
+    }
+    if (inManagedBlock) {
+      const match = line.match(/^\s*provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      if (match?.[1] === 'dkg') return true;
+      const inline = line.match(/^\s*memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      if (inline?.[1] === 'dkg') return true;
+    }
+  }
+  return false;
 }
 
 function ensureManagedProviderBlock(configPath: string): void {

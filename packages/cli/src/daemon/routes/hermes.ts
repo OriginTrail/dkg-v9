@@ -10,12 +10,14 @@ import {
 } from '../http-utils.js';
 import { daemonState } from '../state.js';
 import { hasConfiguredLocalAgentChat } from '../local-agents.js';
+import type { OpenClawAttachmentRef } from '../openclaw.js';
 import {
   HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
   buildHermesChannelHeaders,
   ensureHermesBridgeAvailable,
   getHermesChannelTargets,
   hasPersistedHermesTurn,
+  hermesPersistTurnKey,
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   pipeHermesStream,
@@ -23,6 +25,13 @@ import {
   shouldTryNextHermesTarget,
   verifyHermesAttachmentRefsProvenance,
 } from '../hermes.js';
+
+type HermesPersistRouteResult = {
+  statusCode: number;
+  body: Record<string, unknown>;
+};
+
+const hermesPersistTurnInflight = new Map<string, Promise<HermesPersistRouteResult>>();
 
 export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -282,32 +291,12 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
 
-    try {
-      if (await hasPersistedHermesTurn(memoryManager, payload.sessionId, payload.turnId)) {
-        return jsonResponse(res, 200, {
-          ok: true,
-          duplicate: true,
-          turnId: payload.turnId,
-        });
-      }
-
-      await memoryManager.storeChatExchange(
-        payload.sessionId,
-        payload.userMessage,
-        payload.assistantReply,
-        payload.toolCalls,
-        {
-          turnId: payload.turnId || randomUUID(),
-          attachmentRefs: verifiedAttachmentRefs,
-          persistenceState: payload.persistenceState,
-          failureReason: payload.failureReason,
-        },
-      );
-      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
-      return jsonResponse(res, 200, { ok: true, turnId: payload.turnId });
-    } catch (err: any) {
-      return jsonResponse(res, 500, { error: err.message });
-    }
+    const result = await persistHermesTurnWithDuplicateLock(
+      ctx,
+      payload,
+      verifiedAttachmentRefs,
+    );
+    return jsonResponse(res, result.statusCode, result.body);
   }
 
   if (req.method === 'GET' && path === '/api/hermes-channel/health') {
@@ -322,6 +311,71 @@ function ensureHermesIntegrationEnabled(config: RequestContext['config'], res: R
     code: 'INTEGRATION_DISABLED',
   });
   return false;
+}
+
+async function persistHermesTurnWithDuplicateLock(
+  ctx: RequestContext,
+  payload: Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>,
+  verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
+): Promise<HermesPersistRouteResult> {
+  const key = hermesPersistTurnKey(payload.sessionId, payload.turnId);
+  const existing = hermesPersistTurnInflight.get(key);
+  if (existing) {
+    const result = await existing;
+    return result.statusCode === 200
+      ? {
+          statusCode: 200,
+          body: { ok: true, duplicate: true, turnId: payload.turnId },
+        }
+      : result;
+  }
+
+  const operation = persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
+  hermesPersistTurnInflight.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (hermesPersistTurnInflight.get(key) === operation) {
+      hermesPersistTurnInflight.delete(key);
+    }
+  }
+}
+
+async function persistHermesTurnUnlocked(
+  ctx: RequestContext,
+  payload: Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>,
+  verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
+): Promise<HermesPersistRouteResult> {
+  const { agent, memoryManager } = ctx;
+  try {
+    if (await hasPersistedHermesTurn(memoryManager, payload.sessionId, payload.turnId)) {
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          duplicate: true,
+          turnId: payload.turnId,
+        },
+      };
+    }
+
+    await memoryManager.storeChatExchange(
+      payload.sessionId,
+      payload.userMessage,
+      payload.assistantReply,
+      payload.toolCalls,
+      {
+        turnId: payload.turnId || randomUUID(),
+        attachmentRefs: verifiedAttachmentRefs,
+        persistenceState: payload.persistenceState,
+        failureReason: payload.failureReason,
+      },
+    );
+    await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+    return { statusCode: 200, body: { ok: true, turnId: payload.turnId } };
+  } catch (err: any) {
+    return { statusCode: 500, body: { error: err.message } };
+  }
 }
 
 async function importHermesAssistantReply(

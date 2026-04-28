@@ -60,6 +60,16 @@ function makeJsonResponse() {
   return res;
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeHermesRouteContext(
   payload: unknown,
   memoryManager: any,
@@ -509,6 +519,46 @@ describe('Hermes daemon routes', () => {
     expect(memoryManager.hasChatTurn).toHaveBeenCalledWith('hermes:default', 'turn-1');
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent persist-turn retries for the same turn id', async () => {
+    let stored = false;
+    const storeStarted = deferred();
+    const releaseStore = deferred();
+    const storeChatExchange = vi.fn(async () => {
+      storeStarted.resolve();
+      await releaseStore.promise;
+      stored = true;
+    });
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => stored),
+      storeChatExchange,
+    };
+    const payload = {
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      turnId: 'turn-1',
+    };
+    const first = makeHermesRouteContext(payload, memoryManager);
+    const second = makeHermesRouteContext(payload, memoryManager);
+    first.ctx.agent.importMemories = importMemories;
+    second.ctx.agent.importMemories = importMemories;
+
+    const firstRun = handleHermesRoutes(first.ctx);
+    await storeStarted.promise;
+    const secondRun = handleHermesRoutes(second.ctx);
+    await Promise.resolve();
+    expect(storeChatExchange).toHaveBeenCalledTimes(1);
+
+    releaseStore.resolve();
+    await Promise.all([firstRun, secondRun]);
+
+    expect(storeChatExchange).toHaveBeenCalledTimes(1);
+    expect(importMemories).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(first.res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(JSON.parse(second.res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
   });
 
   it('keeps persist-turn successful when Hermes extraction import fails', async () => {

@@ -431,6 +431,32 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '.dkg-adapter-hermes-owner.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
   });
 
+  it('writes provider-readable publish guard keys into dkg.json', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    setupHermesProfile({
+      hermesHome,
+      publishGuard: {
+        defaultToolExposure: 'direct',
+        allowDirectPublish: true,
+        requireExplicitApproval: false,
+        requireWalletCheck: false,
+      },
+    });
+
+    const config = JSON.parse(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8'));
+    expect(config.publish_guard).toEqual({
+      defaultToolExposure: 'direct',
+      allowDirectPublish: true,
+      requireExplicitApproval: false,
+      requireWalletCheck: false,
+    });
+    expect(config.publish_tool).toBe('direct');
+    expect(config.allow_direct_publish).toBe(true);
+    expect(config.require_explicit_approval).toBe(false);
+    expect(config.require_wallet_check).toBe(false);
+  });
+
   it('detects provider conflicts and preserves user config on disconnect/uninstall', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     writeFileSync(join(hermesHome, 'config.yaml'), 'memory:\n  provider: mem0\n');
@@ -476,6 +502,32 @@ describe('Hermes profile setup helpers', () => {
 
     expect(verify.ok).toBe(false);
     expect(verify.errors[0]).toContain('provider plugin is missing');
+  });
+
+  it('reports missing or unowned dkg.json during verify', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, profileName: 'dev' });
+    rmSync(join(hermesHome, 'dkg.json'), { force: true });
+
+    const missingVerify = verifyHermesProfile({ hermesHome, profileName: 'dev' });
+    expect(missingVerify.ok).toBe(false);
+    expect(missingVerify.errors.some((error) => error.includes('dkg.json'))).toBe(true);
+
+    writeFileSync(join(hermesHome, 'dkg.json'), JSON.stringify({ managedBy: 'someone-else' }));
+    const unownedVerify = verifyHermesProfile({ hermesHome, profileName: 'dev' });
+    expect(unownedVerify.ok).toBe(false);
+    expect(unownedVerify.errors.some((error) => error.includes('not ownership-marked'))).toBe(true);
+  });
+
+  it('reports provider-mode config drift when managed memory.provider is missing', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+    writeFileSync(join(hermesHome, 'config.yaml'), 'model: gpt-5\nmemory:\n  retrieval_k: 8\n');
+
+    const verify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    expect(verify.ok).toBe(false);
+    expect(verify.errors.some((error) => error.includes('managed memory.provider: dkg'))).toBe(true);
   });
 
   it('adds a managed provider line inside an existing Hermes memory config', () => {

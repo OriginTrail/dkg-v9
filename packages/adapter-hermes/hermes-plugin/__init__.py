@@ -54,6 +54,15 @@ def _load_config() -> dict:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             config.update({k: v for k, v in file_cfg.items()
                            if v is not None and v != ""})
+            publish_guard = file_cfg.get("publish_guard")
+            if isinstance(publish_guard, dict):
+                exposure = publish_guard.get("defaultToolExposure") or publish_guard.get("default_tool_exposure")
+                if exposure is not None:
+                    config["publish_tool"] = exposure
+                if publish_guard.get("allowDirectPublish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allowDirectPublish")
+                elif publish_guard.get("allow_direct_publish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allow_direct_publish")
         except Exception:
             pass
 

@@ -448,14 +448,26 @@ export class DkgNodePlugin {
         this.hookSurface = null;
         this.hookSurfaceApi = null;
       } else {
-        // Same api. Only retry INTERNAL hook installs that previously
-        // failed (e.g. gateway hadn't created the internal-hook map yet
-        // at first register()). Do NOT re-run typed installs on the same
-        // api — `api.on(...)` has no unsubscribe, so a rebuild would
-        // leave the old typed handlers bound and `before_prompt_build` /
-        // `agent_end` would fire twice per turn.
+        // Same api. Retry INTERNAL hook installs that previously failed
+        // (e.g. gateway hadn't created the internal-hook map yet at
+        // first register()). The "don't re-run typed installs on same
+        // api" rule applies only to PREVIOUSLY-SUCCESSFUL installs —
+        // `api.on(...)` has no unsubscribe, so re-running over a live
+        // typed handler would leave the old one bound and double-fire.
+        // BUT if a previous typed install RETURNED `installedVia: 'none'`
+        // (because `api.on` was undefined at first register()), there
+        // is no live handler to double-up; retrying when api.on has
+        // since become available is safe and is the only way to recover
+        // from a `setup-runtime → full` upgrade on the same api object
+        // where typed-hook surface flips from absent to present (T6).
         const internalNeedsRetry = (event: string) =>
           stats[`internal:${event}`]?.installedVia === 'none';
+        const typedNeedsRetry = (event: string) =>
+          stats[`typed:${event}`]?.installedVia === 'none' &&
+          typeof api.on === 'function';
+        const legacyNeedsRetry = (event: string) =>
+          stats[`legacy:${event}`]?.installedVia === 'none' &&
+          typeof api.registerHook === 'function';
         // Use the SAME wrapped-handler factories as the initial install
         // below so a late retry preserves the mode-independent slot
         // re-assert anchor. Without the wrapper, turn persistence would
@@ -466,21 +478,47 @@ export class DkgNodePlugin {
         if (internalNeedsRetry('message:sent')) {
           this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
         }
+        // T6 — Typed hook retries for setup-runtime → full upgrades on
+        // the SAME api object. Without these, `before_prompt_build` and
+        // `agent_end` would stay permanently uninstalled because the
+        // first register() found `api.on === undefined` and recorded
+        // `installedVia: 'none'`. The `installedVia: 'none'` precondition
+        // guarantees we're not double-binding a live handler.
+        if (typedNeedsRetry('before_prompt_build')) {
+          this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+        }
+        if (typedNeedsRetry('agent_end')) {
+          this.hookSurface.install('typed', 'agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
+        }
+        if (typedNeedsRetry('before_compaction')) {
+          this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
+        }
+        if (typedNeedsRetry('before_reset')) {
+          this.hookSurface.install('typed', 'before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+        }
+        // T7 — Legacy `session_end` retry. Same logic: only retry if the
+        // previous install recorded `installedVia: 'none'` (i.e. registerHook
+        // was unavailable at first register()). The destroyed-flag short-
+        // circuit (R21.1) prevents double-fires when the previous install
+        // succeeded.
+        if (legacyNeedsRetry('session_end')) {
+          this.hookSurface.install('legacy', 'session_end', () => this.stop());
+        }
         return;
       }
     }
 
     this.hookSurface = new HookSurface(api, api.logger);
     this.hookSurfaceApi = api;
-    // session_end (legacy hook) is registered every (re)build so it follows
-    // the api currently in effect. Without re-registering on api change,
-    // an old api instance would still be the only one that fires `stop()`,
-    // leaving the new api's gateway shutdown un-hooked.
-    try {
-      api.registerHook?.('session_end', () => this.stop(), { name: 'dkg-node-stop' });
-    } catch (err: any) {
-      api.logger.debug?.(`[dkg] session_end registration failed: ${err?.message ?? err}`);
-    }
+    // T7 — Route `session_end` through HookSurface instead of calling
+    // `api.registerHook` directly. `api.registerHook` has no unsubscribe
+    // primitive, so the prior direct-registration path accumulated
+    // handlers across `stop() → register()` cycles on the same api: one
+    // shutdown event would fire `stop()` once per accumulated handler.
+    // Routing through `HookSurface.install('legacy', ...)` gives the
+    // wrapper the soft-destroyed gate (R21.1) so old wrappers
+    // short-circuit after `stop()` has already torn the surface down.
+    this.hookSurface.install('legacy', 'session_end', () => this.stop());
 
     // W3 — auto-recall every turn via before_prompt_build typed hook
     this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));

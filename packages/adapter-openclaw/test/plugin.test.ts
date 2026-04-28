@@ -78,7 +78,9 @@ describe('DkgNodePlugin', () => {
 
     plugin.register(mockApi);
 
-    expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
+    // T7 — `session_end` is now routed through `HookSurface.install('legacy', ...)`
+    // which uses the canonical `dkg-${event}` naming convention.
+    expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-session_end' });
 
     const toolNames = registeredTools.map(t => t.name);
     // Existing active tools
@@ -2498,6 +2500,96 @@ describe('DkgNodePlugin', () => {
     const call = promptSpy.mock.calls[0][0];
     expect(call.title).toBe('DKG Memory');
     expect(call.body).toContain('memory_search');
+  });
+
+  it('T6 — same-api setup-runtime → full upgrade retries previously-failed typed installs', () => {
+    // Regression for T6: pre-fix, the same-api fast path in
+    // `installHooksIfNeeded` only retried INTERNAL installs whose
+    // previous `installedVia === 'none'`. If the gateway upgraded an
+    // existing registry in place (`api.on` becomes a function on the
+    // SAME api object after a setup-runtime → full transition), the
+    // typed installs that recorded `installedVia: 'none'` at first
+    // call stayed permanently uninstalled. W3 / W4a hooks would never
+    // wire up.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    // Mutable api object — `on` is undefined initially, becomes a
+    // function on the second register() call.
+    const onSpy = vi.fn();
+    const api: any = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'setup-runtime',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      // No `on` initially — typed installs will record 'none'.
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(api);
+    // Tick 1 — typed installs failed (no api.on). onSpy not called.
+    expect(onSpy).not.toHaveBeenCalled();
+    const stats1 = (plugin as any).hookSurface.getDispatchStats();
+    expect(stats1['typed:before_prompt_build']?.installedVia).toBe('none');
+    expect(stats1['typed:agent_end']?.installedVia).toBe('none');
+
+    // Tick 2 — same api object, but now `api.on` is available
+    // (gateway upgraded the registry in place). registrationMode also
+    // flipped to 'full'.
+    api.on = onSpy;
+    api.registrationMode = 'full';
+    plugin.register(api);
+    // Typed installs MUST have been retried this time.
+    const events = onSpy.mock.calls.map((c: any) => c[0]);
+    expect(events).toContain('before_prompt_build');
+    expect(events).toContain('agent_end');
+  });
+
+  it('T7 — session_end goes through HookSurface so stop() → register() does NOT accumulate handlers', async () => {
+    // Regression for T7: pre-fix, `session_end` was registered via
+    // direct `api.registerHook(...)` on every install. After
+    // `stop() → register()` cycles, handlers accumulated in the
+    // upstream registry (no unsubscribe primitive) and one shutdown
+    // event would call `stop()` once per accumulated handler.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const registerHookSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: registerHookSpy,
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(mockApi);
+    const sessionEndAfter1 = registerHookSpy.mock.calls.filter(
+      (c: any) => c[0] === 'session_end',
+    ).length;
+    expect(sessionEndAfter1).toBe(1);
+
+    // After stop() — the previously-registered session_end wrapper
+    // is still in the upstream registry (no real unsubscribe), but
+    // its destroyed-flag will short-circuit on fire (R21.1).
+    await plugin.stop();
+    plugin.register(mockApi);
+    const sessionEndAfter2 = registerHookSpy.mock.calls.filter(
+      (c: any) => c[0] === 'session_end',
+    ).length;
+    // Each register() call DOES make one new registerHook call (we
+    // can't avoid that without an unsubscribe primitive), but the
+    // OLD wrapper now short-circuits via its destroyed flag — so a
+    // single shutdown event won't call this.stop() twice. The
+    // important invariant: each register() makes exactly ONE new
+    // registration, and prior wrappers are no-ops post-destroy.
+    expect(sessionEndAfter2).toBe(2); // one per register, not unbounded
   });
 
   it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {

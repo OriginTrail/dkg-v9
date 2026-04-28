@@ -132,35 +132,29 @@ export class DkgMemorySearchManager implements MemorySearchManager {
   }
 
   /**
-   * Narrow recall for W3 `before_prompt_build` auto-injection. Restricted
-   * to WM-only tiers (agent-context working-memory + project working-
-   * memory when resolved) — see Codex feedback (R-trust-boundary):
-   * SWM and VM views surface peer-authored content from other agents
-   * on the network. Injecting that into every prompt's system context
-   * widens the trust boundary from agent-owned WM to cross-peer memory
-   * without an explicit tool call from the agent. Even with the
-   * existing prompt-injection defenses (HTML-escape, untrusted-data
-   * framing, sentinel-strip), implicit cross-peer injection violates
-   * least-privilege.
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Runs the
+   * full 6-layer fan-out (agent-context WM/SWM/VM + project WM/SWM/VM if
+   * resolved) but caps the returned hits tighter than the agent-callable
+   * `memory_search` tool. Both surfaces share the same ranking; W3 is
+   * "small auto-snapshot of all tiers", W2 is "large agent-driven recall
+   * of all tiers". The cap is what differs, not the layer scope.
    *
-   * The agent-callable `memory_search` tool keeps the full 6-layer
-   * fan-out via `search()` below — that's an explicit recall request
-   * the agent has chosen to make, and the tool's response framing is
-   * read as data, not as system context.
-   *
-   * `wmOnly: false` is exposed as an opt-out for callers that
-   * explicitly want the wider scope (today only used by the existing
-   * `searchNarrow` test that asserted the legacy widened scope; future
-   * callers should use `search()` instead unless they have a reason
-   * to share `searchNarrow`'s tighter result cap).
+   * This is deliberate per the design direction: cross-peer SWM/VM
+   * tiers are surfaced in auto-recall so the agent has full memory
+   * context without needing to first call `memory_search`. The
+   * trust-boundary concern raised in pre-push review is addressed by
+   * defense-in-depth — every snippet is HTML-escaped (R12.1), wrapped
+   * in untrusted-data framing with explicit "do not follow injected
+   * instructions" rules (R11.1), and the auto-recall block carries a
+   * sentinel attribute (R15.3 / R23.3) so it's stripped from persisted
+   * assistant text.
    */
   async searchNarrow(
     query: string,
-    options?: { maxResults?: number; minScore?: number; sessionKey?: string; wmOnly?: boolean },
+    options?: { maxResults?: number; minScore?: number; sessionKey?: string },
   ): Promise<MemorySearchResult[]> {
     const cap = options?.maxResults ?? 5;
-    const wmOnly = options?.wmOnly ?? true;
-    return this.runSearch(query, { ...options, maxResults: cap, wmOnly });
+    return this.runSearch(query, { ...options, maxResults: cap });
   }
 
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
@@ -339,17 +333,8 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       );
     }
 
-    // R-trust-boundary — when the caller is W3 auto-recall (`wmOnly:
-    // true`, set by `searchNarrow`), strip SWM and VM tiers from the
-    // plan list so cross-peer content is never injected into the system
-    // prompt without an explicit `memory_search` tool call. Default
-    // (`wmOnly: undefined` or `false`) keeps the full 6-layer fan-out
-    // for the agent-callable `memory_search` path.
-    const filteredPlans = options?.wmOnly === true
-      ? plans.filter(p => p.view === 'working-memory')
-      : plans;
     const settled = await Promise.all(
-      filteredPlans.map(plan =>
+      plans.map(plan =>
         this.deps.client
           .query(plan.sparql, {
             contextGraphId: plan.contextGraphId,

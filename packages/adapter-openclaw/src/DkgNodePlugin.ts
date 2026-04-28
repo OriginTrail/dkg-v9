@@ -2041,14 +2041,15 @@ export class DkgNodePlugin {
               type: 'string',
               description:
                 "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
-                'agent eth address (matches the default the memory plugin uses for its own WM reads). ' +
-                'Prefer the injected `current_agent_address` from chat context when available. T48 — ' +
-                'Post-PR-264 must be a 0x-prefixed eth address (matched against `/^0x[0-9a-f]{40}$/i`); ' +
-                'optionally wrapped in the legacy `did:dkg:agent:` prefix which is stripped before use. ' +
-                'Legacy peerId / DID-wrapped peerId values are no longer accepted — WM is keyed by the ' +
-                'daemon\'s writer-side eth identity, and a peerId would silently route to an empty ' +
-                'namespace. Ignored for non-WM views. Supply an explicit value to read another local ' +
-                'agent\'s WM namespace in multi-agent deployments.',
+                'agent address (matches the default the memory plugin uses for its own WM reads). ' +
+                'Prefer the injected `current_agent_address` from chat context when available. T48/T53 — ' +
+                'Recommended shape is a 0x-prefixed eth address (the daemon writes WM under eth ' +
+                'whenever an `agent-keystore.json` identity exists, which is the standard deployment). ' +
+                'Optionally wrapped in the legacy `did:dkg:agent:` prefix, which is stripped before ' +
+                'forwarding. Bare libp2p peer IDs are also accepted as a self-alias for the default ' +
+                'agent on fresh/no-keystore/auth-disabled nodes (the daemon\'s writer-side falls back ' +
+                'to peerId when no defaultAgentAddress is set). Ignored for non-WM views. Supply an ' +
+                'explicit value to read another local agent\'s WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],
@@ -2753,27 +2754,20 @@ export class DkgNodePlugin {
         }
       }
       if (view === 'working-memory' && agentAddress !== undefined) {
-        // T48 — WM is now scoped by the daemon's eth-address writer
-        // identity (T31 / Bug A fix). `toAgentPeerId` strips the
-        // legacy `did:dkg:agent:` prefix; for raw eth (the canonical
-        // shape now) it's a pass-through. Validate the post-strip
-        // value against the eth shape and error on a non-eth pass.
-        // Pre-fix, a caller supplying `did:dkg:agent:12D3KooW…` (a
-        // libp2p peerId wrapped in the legacy DID) — or a bare
-        // peerId — silently routed to a non-existent WM namespace
-        // and returned an empty result. Reject up front so the
-        // operator/caller sees the actual error.
-        const stripped = toAgentPeerId(agentAddress);
-        if (!isValidEthAddressString(stripped)) {
-          return this.error(
-            `"view: working-memory" requires agent_address to be a 0x-prefixed eth address ` +
-            `(matched against /^0x[0-9a-f]{40}$/i). Got "${agentAddress}". WM is scoped by ` +
-            `the daemon's writer-side eth identity post-PR-264; legacy peerId-based ` +
-            `agent_address values are no longer accepted. Omit agent_address to default to ` +
-            `the node's active agent.`,
-          );
-        }
-        agentAddress = stripped;
+        // T48/T53 — `toAgentPeerId` strips the legacy `did:dkg:agent:`
+        // prefix (raw eth and raw peerId are pass-through). The daemon's
+        // own contract (`packages/agent/src/dkg-agent.ts:2647-2696`)
+        // accepts BOTH self-aliases for the default agent: when the
+        // keystore is present, writes go to `defaultAgentAddress` (eth)
+        // and reads must use eth; on fresh/auth-disabled/no-keystore
+        // nodes, the daemon's writer-side resolves to `peerId` and reads
+        // must use peerId. The adapter therefore can't unilaterally
+        // hard-reject non-eth values — that would break legitimate WM
+        // reads on no-keystore nodes that the daemon would otherwise
+        // serve. Strip the legacy DID wrapper, forward verbatim, and
+        // let the daemon's query engine route or empty-bind based on
+        // its own scope rules.
+        agentAddress = toAgentPeerId(agentAddress);
       }
       const result = await this.client.query(sparql, {
         contextGraphId,

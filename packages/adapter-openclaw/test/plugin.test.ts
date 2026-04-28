@@ -888,34 +888,35 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).not.toContain('did:dkg:agent:');
     });
 
-    it('dkg_query rejects non-eth WM agent_address with an actionable error (T48)', async () => {
-      // T48 — A `did:dkg:agent:<peerId>` (legacy peerId-wrapped DID)
-      // or a bare libp2p peerId pre-fix silently routed to a
-      // non-existent WM namespace and returned an empty result.
-      // Reject up front so callers see the actual mismatch instead
-      // of empty bindings.
+    it('dkg_query forwards peerId-form WM agent_address verbatim (T48/T53 — daemon accepts as self-alias on no-keystore nodes)', async () => {
+      // T53 supersedes T48's hard-rejection. The daemon's `/api/query`
+      // accepts peerId as a valid self-alias for the default agent
+      // when no keystore identity exists (writes go to peerId in that
+      // case via `defaultAgentAddress ?? peerId`). Adapter-side hard-
+      // rejection broke a legitimate read path. Forward the value
+      // verbatim and let the daemon's scope rules decide.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
-      const result = await byName.get('dkg_query')!.execute('tc', {
+      // DID-wrapped peerId: legacy DID prefix stripped, peerId forwarded.
+      await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
         agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
       });
-      expect(fetchMock).not.toHaveBeenCalled();
-      const text = result.content[0].text;
-      expect(text).toContain('working-memory');
-      expect(text).toContain('eth address');
-      expect(text).toContain('did:dkg:agent:12D3KooWExamplePeerId');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      let body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
 
-      // Bare peerId — same rejection.
-      const result2 = await byName.get('dkg_query')!.execute('tc', {
+      // Bare peerId: passes through unchanged.
+      await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
         agent_address: '12D3KooWExamplePeerId',
       });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result2.content[0].text).toContain('eth address');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      body = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
+      expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
     });
 
     it('dkg_query does NOT normalize agent_address on non-WM views (it only matters for WM routing)', async () => {
@@ -1010,10 +1011,11 @@ describe('DkgNodePlugin', () => {
       expect(query.description).toContain('current_agent_address');
       expect(query.description).toMatch(/retry alternate identity forms/i);
       expect(agentAddress.description).toContain('current_agent_address');
-      // T48/T49 — schema names eth-address shape and explicitly retires
-      // peerId / DID-wrapped peerId as accepted inputs for WM reads.
+      // T48/T49/T53 — schema names eth-address shape as the recommended
+      // form, accepts peerId as self-alias on no-keystore nodes,
+      // documents the legacy `did:dkg:agent:` strip.
       expect(agentAddress.description).toMatch(/0x-prefixed eth address/i);
-      expect(agentAddress.description).toMatch(/legacy peerId/i);
+      expect(agentAddress.description).toMatch(/peer ID/i);
       expect(agentAddress.description).toMatch(/did:dkg:agent:/);
     });
 

@@ -1020,6 +1020,135 @@ describe("ChatTurnWriter", () => {
     expect(dkw.loadWatermark("openclaw:ch:::sk")).toBeGreaterThanOrEqual(0);
   });
 
+  it("T10 — concurrent W4a + W4b for the same content: only ONE persist (W4a in-flight, W4b skips)", async () => {
+    // Regression for T10: pre-fix, cross-path stamps were post-success
+    // only. If W4a's `agent_end` and W4b's `message:sent` fired close
+    // together, BOTH paths peeked the opposite-path stamp BEFORE either
+    // had landed → both entered `persistOne` → daemon minted two distinct
+    // turn UUIDs (the in-process content turnId is intentionally not sent
+    // to the daemon). The fix adds a separate `crossPathInflight` map
+    // that's stamped pre-persist and cleared in `finally`, so the
+    // opposite path's `peekCrossPathInflight` catches the in-flight race.
+    let releasePersist: (() => void) | null = null;
+    let persistCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      persistCalls++;
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    // Prime W4b's pending-user queue with an inbound, but DO NOT fire the
+    // outbound yet — W4a fires first and starts hanging in persistOne.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hi", messageId: "in-1" },
+    } as any);
+    // W4a fires — enters persistOne which hangs.
+    writer.onAgentEnd(
+      { sessionId: "test", messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "there" },
+      ] },
+      { channelId: "tg", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1);
+    // While W4a is mid-persist, W4b's message:sent fires for the same
+    // content. Pre-fix, W4b would peek `crossPathStamps[w4aOrigin]`
+    // (post-success only — not yet stamped), miss, and call persistOne
+    // → 2nd daemon write. Post-fix, W4b peeks `crossPathInflight` and
+    // catches the race → skips.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "there", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1); // still just the W4a call
+    // Release W4a so the test cleans up.
+    releasePersist?.();
+    await flushMicrotasks();
+  });
+
+  it("T10 — concurrent W4b + W4a for the same content: only ONE persist (W4b in-flight, W4a skips without bumping watermark)", async () => {
+    // Inverse race for T10: W4b fires first and starts hanging in
+    // persistOne. W4a fires concurrently — its last-pair peek must catch
+    // the W4b-origin in-flight reservation and skip WITHOUT advancing
+    // the watermark (W4b's eventual success will raise `w4bSessionCounts`
+    // and prevent backfill on the next agent_end).
+    let releasePersist: (() => void) | null = null;
+    let persistCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      persistCalls++;
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "ping", messageId: "in-2" },
+    } as any);
+    // W4b fires — enters persistOne which hangs.
+    const w4bPromise = writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "pong", success: true, messageId: "out-2" },
+    } as any);
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1);
+    // W4a fires while W4b hangs. Last-pair peek catches w4bOrigin
+    // inflight reservation → skip without bumpWatermark.
+    writer.onAgentEnd(
+      { sessionId: "test", messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ] },
+      { channelId: "tg", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1); // still just the W4b call
+
+    // Watermark must NOT have advanced (W4b is still in-flight; if it
+    // ultimately fails and rolls back, W4a needs the unchanged
+    // watermark to retry the pair as backfill on the next call).
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+    expect(dkw.cachedWatermarks.get(sessionId) ?? -1).toBe(-1);
+
+    // Release W4b — success now stamps crossPathStamps and bumps
+    // w4bSessionCounts.
+    releasePersist?.();
+    await w4bPromise;
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1); // W4a still skipped (now via post-success stamp / w4bSessionCounts)
+  });
+
+  it("T10 — pre-persist inflight reservation is cleared on persistOne failure (no leaked block)", async () => {
+    // Regression for T10: the inflight reservation must be released in
+    // `finally` so a transient daemon failure doesn't leave a stale
+    // entry that blocks a legitimate later same-content turn outside
+    // the cross-path TTL.
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      throw new Error("hard daemon failure");
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "x", messageId: "in-3" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "y", success: true, messageId: "out-3" },
+    } as any);
+    // Wait long enough for the persistOne 250ms backoff retry.
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Inflight reservation must NOT be leaked.
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+    expect(dkw.peekCrossPathInflight(sessionId, dkw.w4bOriginKey("x", "y"))).toBe(false);
+  });
+
   it("R14.1 — W4a advances the watermark when the last-pair peek hits W4b's reservation", async () => {
     // R14.1 regression: when W4b has already persisted a turn via
     // `message:sent` and the cross-path peek tells W4a to skip it, the

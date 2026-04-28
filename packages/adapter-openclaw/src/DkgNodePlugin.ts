@@ -106,6 +106,12 @@ export class DkgNodePlugin {
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
+  // T11 — Idempotency flag for `registerMemoryPromptSection`. The first
+  // register() call under setup-runtime skips the install (`isFullMode`
+  // is false); on a same-api `setup-runtime → full` upgrade the retry
+  // branch must install it then. Without this flag a `full → full`
+  // re-register would double-install the prompt section.
+  private promptSectionInstalled = false;
   private chatTurnWriter: ChatTurnWriter | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -504,6 +510,13 @@ export class DkgNodePlugin {
         if (legacyNeedsRetry('session_end')) {
           this.hookSurface.install('legacy', 'session_end', () => this.stop());
         }
+        // T11 — Re-evaluate prompt-section install on same-api re-register.
+        // The first call under setup-runtime had `isFullMode === false` and
+        // skipped the install; if the api has since flipped to full mode
+        // (the same trigger as T6 typed-hook retries), install the guidance
+        // now. `tryInstallPromptSection` is idempotent via
+        // `promptSectionInstalled` so a `full → full` re-register is a no-op.
+        this.tryInstallPromptSection(api);
         return;
       }
     }
@@ -559,23 +572,37 @@ export class DkgNodePlugin {
     // later. Slot-ownership lost mid-session is a rarer state that the
     // tool's own runtime check already handles by returning "memory
     // unavailable" from `memory_search`.
+    this.tryInstallPromptSection(api);
+  }
+
+  /**
+   * T11 — Idempotent prompt-section install. Called from both the
+   * first-time `register()` path AND the same-api retry branch so a
+   * `setup-runtime → full` upgrade (where the first call had
+   * `isFullMode === false` and skipped the install) installs the
+   * "Prefer memory_search" guidance once the api flips to full mode.
+   * The `promptSectionInstalled` flag prevents a double-install on
+   * subsequent same-api re-registers.
+   */
+  private tryInstallPromptSection(api: OpenClawPluginApi): void {
+    if (this.promptSectionInstalled) return;
     const isFullMode = api.registrationMode === 'full' || api.registrationMode === undefined;
     const memoryEnabled = !!this.config.memory?.enabled;
     const registerPromptSection = (api as any).registerMemoryPromptSection as
       | ((section: { title: string; body: string }) => void)
       | undefined;
-    if (isFullMode && memoryEnabled && typeof registerPromptSection === 'function') {
-      try {
-        registerPromptSection({
-          title: 'DKG Memory',
-          body:
-            'Prefer `memory_search` for free-text recall across your DKG memory ' +
-            '(fan-outs WM/SWM/VM, trust-weighted, deduped). Use `dkg_query` only ' +
-            'when you need precise SPARQL control over a known graph pattern.',
-        });
-      } catch (err: any) {
-        api.logger.debug?.(`[dkg] registerMemoryPromptSection failed: ${err?.message ?? err}`);
-      }
+    if (!isFullMode || !memoryEnabled || typeof registerPromptSection !== 'function') return;
+    try {
+      registerPromptSection({
+        title: 'DKG Memory',
+        body:
+          'Prefer `memory_search` for free-text recall across your DKG memory ' +
+          '(fan-outs WM/SWM/VM, trust-weighted, deduped). Use `dkg_query` only ' +
+          'when you need precise SPARQL control over a known graph pattern.',
+      });
+      this.promptSectionInstalled = true;
+    } catch (err: any) {
+      api.logger.debug?.(`[dkg] registerMemoryPromptSection failed: ${err?.message ?? err}`);
     }
   }
 

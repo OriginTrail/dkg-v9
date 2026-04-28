@@ -153,6 +153,19 @@ export class ChatTurnWriter {
   // lesser evil.
   private crossPathStamps: Map<string, number> = new Map();
   private static readonly CROSS_PATH_TTL_MS = 5_000;
+  // T10 — Cross-path IN-FLIGHT reservations. Distinct from
+  // `crossPathStamps` (post-success) because the opposite path needs
+  // to skip during the window BETWEEN persistOne entry and the
+  // post-success stamp landing — without this, two paths racing on
+  // the same content can both enter `persistOne` and the daemon
+  // mints two distinct turn records (it does NOT dedup on our
+  // in-process content turnId; see `persistOne` doc comment).
+  // Stamped pre-persist, cleared in `finally` (success OR failure)
+  // so a failed path doesn't leak a permanent reservation.
+  // Defensive 60s timestamp eviction backstops a missed `finally`
+  // (e.g. an unhandled throw outside the wrapped try/catch).
+  private crossPathInflight: Map<string, number> = new Map();
+  private static readonly CROSS_PATH_INFLIGHT_TTL_MS = 60_000;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -276,8 +289,28 @@ export class ChatTurnWriter {
               this.bumpWatermark(sessionId, pairIndex);
               continue;
             }
+            // T10 — Cross-path in-flight check. If W4b is mid-persist
+            // for this same pair (between persistOne entry and the
+            // post-success stamp landing), skip WITHOUT advancing the
+            // watermark. If W4b ultimately succeeds, the bumped
+            // `w4bSessionCount` raises `savedUpTo` on the next
+            // `agent_end` so this pair is excluded from `computeDelta`.
+            // If W4b fails, it restores the user message to the queue
+            // and a future outbound re-pairs; the unchanged watermark
+            // means the next `agent_end` will re-yield this pair as
+            // backfill (correct retry behavior).
+            if (this.peekCrossPathInflight(sessionId, w4bOrigin)) {
+              continue;
+            }
           }
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
+          // T10 — Reserve cross-path in-flight on W4a-origin BEFORE
+          // persistOne so a concurrent W4b fire's `peekCrossPathInflight`
+          // catches the race. Only the LAST pair can plausibly race
+          // with W4b (earlier pairs are historical backfill). Cleared
+          // in `finally` so a failure doesn't leak the reservation.
+          const w4aInflightKey = i === lastIdx ? this.w4aOriginKey(user, assistant) : null;
+          if (w4aInflightKey) this.markCrossPathInflight(sessionId, w4aInflightKey);
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
             // Stamp W4a-origin so a same-cycle W4b fire dedups. Uses the
@@ -290,8 +323,10 @@ export class ChatTurnWriter {
             // now a non-mutating peek (R13.1), so W4a never reserved it.
             this.releaseTurnIdReservation(sessionId, turnId);
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
+            if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
             return; // leave watermark at last successful pair
           }
+          if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
         }
       });
       // T4 — AWAIT the persist job so the per-session chain in
@@ -515,6 +550,11 @@ export class ChatTurnWriter {
         //   later won't collide with the previous turn's stamp.
         const w4aOrigin = this.w4aOriginKey(userText, assistantText);
         if (this.peekCrossPathStamp(sessionId, w4aOrigin)) return; // W4a already wrote
+        // T10 — Cross-path in-flight check. If W4a is mid-persist for
+        // this pair, skip; W4a will own the persist. We've already
+        // consumed the pending user above (line 508), which is correct
+        // because W4a IS persisting it.
+        if (this.peekCrossPathInflight(sessionId, w4aOrigin)) return;
         // R15.1 — In-flight guard with per-turn discriminator.
         //   The cross-path stamp (`w4bOrigin`, content-only) is held for
         //   3s post-success so W4a's later last-pair peek can find it.
@@ -530,6 +570,12 @@ export class ChatTurnWriter {
         const w4bInflight = this.w4bInflightKey(ev, userText, assistantText);
         if (this.markTurnIdSeen(sessionId, w4bInflight)) return; // concurrent W4b dispatch
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
+        // T10 — Reserve cross-path in-flight on W4b-origin BEFORE
+        // persistOne so a concurrent W4a `agent_end` fire's
+        // `peekCrossPathInflight` catches the race and skips. Cleared
+        // in `finally` below regardless of outcome.
+        const w4bOriginKey = this.w4bOriginKey(userText, assistantText);
+        this.markCrossPathInflight(sessionId, w4bOriginKey);
         // Route through the same tracked-job wrapper as onAgentEnd so the
         // reset gate sees this in-flight write and `Promise.allSettled`s
         // it. Without tracking, a `message:sent` write mid-compaction
@@ -582,6 +628,13 @@ export class ChatTurnWriter {
             // anymore; only stamping happens post-success above.
             this.releaseTurnIdReservation(sessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
+          } finally {
+            // T10 — Always release the cross-path in-flight reservation,
+            // success OR failure. On success the post-success stamp at
+            // `crossPathStamps` (markCrossPathStamp above) covers the
+            // 5s post-success window; on failure the reservation must
+            // not leak to block legitimate later same-content turns.
+            this.unmarkCrossPathInflight(sessionId, w4bOriginKey);
           }
         }).catch(() => {});
       }
@@ -675,6 +728,44 @@ export class ChatTurnWriter {
     return true;
   }
 
+  /**
+   * T10 — Mark a cross-path in-flight reservation pre-persist. The
+   * opposite path's `peekCrossPathInflight` then catches the active
+   * race and skips its own persist. Always paired with `unmarkCrossPathInflight`
+   * in a `finally` block so failures don't leak the reservation.
+   */
+  private markCrossPathInflight(sessionId: string, key: string): void {
+    const compositeKey = this.dedupKey(sessionId, key);
+    const now = Date.now();
+    const ttl = ChatTurnWriter.CROSS_PATH_INFLIGHT_TTL_MS;
+    for (const [k, ts] of this.crossPathInflight) {
+      if (now - ts > ttl) this.crossPathInflight.delete(k);
+    }
+    this.crossPathInflight.set(compositeKey, now);
+  }
+
+  /** T10 — Release a cross-path in-flight reservation. */
+  private unmarkCrossPathInflight(sessionId: string, key: string): void {
+    this.crossPathInflight.delete(this.dedupKey(sessionId, key));
+  }
+
+  /**
+   * T10 — Non-mutating presence check on the in-flight map. Returns
+   * `true` if the opposite path is currently mid-persist for this
+   * content. Defensive timestamp eviction guards against leaked
+   * entries from a missed `finally`.
+   */
+  private peekCrossPathInflight(sessionId: string, key: string): boolean {
+    const compositeKey = this.dedupKey(sessionId, key);
+    const ts = this.crossPathInflight.get(compositeKey);
+    if (ts === undefined) return false;
+    if (Date.now() - ts > ChatTurnWriter.CROSS_PATH_INFLIGHT_TTL_MS) {
+      this.crossPathInflight.delete(compositeKey);
+      return false;
+    }
+    return true;
+  }
+
   /** Drop all dedup reservations belonging to one session. */
   private clearSessionTurnIds(sessionId: string): void {
     const prefix = `${sessionId}::`;
@@ -684,6 +775,10 @@ export class ChatTurnWriter {
     // T5 — also clear the short-TTL cross-path stamps for this session.
     for (const k of this.crossPathStamps.keys()) {
       if (k.startsWith(prefix)) this.crossPathStamps.delete(k);
+    }
+    // T10 — clear in-flight cross-path reservations for this session.
+    for (const k of this.crossPathInflight.keys()) {
+      if (k.startsWith(prefix)) this.crossPathInflight.delete(k);
     }
   }
 

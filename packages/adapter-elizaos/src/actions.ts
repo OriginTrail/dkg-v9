@@ -561,7 +561,7 @@ function buildHeadlessUserStubQuads(
   userMsgUri: string,
   _sessionUri: string,
   ts: string,
-  turnKey: string,
+  turnIdLiteral: string,
 ): ChatQuad[] {
   // PR #229 bot review round 13 (r13-2): deliberately NO
   // `schema:isPartOf` edge. The previous stub declared itself a
@@ -580,15 +580,45 @@ function buildHeadlessUserStubQuads(
   // also keep the explicit `dkg:headlessUserMessage "true"` marker
   // so any code path that does discover the stub via a turnId join
   // can filter it out.
+  //
+  // PR #229 bot review (r31-3 — actions.ts:584): the previous
+  // revision typed the stub as `schema:Message`. That prevented
+  // session enumeration (we already dropped `isPartOf`), but
+  // `ChatMemoryManager.getStats()` runs an UNCONDITIONAL `?s
+  // rdf:type schema:Message` count to compute `messageCount`,
+  // which is also fed into `chatRelatedTriples` for the
+  // `knowledgeTriples = totalTriples - chatTriples` calculation.
+  // Every stub therefore inflated `messageCount` by 1 AND
+  // depressed `knowledgeTriples` by the stub's own quad count —
+  // every headless turn double-counted in the message stat and
+  // mis-attributed quads to "chat" instead of "knowledge".
+  //
+  // Fix: drop the `schema:Message` type entirely and replace it
+  // with a dedicated `dkg:HeadlessUserStub` type. The `dkg:hasUserMessage`
+  // join in the reader contract only needs the URI to exist as a
+  // subject — it does NOT require a specific RDF type — so the
+  // type swap is invisible to ChatMemoryManager.getSessionGraphDelta()
+  // / .getSession(), but `getStats()` no longer counts the stub
+  // as a `schema:Message`. The retained `dkg:headlessUserMessage
+  // "true"` marker plus the new type give downstream readers two
+  // independent ways to filter stubs out.
   return [
-    { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
+    { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${DKG_ONT_NS}HeadlessUserStub`, graph: '' },
     // Distinct system actor so UIs that DO discover the stub via
     // some other path don't render a blank user bubble.
     { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: `${DKG_ONT_NS}agent:system`, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     // Explicit empty text — readers that concatenate "user: …" skip it.
     { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(''), graph: '' },
-    { subject: userMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
+    // r31-3: the literal here is the DISTINCT headless turn id
+    // (`headless:${turnKey}`), NOT the canonical `turnKey`. See the
+    // r31-3 block in `buildHeadlessAssistantTurnEnvelopeQuads` for
+    // the full rationale — keeping all three subjects (stub,
+    // assistant msg, envelope) in the headless turn on the SAME
+    // distinct id keeps `?msg dkg:turnId ?t . ?turn dkg:turnId ?t`
+    // joins coherent without ever colliding with the canonical
+    // user-first turn that may arrive on the same `turnKey` later.
+    { subject: userMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnIdLiteral), graph: '' },
     { subject: userMsgUri, predicate: `${DKG_ONT_NS}headlessUserMessage`, object: rdfString('true'), graph: '' },
   ];
 }
@@ -608,7 +638,7 @@ function buildHeadlessUserStubQuads(
 function buildHeadlessAssistantTurnEnvelopeQuads(
   turnUri: string,
   sessionUri: string,
-  turnKey: string,
+  turnIdLiteral: string,
   ts: string,
   userMsgUri: string,
   assistantMsgUri: string,
@@ -616,10 +646,40 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
   userId: string,
   roomId: string,
 ): ChatQuad[] {
+  // PR #229 bot review (r31-3 — actions.ts:622): the previous
+  // revision wrote `dkg:turnId = "${turnKey}"` here — i.e. the
+  // canonical turn key with no prefix. Combined with the
+  // `headless-turn:${turnKey}` URI shape that already kept the
+  // SUBJECT distinct, that meant a session in which a headless
+  // reply was persisted FIRST and the matching user-first turn
+  // was replayed LATER ended up with TWO `dkg:ChatTurn` subjects
+  // carrying the SAME `dkg:turnId` literal:
+  //
+  //   <headless-turn:K> rdf:type ChatTurn ; dkg:turnId "K"
+  //   <turn:K>          rdf:type ChatTurn ; dkg:turnId "K"
+  //
+  // `ChatMemoryManager.getSessionGraphDelta()` resolves the
+  // current turn with a `LIMIT 1` SPARQL on
+  // `?turn dkg:turnId "K"`, so reads bound nondeterministically
+  // to one or the other. Turn counts and watermarks drifted
+  // across replays.
+  //
+  // Fix: the headless envelope writes a DISTINCT
+  // `dkg:turnId = "headless:${turnKey}"` literal. The canonical
+  // `${turnKey}` literal is reserved for the user-first turn (if
+  // it ever arrives) and the `LIMIT 1` lookup-by-id is now
+  // deterministic — `?turn dkg:turnId "K"` matches at most ONE
+  // subject. Callers that want to address the headless envelope
+  // by id pass `headless:K`; callers using the existing
+  // `getSessionGraphDelta(sessionId, "K", …)` always get the
+  // canonical user-first turn whenever it exists. Reader URI
+  // resolution still works for both shapes (the resolver joins on
+  // `dkg:turnId` literal — no hard-coded URI prefix) — only the
+  // *id* changed, not the discovery contract.
   return [
     { subject: turnUri, predicate: RDF_TYPE_IRI, object: `${DKG_ONT_NS}ChatTurn`, graph: '' },
     { subject: turnUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
-    { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnIdLiteral), graph: '' },
     { subject: turnUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     // Both edges present — reader contract (hasUserMessage AND
     // hasAssistantMessage) is satisfied (PR #229 round 8).
@@ -1095,13 +1155,28 @@ export async function persistChatTurnImpl(
       // many times the assistant Memory id rotated.
       const userStubUri = `${CHAT_NS}msg:user-stub:${turnKey}`;
       const headlessAssistantMsgUri = `${CHAT_NS}msg:agent-headless:${turnKey}`;
+      // PR #229 bot review (r31-3 — actions.ts:622): the dkg:turnId
+      // LITERAL stamped on every quad in the headless turn's
+      // subject set is the DISTINCT `headless:${turnKey}` form,
+      // NOT the canonical `${turnKey}`. Without this distinction
+      // the LIMIT 1 SPARQL `?turn dkg:turnId "K"` lookup in
+      // `ChatMemoryManager.getSessionGraphDelta()` would bind
+      // nondeterministically to either the headless envelope or a
+      // later-arriving canonical user-first turn (both would
+      // carry the same literal). All three subjects in the
+      // headless turn (stub user message, assistant message,
+      // turn envelope) share this distinct literal so
+      // `?msg dkg:turnId ?t . ?turn dkg:turnId ?t` joins remain
+      // coherent within the headless turn while staying disjoint
+      // from any canonical turn for the same `turnKey`.
+      const headlessTurnIdLiteral = `headless:${turnKey}`;
       const assistantQuads = buildAssistantMessageQuads(
         headlessAssistantMsgUri,
         userStubUri,
         sessionUri,
         assistantTs,
         assistantText,
-        turnKey,
+        headlessTurnIdLiteral,
       ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
       // PR #229 r3131820483: peek-only (no mutation). The cache is
       // promoted to "emitted" AFTER assertion.write() succeeds; if
@@ -1126,7 +1201,7 @@ export async function persistChatTurnImpl(
         ...(didIncludeSessionRoot
           ? buildSessionEntityQuads(sessionUri, sessionId)
           : []),
-        ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, turnKey),
+        ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, headlessTurnIdLiteral),
         ...assistantQuads,
         ...buildHeadlessAssistantTurnEnvelopeQuads(
           // r21-1: headless envelope MUST land on the dedicated
@@ -1134,7 +1209,9 @@ export async function persistChatTurnImpl(
           // canonical `turn:` URI used by the user-first path.
           headlessTurnUri,
           sessionUri,
-          turnKey,
+          // r31-3: distinct `headless:${turnKey}` literal — see
+          // the rationale block in `buildHeadlessAssistantTurnEnvelopeQuads`.
+          headlessTurnIdLiteral,
           ts,
           userStubUri,
           headlessAssistantMsgUri,

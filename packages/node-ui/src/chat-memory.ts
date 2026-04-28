@@ -1032,28 +1032,64 @@ export class ChatMemoryManager {
     // contract still uses `${CHAT_NS}turn:` for the cache-friendly
     // delta path (CONSTRUCT subjectSet below), but the lookup itself
     // is now URI-agnostic.
-    const currentTurnIdSparqlLiteral = JSON.stringify(turnId);
-    const currentTurnResult = await this.tools.query(
-      `SELECT ?turn ?ts WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${currentTurnIdSparqlLiteral} .
-        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
-      } LIMIT 1`,
-      this.wmReadOpts(),
-    );
-    const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const resolvedTurnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
-    const turnUri = resolvedTurnUri && isSafeIri(resolvedTurnUri)
-      ? resolvedTurnUri
-      : `${CHAT_NS}turn:${turnId}`;
-    // The literal turn id from the WM equals the input `turnId` when
-    // we found a binding (we joined on it explicitly); otherwise we
-    // fall through to the same `turn_not_found` branch the old code
-    // produced. Preserving the variable shape keeps the downstream
-    // code path identical.
+    // PR #229 bot review (r31-3 — adapter-elizaos/src/actions.ts:622).
+    // The writer now stamps a DISTINCT `dkg:turnId = "headless:${turnKey}"`
+    // literal on headless envelopes (the canonical user-first turn
+    // continues to use the bare `turnKey`). That keeps the
+    // `LIMIT 1` lookup-by-id deterministic when both turns exist
+    // for the same `turnKey`, but it changes the call contract
+    // for callers that previously used the bare `turnKey` to
+    // address either kind: now `?turn dkg:turnId "K"` only matches
+    // the canonical turn.
+    //
+    // To preserve the old "find whatever exists for this id"
+    // behaviour for callers that don't know whether a canonical
+    // user-first turn ever arrived (the common case for an
+    // assistant-only `onAssistantReply` flow), we fall back to the
+    // `headless:` prefixed literal if the bare lookup returns no
+    // binding. The fallback is order-preserving: canonical turns
+    // ALWAYS win when both exist (because we try the bare literal
+    // first), so the disambiguation the writer change introduced
+    // is still in force.
+    const tryResolveTurn = async (literal: string): Promise<{
+      uri: string;
+      ts: string;
+    } | null> => {
+      const sparqlLit = JSON.stringify(literal);
+      const result = await this.tools.query(
+        `SELECT ?turn ?ts WHERE {
+          ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?turn <${DKG_ONT}turnId> ${sparqlLit} .
+          OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
+        } LIMIT 1`,
+        this.wmReadOpts(),
+      );
+      const row = (result.bindings ?? [])[0];
+      const uri = String(row?.turn ?? '').replace(/[<>]/g, '');
+      if (!uri || !isSafeIri(uri)) return null;
+      return { uri, ts: stripRdfLiteral(row?.ts ?? '').trim() };
+    };
+    // Try the bare literal first (canonical user-first turn).
+    let resolution = await tryResolveTurn(turnId);
+    // Fallback: try the `headless:` prefixed literal so callers
+    // that pass the original `userMessageId` (without knowing
+    // whether the canonical user-turn ever made it to disk) still
+    // discover the headless envelope. Skip the fallback when the
+    // input already starts with `headless:` to avoid the redundant
+    // `headless:headless:K` lookup.
+    if (!resolution && !turnId.startsWith('headless:')) {
+      resolution = await tryResolveTurn(`headless:${turnId}`);
+    }
+    const resolvedTurnUri = resolution?.uri ?? '';
+    const turnUri = resolvedTurnUri || `${CHAT_NS}turn:${turnId}`;
+    // The caller's lookup key is preserved in `currentTurnId` for
+    // downstream watermark / cache-key purposes — even if the
+    // resolved URI was found via the headless fallback. This keeps
+    // the watermark contract stable across replays where the same
+    // logical turn id might map to canonical OR headless.
     const currentTurnId = resolvedTurnUri ? turnId : '';
-    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const currentTurnTs = resolution?.ts ?? '';
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .

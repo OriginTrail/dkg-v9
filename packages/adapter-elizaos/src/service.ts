@@ -113,22 +113,44 @@ export interface UserTurnChatTurnOptions extends ChatTurnPersistOptions {
  * had already let the bad call through.
  *
  * r30-8 fix: the catch-all is REMOVED from the public surface.
- * Downstream TypeScript callers that need to pass a dynamically-
- * shaped options bag (e.g. plugin authors composing options from
- * external config) must either:
- *   (a) narrow their options to `UserTurnChatTurnOptions` /
- *       `AssistantReplyChatTurnOptions` before the call, OR
- *   (b) cast `dkgService as any` — the runtime guard inside
- *       `persistChatTurnImpl` provides defence-in-depth and will
- *       still reject malformed payloads loudly.
  *
- * The internal plugin wiring in `src/index.ts` was the legitimate
- * consumer of the old catch-all. It now uses {@link _dkgServiceLoose}
- * (a deliberately underscore-prefixed internal handle) which retains
- * the wide `Record<string, unknown>` signature for genuine adapter-
- * level dispatch. External code that imports `_dkgServiceLoose`
- * voids any forward-compat guarantees and gets the same defence-in-
- * depth runtime guard treatment as `as any` callers.
+ * PR #229 bot review (r31-2 — service.ts:133) restored a third
+ * `@deprecated` catch-all overload directly on this interface to
+ * preserve compile-time tolerance for dynamic-bag integrations.
+ *
+ * PR #229 bot review (r31-3 — service.ts:180) — the r31-2 placement
+ * was wrong: even sitting AFTER the strict overloads in declaration
+ * order, the catch-all turned `dkgService.persistChatTurn(…, { mode:
+ * 'assistant-reply' })` (no `userMessageId` / `userTurnPersisted`)
+ * into a clean compile again. TypeScript's overload algorithm tries
+ * each signature in declaration order and reports an error only
+ * when NONE match, so an object literal that fails overload 2
+ * (missing the mandatory reply fields) still satisfied the catch-
+ * all and the call compiled — exactly the smuggling hole r30-8
+ * closed. The bot was right to flag this as reopening the hole;
+ * the only safe placement for a dynamic-bag escape hatch is OFF the
+ * main `dkgService` surface entirely.
+ *
+ * Final shape (r31-3): the public `DKGService` carries ONLY the
+ * two typed overloads. Two named handles are available for callers
+ * who legitimately need the wide options bag:
+ *   - {@link dkgServiceLegacy} — `@deprecated` public handle that
+ *     preserves the pre-r30-8 wide-`Record<string, unknown>`
+ *     signature for downstream integrations that genuinely cannot
+ *     narrow at the call site (e.g. framework adapters whose
+ *     options shape is determined by the host). Same runtime impl
+ *     as `dkgService` — same defence-in-depth guard inside
+ *     `persistChatTurnImpl` — but with no compile-time enforcement
+ *     of the typed contract.
+ *   - {@link _dkgServiceLoose} — internal-only (underscore-
+ *     prefixed) handle used by the adapter plugin wiring in
+ *     `src/index.ts` for hook dispatch.
+ *
+ * Migration path: TS callers stay on `dkgService` and either narrow
+ * their options to one of the typed shapes OR move to
+ * `dkgServiceLegacy` with an explicit acknowledgement that the
+ * compile-time contract is opt-out. `as any` callers are unaffected
+ * — they were never type-checked.
  */
 export interface DKGService extends Service {
   persistChatTurn(
@@ -143,46 +165,6 @@ export interface DKGService extends Service {
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
   ): Promise<ChatTurnPersistResult>;
-  /**
-   * @deprecated PR #229 bot review (r31-2 — service.ts:133).
-   *
-   * Restored as a `@deprecated` catch-all overload after r30-8 removed
-   * it outright. The runtime path in `dkgServiceImpl` always supported
-   * a generic `Record<string, unknown>` options bag (it has to — the
-   * adapter plugin wires up framework-shaped hook handlers whose
-   * options shape is determined by the host, not the adapter), so
-   * removing the overload from the public surface turned previously-
-   * working dynamic-bag integrations into compile failures without a
-   * runtime migration path. The bot's r31-2 thread on this same line
-   * called that out as a source-breaking API change without a version
-   * bump.
-   *
-   * **Migration path** for new code (and TypeScript consumers who can
-   * narrow at the call site): use the typed
-   * {@link UserTurnChatTurnOptions} or
-   * {@link AssistantReplyChatTurnOptions} overloads above. They
-   * enforce mandatory fields (`mode` / `userMessageId` /
-   * `userTurnPersisted`) at compile time and prevent the
-   * `{ mode: 'assistant-reply' }`-without-`userMessageId` smuggling
-   * that the typed overloads were originally added (r18-2) to catch.
-   *
-   * **Why this is still safe**: callers who reach for this overload
-   * pass through the same runtime guard inside
-   * `persistChatTurnImpl` that defends against malformed payloads
-   * coming from `as any` callers and the internal-only
-   * {@link _dkgServiceLoose} handle. The guard predates the typed
-   * overloads and has not been weakened. If a host drops a payload
-   * that the typed overloads would reject, the runtime check
-   * throws loudly — the only thing this overload restores is the
-   * compile-time tolerance that previously-working integrations
-   * relied on.
-   */
-  persistChatTurn(
-    runtime: IAgentRuntime,
-    message: Memory,
-    state?: State,
-    options?: Record<string, unknown>,
-  ): Promise<ChatTurnPersistResult>;
 
   onChatTurn(
     runtime: IAgentRuntime,
@@ -195,17 +177,6 @@ export interface DKGService extends Service {
     message: Memory,
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
-  ): Promise<ChatTurnPersistResult>;
-  /**
-   * @deprecated PR #229 bot review (r31-2 — service.ts:133). Same
-   * rationale + migration path as the deprecated `persistChatTurn`
-   * catch-all overload above.
-   */
-  onChatTurn(
-    runtime: IAgentRuntime,
-    message: Memory,
-    state?: State,
-    options?: Record<string, unknown>,
   ): Promise<ChatTurnPersistResult>;
 }
 
@@ -341,3 +312,48 @@ export const dkgService: DKGService = dkgServiceImpl as unknown as DKGService;
  * @internal
  */
 export const _dkgServiceLoose: DKGServiceLoose = dkgServiceImpl;
+
+/**
+ * @deprecated PR #229 bot review (r31-3 — service.ts:180).
+ *
+ * Public-but-deprecated dynamic-bag handle for downstream
+ * integrations that legitimately cannot narrow their options at
+ * the call site (typically: framework adapters whose options shape
+ * is determined by the host runtime, or dynamic-config plugins
+ * that compose options from external sources). Mirrors the pre-
+ * r30-8 wide signature so a `dkgServiceLegacy.persistChatTurn(rt,
+ * msg, st, optsBag)` call type-checks against
+ * `Record<string, unknown>` without going through `as any`.
+ *
+ * **Why this is its own export rather than an overload on
+ * `DKGService`**: TypeScript's overload algorithm attempts each
+ * declaration in order and reports an error only when none match.
+ * An `{ mode: 'assistant-reply' }`-without-`userMessageId` literal
+ * fails the strict {@link AssistantReplyChatTurnOptions} overload
+ * but still satisfies a `Record<string, unknown>` catch-all on the
+ * SAME interface, so adding the catch-all on `DKGService` reopens
+ * the smuggling hole r30-8 closed (regardless of declaration
+ * order — see the r31-3 block above). Putting the loose contract
+ * on a SEPARATELY NAMED export forces callers to opt out of the
+ * typed contract explicitly: they have to pick `dkgServiceLegacy`
+ * over `dkgService` at the import site.
+ *
+ * **Migration path** (in order of preference):
+ *   1. Best — narrow your options to {@link UserTurnChatTurnOptions}
+ *      or {@link AssistantReplyChatTurnOptions} at the call site
+ *      and stay on `dkgService`. The compiler enforces the
+ *      mandatory fields (`mode` / `userMessageId` /
+ *      `userTurnPersisted`) on every call.
+ *   2. Migrate to `dkgServiceLegacy` if (1) is genuinely
+ *      impossible. You keep the runtime defence-in-depth guard
+ *      inside `persistChatTurnImpl` but lose compile-time field
+ *      enforcement.
+ *   3. Last resort — `dkgService as any` if you need a one-off
+ *      escape. (Now equivalent to (2) at the type level, but more
+ *      visible at the call site as a deliberate opt-out.)
+ *
+ * Same runtime impl as `dkgService` — calling either dispatches
+ * through `persistChatTurnImpl`, whose own runtime guards remain
+ * the single source of truth for malformed payloads.
+ */
+export const dkgServiceLegacy: DKGServiceLoose = dkgServiceImpl;

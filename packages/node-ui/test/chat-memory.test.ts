@@ -783,26 +783,39 @@ describe('ChatMemoryManager', () => {
   // `turn:` prefix and could never resolve the headless URI by id, so every
   // headless turn round-tripped as `turn_not_found`. The fix joins on
   // `dkg:turnId` literal so BOTH URI shapes resolve uniformly.
-  it('getSessionGraphDelta resolves headless-turn URIs by joining on dkg:turnId literal', async () => {
-    // Same query order as the happy path (8 queries), but the third query
-    // returns the *headless-turn* URI shape instead of `turn:`.
+  //
+  // PR #229 r31-3 review (adapter-elizaos/src/actions.ts:622) — the writer
+  // now stamps a DISTINCT `dkg:turnId = "headless:${turnKey}"` literal on
+  // headless envelopes (so the canonical user-first turn id-space stays
+  // collision-free for `LIMIT 1` lookups). The reader correspondingly
+  // tries the bare literal first AND falls back to the `headless:`
+  // prefixed literal if the bare lookup misses, so a caller that passes
+  // the original `userMessageId` (without knowing whether the canonical
+  // user-turn ever arrived) still discovers the headless envelope.
+  // Tests below now exercise the two-query lookup pattern.
+  it('getSessionGraphDelta resolves headless-turn URIs via the headless-prefixed fallback lookup', async () => {
+    // Lookup pattern (post-r31-3): bare literal first → returns nothing,
+    // then `headless:<id>` fallback → returns the headless envelope.
     mockQuery.returns.push(
-      { bindings: [] },
+      { bindings: [] }, // 1: session entity probe
       {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
-      },
+      }, // 2: turn count
+      // 3: bare-literal lookup MISSES — caller passed the original
+      // `userMessageId` ('t2') but the headless writer stamped
+      // `"headless:t2"` so this query returns no binding.
+      { bindings: [] },
+      // 4: headless-fallback lookup HITS — joins on the prefixed
+      // literal and finds the headless envelope.
       {
         bindings: [
           {
-            // CRITICAL: this is the URI shape that pre-r30-8 broke. The
-            // writer stamps the canonical envelope under
-            // `urn:dkg:chat:headless-turn:<id>` for assistant-only turns;
-            // the reader must resolve to that URI when looking up by id.
             turn: 'urn:dkg:chat:headless-turn:t2',
             ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
           },
         ],
       },
+      // 5: latest-turn watermark probe.
       {
         bindings: [
           {
@@ -836,41 +849,151 @@ describe('ChatMemoryManager', () => {
           {
             subject: 'urn:dkg:chat:headless-turn:t2',
             predicate: 'http://dkg.io/ontology/turnId',
-            object: '"t2"',
+            object: '"headless:t2"',
           },
         ],
       },
     );
 
     const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
-    // The key assertion: the headless-turn URI was resolved successfully,
-    // so we get a `delta` mode (not `full_refresh_required: turn_not_found`).
+    // The key assertion: the headless-turn URI was resolved successfully
+    // via the prefixed-fallback path, so we get a `delta` mode (not
+    // `full_refresh_required: turn_not_found`).
     expect(delta.mode).toBe('delta');
     expect(delta.turnId).toBe('t2');
     expect(delta.watermark.previousTurnId).toBe('t1');
     expect(delta.watermark.latestTurnId).toBe('t2');
     // And the construct subjectSet drove the final query: it should have
-    // been wired with the *headless* turn URI, not a synthesised `turn:` one.
+    // been wired with the *headless* turn URI.
     const constructQueryArgs = mockQuery.calls[mockQuery.calls.length - 1] as unknown[];
     const constructQuery = String(constructQueryArgs[0] ?? '');
     expect(constructQuery).toContain('urn:dkg:chat:headless-turn:t2');
-    // Inverse: it should NOT have fallen back to the synthesised `turn:` URI
-    // for this id (which is what pre-r30-8 code would have done).
+    // Inverse: must NOT contain the synthesised `turn:` URI.
     expect(constructQuery).not.toContain('<urn:dkg:chat:turn:t2>');
+    // r31-3 invariant: the bare-literal lookup runs FIRST so canonical
+    // turns always win over headless when both exist. Verify the
+    // 4th query (the fallback) was issued with the prefixed literal.
+    const fallbackCall = mockQuery.calls[3] as unknown[];
+    const fallbackSparql = String(fallbackCall[0] ?? '');
+    expect(fallbackSparql).toContain('"headless:t2"');
   });
 
-  // Negative complement to the above: if the WM has NEITHER a `turn:`
-  // nor a `headless-turn:` URI for the requested id, we still get the
-  // pre-existing `turn_not_found` full-refresh signal. This pins that
-  // the r30-8 fix didn't accidentally swallow real misses.
-  it('getSessionGraphDelta returns turn_not_found when neither turn: nor headless-turn: exists', async () => {
+  // r31-3 follow-up: when the canonical user-first turn EXISTS for the
+  // same id, the bare-literal lookup hits first and the headless
+  // fallback is never queried. This is the determinism property that
+  // motivated the writer's prefix change (and the reader's bare-first
+  // ordering).
+  it('getSessionGraphDelta prefers canonical user-first turn over headless when both exist (bare-literal hit, no fallback issued)', async () => {
     mockQuery.returns.push(
       { bindings: [] },
       {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
-      // The lookup-by-turnId query returns no match (neither URI shape
-      // exists for `t-missing`).
+      // Bare-literal lookup HITS — canonical user-first turn exists.
+      // The fallback to `"headless:t2"` is NEVER issued because the
+      // first lookup already returned a binding.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t1"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ user: 'urn:dkg:chat:msg:u', assistant: 'urn:dkg:chat:msg:a' }] },
+      { bindings: [{ s: 'urn:dkg:chat:msg:u' }, { s: 'urn:dkg:chat:msg:a' }] },
+      { quads: [{ subject: 'urn:dkg:chat:turn:t2', predicate: 'http://dkg.io/ontology/turnId', object: '"t2"' }] },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+    expect(delta.turnId).toBe('t2');
+    // Resolved to the canonical URI (NOT headless).
+    const constructQueryArgs = mockQuery.calls[mockQuery.calls.length - 1] as unknown[];
+    const constructQuery = String(constructQueryArgs[0] ?? '');
+    expect(constructQuery).toContain('<urn:dkg:chat:turn:t2>');
+    expect(constructQuery).not.toContain('urn:dkg:chat:headless-turn:t2');
+    // Crucially: NO call carries the `"headless:t2"` literal because
+    // the bare-literal lookup succeeded first. Pin the count too —
+    // happy path is 8 queries (no fallback issued).
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    expect(allSparql.some((q) => q.includes('"headless:t2"'))).toBe(false);
+    // 9 queries on the happy path: ensureInitialized probe + countResult +
+    // bare-literal lookup (HIT, no fallback) + latest-turn + previous-turn +
+    // turnIndex + turnMessages + relatedSubjects + CONSTRUCT.
+    expect(mockQuery.calls).toHaveLength(9);
+  });
+
+  // r31-3 follow-up: when the caller already passes a `headless:`-prefixed
+  // turnId (e.g. they explicitly want the headless envelope), the
+  // reader does NOT also try `headless:headless:<id>`. The bare lookup
+  // with the already-prefixed literal hits or misses; no double-prefix
+  // fallback is issued.
+  it('getSessionGraphDelta does NOT double-prefix when the caller already passes a `headless:` turnId', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Bare lookup with `"headless:t2"` HITS — no fallback to
+      // `"headless:headless:t2"` is ever issued.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:headless-turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [
+          {
+            latestTurnId: '"headless:t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t1"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ user: 'urn:dkg:chat:msg:u', assistant: 'urn:dkg:chat:msg:a' }] },
+      { bindings: [{ s: 'urn:dkg:chat:msg:u' }, { s: 'urn:dkg:chat:msg:a' }] },
+      { quads: [{ subject: 'urn:dkg:chat:headless-turn:t2', predicate: 'http://dkg.io/ontology/turnId', object: '"headless:t2"' }] },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 'headless:t2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+    expect(delta.turnId).toBe('headless:t2');
+    // Pin the no-double-prefix invariant.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    expect(allSparql.some((q) => q.includes('"headless:headless:t2"'))).toBe(false);
+    // 9 queries on the happy path: ensureInitialized probe + countResult +
+    // bare-literal lookup with the already-prefixed `"headless:t2"`
+    // literal (HIT, no double-prefix fallback) + latest-turn + previous-turn
+    // + turnIndex + turnMessages + relatedSubjects + CONSTRUCT.
+    expect(mockQuery.calls).toHaveLength(9);
+  });
+
+  // Negative complement to the headless-resolution test: if the WM has
+  // neither a canonical nor a headless envelope for the requested id,
+  // BOTH lookups (bare + headless-prefixed fallback) miss and the reader
+  // falls through to the pre-existing `turn_not_found` signal.
+  it('getSessionGraphDelta returns turn_not_found when neither bare nor headless lookups hit', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+      },
+      // Bare-literal lookup — no match.
+      { bindings: [] },
+      // r31-3 fallback: `headless:<id>` lookup — also no match.
       { bindings: [] },
       {
         bindings: [
@@ -886,9 +1009,9 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('full_refresh_required');
     expect(delta.reason).toBe('turn_not_found');
     expect(delta.triples).toHaveLength(0);
-    // We made it to the latest-turn lookup before bailing (4 queries, not 3),
-    // because the latest-turn watermark is still useful to the caller.
-    expect(mockQuery.calls).toHaveLength(4);
+    // We made it through both lookups + the latest-turn watermark
+    // probe (5 queries) before bailing.
+    expect(mockQuery.calls).toHaveLength(5);
   });
 });
 

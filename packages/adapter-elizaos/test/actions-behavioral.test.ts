@@ -384,9 +384,23 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri,
     }));
+    // PR #229 bot review (r31-3 — actions.ts:622): headless turns
+    // carry the DISTINCT `headless:${turnKey}` literal as
+    // `dkg:turnId`, NOT the canonical `${turnKey}`. This keeps the
+    // `LIMIT 1` lookup-by-id in `getSessionGraphDelta()`
+    // deterministic when a canonical user-first turn for the same
+    // `turnKey` arrives later. Asserting the exact distinct value
+    // anchors the contract — silent regression to the canonical
+    // literal would silently re-introduce the nondeterministic
+    // read.
     expect(quads).toContainEqual(expect.objectContaining({
-      subject: turnUri, predicate: `${DKG_ONT}turnId`,
+      subject: turnUri, predicate: `${DKG_ONT}turnId`, object: '"headless:r:asst-only-mem"',
     }));
+    // Inverse guard: NO headless quad carries the bare canonical
+    // `turnKey` literal.
+    expect(quads.some((q) =>
+      q.predicate === `${DKG_ONT}turnId` && q.object === '"r:asst-only-mem"',
+    )).toBe(false);
     // Headless markers so downstream consumers can distinguish.
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
@@ -396,9 +410,24 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     }));
     // Stub user message: empty text + system author, NOT the regular
     // CHAT_USER_ACTOR — so UIs don't render an empty user bubble.
+    //
+    // PR #229 bot review (r31-3 — actions.ts:584): the stub MUST
+    // NOT carry `rdf:type schema:Message`. `getStats()` runs an
+    // unconditional `?s rdf:type schema:Message` count to compute
+    // `messageCount` and the chat-vs-knowledge split, so every
+    // headless turn was double-counting (the canonical assistant
+    // message + the stub). The stub is now typed
+    // `dkg:HeadlessUserStub` — a dedicated subject type that
+    // satisfies the `dkg:hasUserMessage` reader contract (it just
+    // needs a typed subject) without inflating message stats.
+    // Both directions asserted: presence of the new type AND
+    // absence of `schema:Message`.
     expect(quads).toContainEqual(expect.objectContaining({
-      subject: userStubUri, predicate: RDF_TYPE, object: `${SCHEMA}Message`,
+      subject: userStubUri, predicate: RDF_TYPE, object: `${DKG_ONT}HeadlessUserStub`,
     }));
+    expect(quads.some((q) =>
+      q.subject === userStubUri && q.predicate === RDF_TYPE && q.object === `${SCHEMA}Message`,
+    )).toBe(false);
     expect(quads).toContainEqual(expect.objectContaining({
       subject: userStubUri, predicate: `${SCHEMA}text`, object: '""',
     }));
@@ -1120,9 +1149,13 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
     // r15-2: stub lives in `msg:user-stub:` namespace, keyed on the
     // assistant memory id.
     const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-stub-1';
-    // Stub exists and is typed as a Message so the envelope edge resolves…
+    // r31-3: stub is typed `dkg:HeadlessUserStub` (not `schema:Message`)
+    // — see `buildHeadlessUserStubQuads` rationale block. The
+    // dedicated type satisfies `dkg:hasUserMessage` envelope
+    // resolution while keeping `getStats()` `?s rdf:type
+    // schema:Message` counts unaffected.
     expect(quads).toContainEqual(expect.objectContaining({
-      subject: userStubUri, predicate: RDF_TYPE, object: `${SCHEMA}Message`,
+      subject: userStubUri, predicate: RDF_TYPE, object: `${DKG_ONT}HeadlessUserStub`,
     }));
     // …but it is NOT partOf the session (no blank assistant in the UI).
     expect(quads.some((q) =>
@@ -1211,9 +1244,18 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     // prefix keeps it disjoint from the canonical `msg:user:` URI
     // for the same turnKey.
     const stubUri = 'urn:dkg:chat:msg:user-stub:r:user-r15-1';
+    // r31-3: stub is typed `dkg:HeadlessUserStub`, NOT `schema:Message`
+    // — see the rationale block in `buildHeadlessUserStubQuads`. The
+    // dedicated type satisfies the `dkg:hasUserMessage` reader
+    // contract (URI just needs to be a typed subject) while
+    // keeping `getStats()` `?s rdf:type schema:Message` counts
+    // unaffected.
+    expect(quads.some((q) =>
+      q.subject === stubUri && q.predicate === RDF_TYPE && q.object === `${DKG_ONT}HeadlessUserStub`,
+    )).toBe(true);
     expect(quads.some((q) =>
       q.subject === stubUri && q.predicate === RDF_TYPE && q.object === `${SCHEMA}Message`,
-    )).toBe(true);
+    )).toBe(false);
     // The canonical `msg:user:` URI for the user-turn MUST remain
     // untouched — no stub bytes written there.
     const canonicalUserMsgUri = 'urn:dkg:chat:msg:user:r:user-r15-1';
@@ -1335,6 +1377,231 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     // The user-turn hook's canonical subject is untouched (we never
     // re-emit author/text on it from this path).
     expect(quads.some((q) => q.subject === 'urn:dkg:chat:msg:user:r:canonical-user')).toBe(false);
+  });
+});
+
+// ===========================================================================
+// PR #229 bot review (r31-3 — actions.ts:622, actions.ts:584).
+// Two new regressions on the headless-reply RDF shape, both tested
+// against the same `makeCapturingAgent()` harness as the rest of
+// this file:
+//
+//   1. (ElAv) Distinct `dkg:turnId` literal on headless turns. The
+//      writer used to stamp the SAME literal (`turnKey`) on both
+//      the canonical user-first turn and the headless envelope, so
+//      a session in which the headless reply persisted first and
+//      the matching user turn was replayed later ended up with two
+//      `dkg:ChatTurn` subjects carrying the same id. The
+//      `LIMIT 1` lookup-by-id in `ChatMemoryManager.getSessionGraphDelta()`
+//      bound nondeterministically. The fix prefixes the headless
+//      literal with `headless:` so the canonical id-space stays
+//      reserved for user-first turns.
+//
+//   2. (ElAz) `dkg:HeadlessUserStub` type on the stub user message.
+//      The stub used to be typed `schema:Message`, which inflated
+//      `getStats().messageCount` (an unconditional `?s rdf:type
+//      schema:Message` count over the WM) by one per headless
+//      turn. Dropping `schema:Message` and adding a dedicated
+//      `dkg:HeadlessUserStub` type keeps `getStats()` honest while
+//      preserving the `dkg:hasUserMessage` reader contract (the
+//      reader only requires a typed subject — it does NOT check
+//      the type itself).
+// ===========================================================================
+describe('persistChatTurnImpl — PR #229 round 31 (r31-3): headless turn id + stub type isolation', () => {
+  // -------------------------------------------------------------------
+  // Bug 1 (ElAv): the headless envelope's `dkg:turnId` literal MUST
+  // be distinct from the canonical user-first turn id. Tested
+  // directly on the writer's output by inspecting every quad whose
+  // predicate is `dkg:turnId` and asserting the literal shape.
+  // -------------------------------------------------------------------
+  it('headless envelope, stub, and assistant message all carry dkg:turnId = "headless:<turnKey>" (NOT the bare canonical literal)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('headless reply', { id: 'asst-r31-3-a', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-3', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:headless-turn:r:parent-r31-3';
+    const stubUri = 'urn:dkg:chat:msg:user-stub:r:parent-r31-3';
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-3';
+    const turnIdQuads = quads.filter((q) => q.predicate === `${DKG_ONT}turnId`);
+    const expectedLiteral = '"headless:r:parent-r31-3"';
+
+    // Every dkg:turnId quad in this publish carries the distinct
+    // literal — there are no bare canonical ids polluting the
+    // headless turn.
+    expect(turnIdQuads.length).toBeGreaterThanOrEqual(3);
+    for (const q of turnIdQuads) {
+      expect(q.object).toBe(expectedLiteral);
+    }
+    // And specifically: each of the three subjects in the headless
+    // turn (envelope, stub, assistant message) carries it.
+    for (const subject of [turnUri, stubUri, asstUri]) {
+      expect(turnIdQuads.some((q) => q.subject === subject)).toBe(true);
+    }
+    // Inverse guard: the bare canonical literal (`"r:parent-r31-3"`)
+    // is RESERVED for the user-first turn and MUST NOT appear on
+    // any headless quad. Without this, the LIMIT 1 lookup in
+    // `getSessionGraphDelta()` would still bind nondeterministically
+    // when both turns coexist.
+    expect(quads.some((q) =>
+      q.predicate === `${DKG_ONT}turnId` && q.object === '"r:parent-r31-3"',
+    )).toBe(false);
+  });
+
+  // -------------------------------------------------------------------
+  // Bug 1 follow-up: the user-first path is UNCHANGED — it still
+  // writes the bare canonical literal. This is the property that
+  // makes the namespace split work: the two turn-id literals never
+  // overlap, so a `?turn dkg:turnId "K"` query binds to the
+  // canonical user-first turn, and `?turn dkg:turnId "headless:K"`
+  // binds to the headless envelope. Determinism either way.
+  // -------------------------------------------------------------------
+  it('canonical user-first turn STILL writes the bare turnKey literal as dkg:turnId (no namespace prefix on the user-first path)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'user-r31-3-canonical', roomId: 'r' } as any),
+      {} as State,
+      {},
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:turn:r:user-r31-3-canonical';
+    const turnIdQuads = quads.filter((q) =>
+      q.subject === turnUri && q.predicate === `${DKG_ONT}turnId`,
+    );
+    expect(turnIdQuads).toHaveLength(1);
+    // Bare canonical literal — no `headless:` prefix.
+    expect(turnIdQuads[0].object).toBe('"r:user-r31-3-canonical"');
+  });
+
+  // -------------------------------------------------------------------
+  // Bug 1 integration: simulate the exact scenario the bot
+  // described — headless reply persisted first, user turn replayed
+  // later. Assert the WM ends up with TWO `dkg:ChatTurn` subjects
+  // carrying DIFFERENT `dkg:turnId` literals so `getSessionGraphDelta`'s
+  // `LIMIT 1` lookup is deterministic.
+  // -------------------------------------------------------------------
+  it('headless-reply-then-user-replay: two distinct turn subjects with two distinct dkg:turnId literals (no collision)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    // 1. Headless reply arrives first.
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('headless reply', { id: 'asst-r31-3-b', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-3-b', userTurnPersisted: false },
+    );
+    // 2. User turn replays later (different process, same parent id).
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('original user msg', { id: 'parent-r31-3-b', roomId: 'r' } as any),
+      {} as State,
+      {},
+    );
+    // Headless turn lives at `headless-turn:` with literal
+    // `"headless:r:parent-r31-3-b"`; canonical lives at `turn:` with
+    // literal `"r:parent-r31-3-b"`. Two subjects, two literals,
+    // zero collision.
+    const allTurnIdQuads = publishes
+      .flatMap((p) => p.quads)
+      .filter((q) => q.predicate === `${DKG_ONT}turnId` && (
+        q.subject === 'urn:dkg:chat:headless-turn:r:parent-r31-3-b'
+        || q.subject === 'urn:dkg:chat:turn:r:parent-r31-3-b'
+      ));
+    const headlessLit = allTurnIdQuads.find(
+      (q) => q.subject === 'urn:dkg:chat:headless-turn:r:parent-r31-3-b',
+    );
+    const canonicalLit = allTurnIdQuads.find(
+      (q) => q.subject === 'urn:dkg:chat:turn:r:parent-r31-3-b',
+    );
+    expect(headlessLit?.object).toBe('"headless:r:parent-r31-3-b"');
+    expect(canonicalLit?.object).toBe('"r:parent-r31-3-b"');
+    // The two literals are DIFFERENT — pin the property explicitly.
+    expect(headlessLit?.object).not.toBe(canonicalLit?.object);
+  });
+
+  // -------------------------------------------------------------------
+  // Bug 2 (ElAz): the stub MUST NOT carry `rdf:type schema:Message`
+  // because `getStats().messageCount` runs an unconditional
+  // `?s rdf:type schema:Message` count and would double-count every
+  // headless turn. The dedicated `dkg:HeadlessUserStub` type
+  // satisfies the `dkg:hasUserMessage` reader contract without
+  // inflating message stats.
+  // -------------------------------------------------------------------
+  it('stub user message is typed dkg:HeadlessUserStub, NOT schema:Message (so getStats().messageCount stays accurate)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('stub-type-test', { id: 'asst-r31-3-c', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-3-c', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const stubUri = 'urn:dkg:chat:msg:user-stub:r:parent-r31-3-c';
+    const stubTypeQuads = quads.filter((q) =>
+      q.subject === stubUri && q.predicate === RDF_TYPE,
+    );
+    // Exactly one type quad — the dedicated stub type.
+    expect(stubTypeQuads).toHaveLength(1);
+    expect(stubTypeQuads[0].object).toBe(`${DKG_ONT}HeadlessUserStub`);
+    // Inverse guard: NO `schema:Message` type quad on the stub.
+    // This is the property that keeps `getStats()` honest.
+    expect(stubTypeQuads[0].object).not.toBe(`${SCHEMA}Message`);
+    // Cross-cut: the headless ASSISTANT message DOES carry
+    // `schema:Message` (it's a real message, just on the headless
+    // path) — assert that so we know the stat fix didn't bleed
+    // into the assistant subject too.
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-3-c';
+    expect(quads.some((q) =>
+      q.subject === asstUri && q.predicate === RDF_TYPE && q.object === `${SCHEMA}Message`,
+    )).toBe(true);
+  });
+
+  // -------------------------------------------------------------------
+  // Bug 2 follow-up: the existing reader contract still works — the
+  // envelope's `dkg:hasUserMessage` edge resolves to a typed subject
+  // (just a different type). The reader uses the EDGE for joins,
+  // not the type, so the change is transparent at the
+  // `getSessionGraphDelta()` / `getSession()` level. We pin that
+  // here by asserting the envelope still points at the stub URI
+  // and the stub still carries every required edge for downstream
+  // consumers (author, dateCreated, text, headlessUserMessage).
+  // -------------------------------------------------------------------
+  it('stub still satisfies the reader contract (typed subject + author + text + headlessUserMessage marker)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('stub-contract', { id: 'asst-r31-3-d', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-3-d', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const turnUri = 'urn:dkg:chat:headless-turn:r:parent-r31-3-d';
+    const stubUri = 'urn:dkg:chat:msg:user-stub:r:parent-r31-3-d';
+    // Envelope still points at the stub via dkg:hasUserMessage.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: stubUri,
+    }));
+    // Stub is a typed subject (the new dedicated type).
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: stubUri, predicate: RDF_TYPE, object: `${DKG_ONT}HeadlessUserStub`,
+    }));
+    // Stub still carries the existing edge contract: system author,
+    // empty text, dateCreated, headlessUserMessage marker.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: stubUri, predicate: `${SCHEMA}author`, object: `${DKG_ONT}agent:system`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: stubUri, predicate: `${SCHEMA}text`, object: '""',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: stubUri, predicate: `${DKG_ONT}headlessUserMessage`, object: '"true"',
+    }));
+    expect(quads.some((q) =>
+      q.subject === stubUri && q.predicate === `${SCHEMA}dateCreated`,
+    )).toBe(true);
   });
 });
 

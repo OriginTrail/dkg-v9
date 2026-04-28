@@ -38,8 +38,6 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 import { homedir } from 'node:os';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
@@ -449,9 +447,9 @@ export class DkgNodePlugin {
 
     if (this.chatTurnWriter) {
       // T18 — Already constructed. If a better stateDir is now
-      // available, rebuild at the new location and migrate the
-      // watermark file. Only upgrade fallback → workspace-scoped;
-      // never the other direction. Same-path is a no-op.
+      // available, in-place migrate the writer to the new location.
+      // Only upgrade fallback → workspace-scoped; never the other
+      // direction. Same-path is a no-op.
       if (this.chatTurnWriterStateDir === stateDir) return;
       const wasFallback = this.chatTurnWriterStateDir === homeDir;
       const isUpgrade = wasFallback && stateDir !== homeDir;
@@ -459,13 +457,23 @@ export class DkgNodePlugin {
       api.logger.info?.(
         `[dkg] Migrating ChatTurnWriter stateDir from fallback '${homeDir}' to workspace-scoped '${stateDir}'.`,
       );
-      try { this.chatTurnWriter.flushSync(); } catch { /* best effort */ }
-      // Best-effort migrate the watermark file so w4bCount and
-      // watermarks survive the rebuild (T17 made these load-bearing
-      // for setup-runtime → restart correctness).
-      this.migrateWatermarkFile(this.chatTurnWriterStateDir!, stateDir, api.logger);
-      this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+      // T21/T22 — `setStateDir` is async: it `await flush()`s
+      // in-flight persists/resets/chains BEFORE swapping paths
+      // (T21 regression fix — pre-fix the rebuild used `flushSync()`
+      // and lost in-flight `storeChatTurn` work), and it MERGES
+      // destination state per-session via max(w)/max(b) instead of
+      // overwriting (T22 regression fix — pre-fix the migration
+      // unconditionally copied, which rolled back newer workspace
+      // state from a prior run). Fire-and-forget — we mark the new
+      // stateDir immediately so the next register() call doesn't
+      // re-trigger this branch, and the writer continues to function
+      // at the OLD path until the merge lands. Errors are logged at
+      // warn but never thrown — register() must remain side-effect-
+      // safe to gateway init.
       this.chatTurnWriterStateDir = stateDir;
+      this.chatTurnWriter.setStateDir(stateDir).catch((err: any) => {
+        api.logger.warn?.(`[dkg] ChatTurnWriter stateDir migration failed: ${err?.message ?? err}`);
+      });
       return;
     }
 
@@ -480,27 +488,6 @@ export class DkgNodePlugin {
     this.chatTurnWriterStateDir = stateDir;
   }
 
-  /**
-   * T18 — Best-effort copy the chat-turn watermark file from the old
-   * fallback location to the new workspace-scoped location. Failure
-   * is logged at debug (the new writer will simply start with empty
-   * state; correctness is preserved by W4a backfill on the next
-   * `agent_end`).
-   */
-  private migrateWatermarkFile(oldStateDir: string, newStateDir: string, logger: any): void {
-    try {
-      const oldFile = path.join(oldStateDir, 'dkg-adapter', 'chat-turn-watermarks.json');
-      const newFile = path.join(newStateDir, 'dkg-adapter', 'chat-turn-watermarks.json');
-      if (!fs.existsSync(oldFile)) return;
-      const newDir = path.dirname(newFile);
-      if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
-      // copyFileSync is safer than rename across mounts.
-      fs.copyFileSync(oldFile, newFile);
-      logger?.debug?.(`[dkg] Migrated watermark file ${oldFile} -> ${newFile}`);
-    } catch (err: any) {
-      logger?.debug?.(`[dkg] Watermark file migration failed: ${err?.message ?? err}`);
-    }
-  }
 
   /**
    * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase

@@ -175,6 +175,78 @@ export class ChatTurnWriter {
     this.initFromFile();
   }
 
+  /**
+   * T18/T21/T22 — Migrate this writer to a new stateDir without losing
+   * in-flight work or rolling back newer state at the destination.
+   *
+   * Steps (in order):
+   *   1. `await flush()` — drain in-flight persists, pending resets,
+   *      and per-session agent_end chains so we have a stable
+   *      in-memory snapshot at the OLD path. T21 regression fix:
+   *      pre-fix the migration used `flushSync()`, which only wrote
+   *      the debounced watermark and missed in-flight `storeChatTurn`
+   *      jobs that completed after the swap.
+   *   2. Read the destination watermark file (if any) and MERGE
+   *      per-session via max(w) and max(b). T22 regression fix:
+   *      pre-fix unconditionally overwrote the destination, which
+   *      rolled back newer state from a prior run at the workspace
+   *      path. The destination file's session keys may also reference
+   *      conversations this process never touched — those are
+   *      preserved unchanged.
+   *   3. Update internal paths atomically.
+   *   4. Write the merged state to the new location.
+   *   5. Best-effort delete the old file so a future fallback resolve
+   *      doesn't repopulate from stale data.
+   */
+  async setStateDir(newStateDir: string): Promise<void> {
+    if (newStateDir === this.stateDir) return;
+    const newWatermarkFilePath = path.join(
+      newStateDir, "dkg-adapter", "chat-turn-watermarks.json",
+    );
+    if (newWatermarkFilePath === this.watermarkFilePath) return;
+    // Drain in-flight work BEFORE we touch any state. flush() awaits
+    // all outstanding persists/resets/chains — we must capture their
+    // effects before swapping paths.
+    await this.flush();
+    // Merge with destination state, taking max per session so we never
+    // roll back newer values.
+    try {
+      if (fs.existsSync(newWatermarkFilePath)) {
+        const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          for (const [key, val] of Object.entries(parsed)) {
+            let w = -1, b = 0;
+            if (typeof val === "number") {
+              w = val;
+            } else if (val && typeof val === "object") {
+              const obj = val as { w?: unknown; b?: unknown };
+              if (typeof obj.w === "number") w = obj.w;
+              if (typeof obj.b === "number") b = obj.b;
+            }
+            this.cachedWatermarks.set(
+              key,
+              Math.max(this.cachedWatermarks.get(key) ?? -1, w),
+            );
+            this.w4bSessionCounts.set(
+              key,
+              Math.max(this.w4bSessionCounts.get(key) ?? 0, b),
+            );
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn?.("[ChatTurnWriter.setStateDir] Failed to merge destination file; proceeding with current state", { err });
+    }
+    const oldWatermarkFilePath = this.watermarkFilePath;
+    this.stateDir = newStateDir;
+    this.watermarkFilePath = newWatermarkFilePath;
+    const newDir = path.dirname(newWatermarkFilePath);
+    if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+    this.writeWatermarkFile();
+    try { fs.unlinkSync(oldWatermarkFilePath); } catch { /* best effort */ }
+  }
+
   private initFromFile(): void {
     try {
       const dir = path.dirname(this.watermarkFilePath);

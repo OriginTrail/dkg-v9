@@ -1926,6 +1926,93 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("retry");
   });
 
+  it("T21 — setStateDir awaits in-flight persists before swapping paths (no lost turns mid-migration)", async () => {
+    // Regression for T21: the earlier T18 migration used flushSync(),
+    // which only writes the debounced watermark and does NOT await
+    // in-flight `storeChatTurn` jobs. Mid-migration completions
+    // would land at the OLD path while the writer was already
+    // pointed at the NEW path — silent data loss / desync.
+    let releaseStore: (() => void) | null = null;
+    let storeStarted = false;
+    let storeFinished = false;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      storeStarted = true;
+      await new Promise<void>((resolve) => { releaseStore = resolve; });
+      storeFinished = true;
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    // Start a persist that hangs.
+    writer.onMessageReceived({ sessionKey: "sk", context: { channelId: "tg", content: "u1" } } as any);
+    void writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "r1", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(storeStarted).toBe(true);
+    expect(storeFinished).toBe(false);
+
+    // Trigger setStateDir while the persist is hanging. It must NOT
+    // proceed past the `flush()` call until storeChatTurn returns.
+    const newStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t21-"));
+    let migrationFinished = false;
+    const migrationPromise = writer.setStateDir(newStateDir).then(() => {
+      migrationFinished = true;
+    });
+    // Give the migration a tick to start.
+    await flushMicrotasks();
+    // Migration MUST be blocked on flush() awaiting the in-flight
+    // storeChatTurn. If it finished, T21 was not actually addressed.
+    expect(migrationFinished).toBe(false);
+
+    // Now release the persist; migration proceeds.
+    releaseStore?.();
+    await migrationPromise;
+    expect(storeFinished).toBe(true);
+    expect(migrationFinished).toBe(true);
+    // New file exists at the new location.
+    const newFile = path.join(newStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    expect(fs.existsSync(newFile)).toBe(true);
+    try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  it("T22 — setStateDir merges destination state via max(w)/max(b) instead of overwriting (no rollback)", async () => {
+    // Regression for T22: the earlier T18 migration used
+    // `fs.copyFileSync` unconditionally, which rolled back any newer
+    // state at the destination from a prior run. Post-fix, the merge
+    // takes max(watermark) and max(w4bCount) per session.
+    const newStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t22-"));
+    const newDir = path.join(newStateDir, "dkg-adapter");
+    fs.mkdirSync(newDir, { recursive: true });
+    const newFile = path.join(newDir, "chat-turn-watermarks.json");
+    // Pre-seed destination with NEWER state for one session and a
+    // unique-to-destination session.
+    fs.writeFileSync(newFile, JSON.stringify({
+      "openclaw:tg:::sk-shared": { w: 10, b: 5 },     // newer than source
+      "openclaw:tg:::sk-onlydst": { w: 99, b: 99 },   // not in source
+    }));
+
+    // Source writer has OLDER state for sk-shared and a unique session.
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 3);    // older
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-shared", 2);    // older
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-onlysrc", 7);   // not in destination
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-onlysrc", 4);
+
+    await writer.setStateDir(newStateDir);
+
+    // Read the merged file at the new location.
+    const merged = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+    // sk-shared: max(3, 10) = 10; max(2, 5) = 5 → destination's wins.
+    expect(merged["openclaw:tg:::sk-shared"]).toEqual({ w: 10, b: 5 });
+    // sk-onlydst: preserved unchanged.
+    expect(merged["openclaw:tg:::sk-onlydst"]).toEqual({ w: 99, b: 99 });
+    // sk-onlysrc: source values carried over.
+    expect(merged["openclaw:tg:::sk-onlysrc"]).toEqual({ w: 7, b: 4 });
+
+    try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
   it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
     // Regression for T19: pre-fix, the success === false branch shifted
     // only the OLDEST pending inbound, but T15 changed the success path

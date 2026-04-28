@@ -2809,20 +2809,20 @@ describe('DkgNodePlugin', () => {
     await plugin.stop();
   });
 
-  it('T18 — ensureChatTurnWriter rebuilds and migrates when a better stateDir becomes available on a later register()', () => {
+  it('T18/T21 — ensureChatTurnWriter migrates writer in-place via setStateDir when a better stateDir becomes available', async () => {
     // Regression for T18: pre-fix, once `chatTurnWriter` was constructed
     // with the home-dir fallback (because setup-runtime register had
     // no workspaceDir / resolveStateDir wired yet), it stayed pinned
-    // forever. A later full-mode register that DID provide a workspace-
-    // scoped path would short-circuit the idempotent guard and the
-    // wrong watermark file kept getting used. Post-fix, an upgrade
-    // from fallback → workspace-scoped triggers a rebuild and
-    // best-effort migrates the watermark file.
+    // forever.
+    // Regression for T21: an earlier T18 fix REBUILT the writer and
+    // used `flushSync()` which doesn't await in-flight persists/resets
+    // — losing or duplicating turns mid-rebuild. Post-fix, the writer
+    // is migrated IN-PLACE via `setStateDir` which `await flush()`s
+    // before swapping paths.
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const tmpRoot = require('os').tmpdir();
     const workspaceDir = path.join(tmpRoot, `dkg-t18-workspace-${Date.now()}`);
-    // Match DkgNodePlugin's homeDir construction (template literal with /).
     const homeDir = `${require('os').homedir()}/.openclaw`;
     try {
       const plugin = new DkgNodePlugin({
@@ -2830,7 +2830,6 @@ describe('DkgNodePlugin', () => {
         channel: { enabled: false },
         memory: { enabled: false },
       } as any);
-      // First register: NO workspaceDir → fallback to homeDir.
       const apiFallback: OpenClawPluginApi = {
         config: {},
         registrationMode: 'full',
@@ -2842,10 +2841,8 @@ describe('DkgNodePlugin', () => {
       plugin.register(apiFallback);
       const writer1 = (plugin as any).chatTurnWriter;
       expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
-      const path1 = (writer1 as any).watermarkFilePath as string;
-      expect(path1.replace(/\\/g, '/')).toContain('/.openclaw/dkg-adapter/chat-turn-watermarks.json');
 
-      // Second register: workspaceDir IS available now → upgrade.
+      // Second register with workspaceDir → triggers in-place migration.
       const apiBetter: OpenClawPluginApi = {
         config: {},
         registrationMode: 'full',
@@ -2857,12 +2854,15 @@ describe('DkgNodePlugin', () => {
       } as unknown as OpenClawPluginApi;
       plugin.register(apiBetter);
       const writer2 = (plugin as any).chatTurnWriter;
-      // Writer was REBUILT (different instance).
-      expect(writer2).not.toBe(writer1);
-      // New stateDir is the workspace-scoped one.
+      // SAME instance — migration is in-place (preserves in-flight state).
+      expect(writer2).toBe(writer1);
+      // chatTurnWriterStateDir tracking flips immediately so subsequent
+      // registers don't re-trigger.
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
         workspaceDir.replace(/\\/g, '/') + '/.openclaw',
       );
+      // Wait for the fire-and-forget setStateDir to complete.
+      await new Promise((r) => setTimeout(r, 50));
       const path2 = (writer2 as any).watermarkFilePath as string;
       expect(path2.replace(/\\/g, '/')).toContain(
         workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',

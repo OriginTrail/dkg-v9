@@ -71,19 +71,70 @@ export interface AssistantReplyChatTurnOptions extends ChatTurnPersistOptions {
   readonly mode: 'assistant-reply';
   readonly userMessageId: string;
   readonly userTurnPersisted: boolean;
+  /**
+   * PR #229 bot review r31-9 (service.ts:70).
+   *
+   * When the matching user-turn write embedded a PROVISIONAL
+   * assistant string (typical case: a partial-streaming completion
+   * the host parked on `assistantText` / `state.lastAssistantReply`
+   * before the final reply landed) and the later assistant-reply
+   * write brings DIFFERENT final text, the impl needs to route the
+   * second write through the headless branch (onto a distinct
+   * `msg:agent-headless:K` URI) AND tag it with
+   * `dkg:supersedesCanonicalAssistant "true"` so the reader's
+   * dedupe inverts its preference for THIS turn key only — surfacing
+   * the fresh final reply and dropping the stale provisional. Without
+   * the marker the dedupe keeps preferring the canonical and freezes
+   * stale text in chat history.
+   *
+   * The plugin wrapper (`onAssistantReplyHandler` in `src/index.ts`)
+   * sets this automatically based on its provisional-text cache vs
+   * the incoming reply, so plugin-routed traffic gets safe behaviour
+   * for free. Direct `dkgService.persistChatTurn(...)` integrations
+   * that bypass the plugin (the path the bot called out) need the
+   * SAME knob exposed at the public type so they can opt into the
+   * supersede branch when their own caching detects the same shape
+   * — otherwise they'd append a second `schema:text` onto the
+   * canonical assistant message and `ChatMemoryManager.getSession()`
+   * would keep surfacing the stale provisional text.
+   *
+   * Defaults to `false` (legacy append-only behaviour). Setting it
+   * REQUIRES `userTurnPersisted: false` so the impl actually takes
+   * the headless branch — combining `userTurnPersisted: true` with
+   * `assistantSupersedesCanonical: true` is a contradiction and the
+   * runtime guard in `persistChatTurnImpl` ignores the supersede
+   * marker when the append-only branch is selected.
+   */
+  readonly assistantSupersedesCanonical?: boolean;
 }
 
 /**
  * Options shape for the USER-TURN path.
  *
- * User-turn persistence derives the turn source id from `message.id`
- * (see `PersistableMemory`), so `userMessageId` MUST be omitted on
- * this path. `mode` is either explicitly `'user-turn'` or left
- * undefined (the default).
+ * `mode` is either explicitly `'user-turn'` or left undefined (the
+ * default). User-turn persistence normally derives the turn source
+ * id from `message.id` (see `PersistableMemory`).
+ *
+ * PR #229 bot review r31-9 (service.ts:86). `userMessageId` was
+ * previously declared `?: never` on this path, but r31-6 added
+ * runtime support for an explicit pre-mint id on the user-turn
+ * path too: hosts that want the persisted-turn cache key and the
+ * on-disk turn URI to converge against a pre-minted id (so the
+ * matching `onAssistantReply` can take the safe append-only path)
+ * have to set `userMessageId` here. Forbidding the field at the
+ * type level meant TS callers had to drop to `as any` or the
+ * deprecated `dkgServiceLegacy` to access the runtime-supported
+ * pre-mint flow, which defeated the typed surface.
+ *
+ * Make `userMessageId?: string` to match the runtime contract —
+ * when present and non-empty, `persistChatTurnImpl` keys the
+ * canonical turn URI off it; when absent, it falls back to
+ * `message.id`. Either way the behaviour is identical to what
+ * `dkgServiceLegacy` already accepts.
  */
 export interface UserTurnChatTurnOptions extends ChatTurnPersistOptions {
   readonly mode?: 'user-turn';
-  readonly userMessageId?: never;
+  readonly userMessageId?: string;
 }
 
 /**

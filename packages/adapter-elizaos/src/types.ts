@@ -145,6 +145,33 @@ export interface ChatTurnPersistOptions {
    * may set it themselves to opt into the same protection.
    */
   readonly assistantAlreadyPersisted?: boolean;
+  /**
+   * PR #229 bot review r31-9 (service.ts:70).
+   *
+   * Explicit signal that the matching user-turn write embedded a
+   * PROVISIONAL assistant string (e.g. partial-streaming completion)
+   * and the current assistant-reply write brings DIFFERENT final
+   * text. When `true`, the impl forces the headless branch (a
+   * distinct `msg:agent-headless:K` URI carrying the fresh final
+   * text) AND tags it with `dkg:supersedesCanonicalAssistant "true"`
+   * so the reader's dedupe inverts its preference for THIS turn key
+   * — surfacing the headless write and dropping the canonical stale
+   * provisional. Without the marker the dedupe keeps preferring the
+   * canonical and freezes stale text in chat history.
+   *
+   * The plugin wrapper (`onAssistantReplyHandler` in `src/index.ts`)
+   * sets this automatically based on its provisional-text cache;
+   * direct callers of `dkgService.persistChatTurn(...)` that bypass
+   * the plugin (the path the bot called out at service.ts:70) may
+   * set it themselves to opt into the same safe behaviour.
+   *
+   * Setting this REQUIRES `userTurnPersisted: false` so the impl
+   * actually takes the headless branch — combining `userTurnPersisted:
+   * true` with `assistantSupersedesCanonical: true` is a contradiction
+   * and the runtime guard ignores the supersede marker when the
+   * append-only branch is selected.
+   */
+  readonly assistantSupersedesCanonical?: boolean;
   readonly ts?: string;
   readonly timestamp?: string;
 }

@@ -479,4 +479,134 @@ describe('r18-2: DKGService overload contract', () => {
       ).rejects.toThrow(/DKG node not started/);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // PR #229 bot review r31-9 (service.ts:70 + service.ts:86).
+  //
+  // r31-6 plumbed `options.userMessageId` through the user-turn write
+  // path (so a host can pre-mint an id and have the persisted-turn
+  // cache key + the on-disk turn URI converge), and the wrapper sets
+  // `assistantSupersedesCanonical: true` on the assistant-reply path
+  // when the user-turn embedded a provisional reply that the final
+  // text supersedes. Both behaviours were RUNTIME-only — the public
+  // typed surface (`UserTurnChatTurnOptions` / `AssistantReplyChatTurnOptions`)
+  // declared `userMessageId?: never` on the user-turn path AND had no
+  // `assistantSupersedesCanonical` field anywhere, so direct
+  // `dkgService.persistChatTurn(...)` integrations couldn't use either
+  // without dropping to `as any` / `dkgServiceLegacy`. r31-9 promotes
+  // both knobs to the typed surface so the declared API and the
+  // runtime behaviour stay aligned.
+  // ─────────────────────────────────────────────────────────────────
+  describe('r31-9: typed surface aligns with r31-6 runtime contract', () => {
+    it('UserTurnChatTurnOptions ACCEPTS userMessageId (pre-mint flow now type-checks without `as any`)', async () => {
+      // Positive control: a typed user-turn caller that pre-mints
+      // its `userMessageId` MUST compile against `UserTurnChatTurnOptions`.
+      // Pre-r31-9 this required `as any` (or routing through
+      // `dkgServiceLegacy`) because the field was declared `?: never`.
+      const runtime = makeRuntime();
+      const userMsg = makePersistableMemory();
+      const preMintedOpts: UserTurnChatTurnOptions = {
+        mode: 'user-turn',
+        userMessageId: 'msg-r31-9-pre-minted-user-id',
+        contextGraphId: 'agent-context',
+      };
+      // Must compile cleanly (no @ts-expect-error). Runtime throws
+      // because no agent is wired up — that's the routing proof.
+      await expect(
+        dkgService.persistChatTurn(runtime, userMsg, undefined, preMintedOpts),
+      ).rejects.toThrow(/DKG node not started/);
+      // Field is observable on the literal — pin the runtime shape too
+      // so a future regression that drops the field at the type level
+      // surfaces here even if the assignment line is auto-elided.
+      expect(preMintedOpts.userMessageId).toBe('msg-r31-9-pre-minted-user-id');
+    });
+
+    it('UserTurnChatTurnOptions allows OMITTING userMessageId (default user-turn path unaffected)', async () => {
+      // Negative-side anti-regression: the r31-9 widening must NOT
+      // make `userMessageId` mandatory on the user-turn path. The
+      // overwhelmingly common case (host hasn't pre-minted, persister
+      // derives the id from `message.id`) still has to compile.
+      const runtime = makeRuntime();
+      const userMsg = makePersistableMemory();
+      const defaultOpts: UserTurnChatTurnOptions = { mode: 'user-turn' };
+      await expect(
+        dkgService.persistChatTurn(runtime, userMsg, undefined, defaultOpts),
+      ).rejects.toThrow(/DKG node not started/);
+      expect(defaultOpts.userMessageId).toBeUndefined();
+    });
+
+    it('AssistantReplyChatTurnOptions EXPOSES assistantSupersedesCanonical so direct callers can opt into the supersede branch', async () => {
+      // Positive control: a typed assistant-reply caller that wants
+      // the headless-supersede branch (the wrapper's r31-6 behaviour)
+      // can now express it through the public type without `as any`.
+      // Pre-r31-9 the field didn't exist on the public surface so a
+      // direct integration that detected stale-provisional vs final
+      // text in its own caching had no way to opt in, and the
+      // canonical assistant message ended up with stacked
+      // `schema:text` triples (the bot's H2fh repro).
+      const runtime = makeRuntime();
+      const assistantMsg = makePlainMemoryWithoutId();
+      const supersedeOpts: AssistantReplyChatTurnOptions = {
+        mode: 'assistant-reply',
+        userMessageId: 'msg-r31-9-user-parent',
+        userTurnPersisted: false,
+        assistantSupersedesCanonical: true,
+      };
+      // Must compile cleanly. Runtime throws because no agent is wired up.
+      await expect(
+        dkgService.persistChatTurn(runtime, assistantMsg, undefined, supersedeOpts),
+      ).rejects.toThrow(/DKG node not started/);
+      expect(supersedeOpts.assistantSupersedesCanonical).toBe(true);
+    });
+
+    it('AssistantReplyChatTurnOptions assistantSupersedesCanonical is OPTIONAL (legacy callers compile unchanged)', () => {
+      // Anti-regression for the optional contract: existing typed
+      // assistant-reply callers (e.g. the r19-2 happy-path literals
+      // earlier in this file) must NOT be required to set the new
+      // field. If a future refactor accidentally promotes the
+      // optional `?` to required, this assertion fails to compile.
+      const omitted: AssistantReplyChatTurnOptions = {
+        mode: 'assistant-reply',
+        userMessageId: 'msg-r31-9-user-parent',
+        userTurnPersisted: true,
+      };
+      expect(omitted.assistantSupersedesCanonical).toBeUndefined();
+    });
+
+    it('source-level pin: `userMessageId?: never` is GONE from UserTurnChatTurnOptions (anti-drift guard for the r31-9 widening)', () => {
+      // The fix is the type-level removal of `?: never`. A future
+      // refactor that re-narrows the field would re-introduce the
+      // exact compile-time vs runtime divergence the bot called out.
+      // Pin the source so that regression surfaces here.
+      const servicePath = new URL('../src/service.ts', import.meta.url).pathname;
+      const src = readFileSync(servicePath, 'utf-8');
+      // Locate the UserTurnChatTurnOptions declaration body.
+      const ifaceIdx = src.indexOf('export interface UserTurnChatTurnOptions');
+      expect(ifaceIdx).toBeGreaterThan(-1);
+      const bodyClose = src.indexOf('}', ifaceIdx);
+      expect(bodyClose).toBeGreaterThan(ifaceIdx);
+      const ifaceBody = src.slice(ifaceIdx, bodyClose);
+      // The interface body MUST declare `userMessageId?: string` and
+      // MUST NOT declare `userMessageId?: never`. Both regex shapes
+      // tolerate any whitespace variation.
+      expect(/userMessageId\s*\?\s*:\s*string\b/.test(ifaceBody)).toBe(true);
+      expect(/userMessageId\s*\?\s*:\s*never\b/.test(ifaceBody)).toBe(false);
+    });
+
+    it('source-level pin: `assistantSupersedesCanonical` is declared on AssistantReplyChatTurnOptions (matches the runtime branch in actions.ts)', () => {
+      // The r31-6 fix in actions.ts:1265 reads
+      // `optsAny.assistantSupersedesCanonical === true` to emit the
+      // `dkg:supersedesCanonicalAssistant` marker on the headless
+      // branch. Pin the public type declaration so the runtime read
+      // path can never drift from the declared API again.
+      const servicePath = new URL('../src/service.ts', import.meta.url).pathname;
+      const src = readFileSync(servicePath, 'utf-8');
+      const ifaceIdx = src.indexOf('export interface AssistantReplyChatTurnOptions');
+      expect(ifaceIdx).toBeGreaterThan(-1);
+      const bodyClose = src.indexOf('}', ifaceIdx);
+      expect(bodyClose).toBeGreaterThan(ifaceIdx);
+      const ifaceBody = src.slice(ifaceIdx, bodyClose);
+      expect(/assistantSupersedesCanonical\s*\?\s*:\s*boolean\b/.test(ifaceBody)).toBe(true);
+    });
+  });
 });

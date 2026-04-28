@@ -211,25 +211,17 @@ export class DkgNodePlugin {
     existingWakeAuth: 'bridge-token' | 'gateway' | 'none' | undefined,
     candidates: Array<{ url: string; auth: 'bridge-token' }>,
   ): { url: string; auth?: 'bridge-token' | 'gateway' | 'none' } | undefined {
-    const existingWakeUrl = existing?.wakeUrl;
-    const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
-    if (!normalizedExistingWakeUrl) {
+    if (candidates.length > 0) {
       return candidates[0];
     }
 
-    const matchingCandidate = candidates.find((candidate) =>
-      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
-    );
-    const existingDerivedCandidate = this.buildDerivedWakeCandidates(existing).find((candidate) =>
-      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
-    );
-    if (existingDerivedCandidate) {
-      return candidates[0];
-    }
-    if (matchingCandidate) {
-      return matchingCandidate;
+    const existingWakeUrl = existing?.wakeUrl;
+    const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
+    if (!normalizedExistingWakeUrl) {
+      return undefined;
     }
     const inferredAuth = existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl);
+    if (inferredAuth !== 'bridge-token') return undefined;
     return {
       url: normalizedExistingWakeUrl,
       auth: inferredAuth,

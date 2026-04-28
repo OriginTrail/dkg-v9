@@ -635,8 +635,9 @@ function ensureSemanticEnrichmentEvent(
   semanticTripleCount = 0,
 ): SemanticEnrichmentDescriptor {
   const now = Date.now();
+  const payloadJson = JSON.stringify(payload);
   const idempotencyKey = kind === 'chat_turn' && payload.kind === 'chat_turn'
-    ? buildChatSemanticIdempotencyKey(payload.turnId)
+    ? buildChatSemanticIdempotencyKey(payload.turnId, semanticEnrichmentPayloadHash(payloadJson))
     : kind === 'file_import' && payload.kind === 'file_import'
       ? buildFileSemanticIdempotencyKey({
           assertionUri: payload.assertionUri,
@@ -648,7 +649,6 @@ function ensureSemanticEnrichmentEvent(
       : (() => {
           throw new Error(`Semantic enrichment payload kind mismatch: expected ${kind}, received ${payload.kind}`);
         })();
-  const payloadJson = JSON.stringify(payload);
   const existing = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
   if (existing) {
     const refreshed = refreshActiveChatSemanticEventPayloadIfNeeded(
@@ -1414,11 +1414,6 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         );
         semanticTripleCount = previousSemanticTripleCountState.count + triples.length;
         const metaGraph = contextGraphMetaUri(eventPayload.contextGraphId);
-        await agent.store.deleteByPattern({
-          subject: eventPayload.assertionUri,
-          predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
-          graph: metaGraph,
-        });
         semanticQuads.push({
           subject: eventPayload.assertionUri,
           predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
@@ -1427,6 +1422,11 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         });
         const preExistingSemanticQuadKeys = await readExistingSemanticAppendQuadKeys(agent, semanticQuads);
         try {
+          await agent.store.deleteByPattern({
+            subject: eventPayload.assertionUri,
+            predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
+            graph: metaGraph,
+          });
           await agent.store.insert(semanticQuads);
         } catch (err: any) {
           try {

@@ -2599,7 +2599,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('preserves an explicitly configured wake transport instead of overwriting it with synthesized defaults', async () => {
+  it('replaces explicitly configured custom wake transports with a daemon-callable bridge wake target', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -2658,8 +2658,8 @@ describe('DkgNodePlugin', () => {
       expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           gatewayUrl: 'http://127.0.0.1:18789',
-          wakeUrl: 'https://proxy.example.internal/custom/semantic-wake',
-          wakeAuth: 'none',
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {
@@ -2668,7 +2668,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('preserves an explicitly configured gateway wake transport instead of replacing it with a bridge candidate', async () => {
+  it('replaces explicitly configured gateway wake transports with a daemon-callable bridge wake target', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -2727,8 +2727,8 @@ describe('DkgNodePlugin', () => {
       expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
         transport: {
           gatewayUrl: 'http://127.0.0.1:18789',
-          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
-          wakeAuth: 'gateway',
+          wakeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/semantic-enrichment\/wake$/),
+          wakeAuth: 'bridge-token',
         },
       });
     } finally {

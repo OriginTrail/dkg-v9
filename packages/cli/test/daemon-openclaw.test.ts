@@ -1415,6 +1415,113 @@ describe('best-effort semantic enqueue helper', () => {
     });
   });
 
+  it('does not delete the previous semantic count when pre-insert semantic snapshotting fails', async () => {
+    const req = new PassThrough() as any;
+    req.method = 'POST';
+    req.headers = {
+      'x-dkg-local-agent-integration': 'openclaw',
+      'x-dkg-bridge-token': 'bridge-token',
+    };
+    req.socket = { remoteAddress: '127.0.0.1' };
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(status: number) {
+        this.statusCode = status;
+      },
+      end(body: string) {
+        this.body = body;
+      },
+    };
+    const assertionUri = 'did:dkg:context-graph:cg1/assertion/peer/doc';
+    const payload = buildFileSemanticEventPayload({
+      assertionUri,
+      contextGraphId: 'cg1',
+      fileHash: 'sha256:file',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+      filename: 'doc.md',
+    });
+    const deleteByPattern = vi.fn().mockResolvedValue(undefined);
+    const insert = vi.fn().mockResolvedValue(undefined);
+    let askCount = 0;
+    const query = vi.fn(async (sparql: string) => {
+      if (sparql.includes('sourceFileHash')) {
+        return {
+          bindings: [{
+            fileHash: '"sha256:file"',
+            importStartedAt: '"2026-04-15T12:00:00.000Z"',
+          }],
+        };
+      }
+      if (sparql.includes('semanticTripleCount')) {
+        return { bindings: [{ count: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>' }] };
+      }
+      if (sparql.includes('ASK')) {
+        askCount += 1;
+        if (askCount === 1) return { value: false };
+        throw new Error('pre-insert snapshot failed');
+      }
+      return { bindings: [] };
+    });
+    const body = JSON.stringify({
+      eventId: 'evt-snapshot-fail',
+      leaseOwner: 'host-a:123:boot-1',
+      payloadHash: semanticPayloadHashForTest(payload),
+      triples: [{
+        subject: 'urn:dkg:entity:acme',
+        predicate: 'http://schema.org/name',
+        object: '"Acme"',
+      }],
+    });
+
+    const responsePromise = handleSemanticEnrichmentRoutes({
+      req,
+      res: res as any,
+      path: '/api/semantic-enrichment/events/append',
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+          },
+        },
+      }),
+      dashDb: {
+        getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+          id: 'evt-snapshot-fail',
+          kind: 'file_import',
+          idempotency_key: 'file',
+          payload_json: JSON.stringify(payload),
+          status: 'leased',
+          attempts: 1,
+          max_attempts: 5,
+          lease_owner: 'host-a:123:boot-1',
+          lease_expires_at: Date.now() + 60_000,
+          next_attempt_at: Date.now(),
+          semantic_triple_count: 0,
+          last_error: null,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        }),
+      },
+      agent: {
+        resolveAgentByToken: () => undefined,
+        store: { query, insert, deleteByPattern },
+      },
+      extractionStatus: new Map(),
+      requestToken: 'bridge-token',
+      bridgeAuthToken: 'bridge-token',
+    } as any);
+    req.end(body);
+
+    await expect(responsePromise).rejects.toThrow('pre-insert snapshot failed');
+    expect(insert).not.toHaveBeenCalled();
+    expect(deleteByPattern).not.toHaveBeenCalledWith({
+      subject: assertionUri,
+      predicate: 'http://dkg.io/ontology/semanticTripleCount',
+      graph: 'did:dkg:context-graph:cg1/_meta',
+    });
+  });
+
   it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
@@ -1743,7 +1850,7 @@ describe('best-effort semantic enqueue helper', () => {
     expect(payload).not.toHaveProperty('rootEntity');
   });
 
-  it('refreshes pending chat-turn payloads before reusing an existing semantic event', () => {
+  it('uses payload-versioned chat-turn idempotency keys so completed draft events do not block final enrichment', () => {
     const oldPayload = {
       kind: 'chat_turn' as const,
       sessionId: 'openclaw:dkg-ui',
@@ -1762,12 +1869,12 @@ describe('best-effort semantic enqueue helper', () => {
       assistantReply: 'final answer with more grounded detail',
       persistenceState: 'stored' as const,
     };
-    let row: any = {
+    const oldRow: any = {
       id: 'evt-chat-refresh',
       kind: 'chat_turn',
-      idempotency_key: 'chat-turn:turn-refresh',
+      idempotency_key: `chat:turn-refresh|${semanticPayloadHashForTest(oldPayload)}`,
       payload_json: JSON.stringify(oldPayload),
-      status: 'pending',
+      status: 'completed',
       semantic_triple_count: 5,
       attempts: 0,
       max_attempts: 5,
@@ -1778,30 +1885,16 @@ describe('best-effort semantic enqueue helper', () => {
       created_at: 900,
       updated_at: 1_000,
     };
+    const insertedRows: any[] = [];
     const dashDb = {
-      getSemanticEnrichmentEventByIdempotencyKey: vi.fn(() => row),
-      refreshActiveSemanticEnrichmentEventPayload: vi.fn((
-        id: string,
-        payloadJson: string,
-        semanticTripleCount: number,
-        updatedAt: number,
-      ) => {
-        row = {
-          ...row,
-          payload_json: payloadJson,
-          status: 'pending',
-          semantic_triple_count: semanticTripleCount,
-          attempts: 0,
-          next_attempt_at: updatedAt,
-          lease_owner: null,
-          lease_expires_at: null,
-          last_error: null,
-          updated_at: updatedAt,
-        };
-        return id === 'evt-chat-refresh';
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn((key: string) =>
+        key === oldRow.idempotency_key ? oldRow : undefined,
+      ),
+      refreshActiveSemanticEnrichmentEventPayload: vi.fn(),
+      insertSemanticEnrichmentEvent: vi.fn((row: any) => {
+        insertedRows.push(row);
       }),
-      insertSemanticEnrichmentEvent: vi.fn(),
-      getSemanticEnrichmentEvent: vi.fn(() => row),
+      getSemanticEnrichmentEvent: vi.fn((eventId: string) => insertedRows.find((row) => row.id === eventId)),
     };
 
     const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
@@ -1823,27 +1916,23 @@ describe('best-effort semantic enqueue helper', () => {
       logLabel: 'chat turn refresh',
     });
 
-    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
-    expect(dashDb.refreshActiveSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
-      'evt-chat-refresh',
-      JSON.stringify(newPayload),
-      0,
-      expect.any(Number),
-    );
-    expect(JSON.parse(row.payload_json)).toMatchObject({
-      assistantReply: 'final answer with more grounded detail',
-      persistenceState: 'stored',
-    });
-    expect(row).toMatchObject({
+    const expectedNewKey = `chat:turn-refresh|${semanticPayloadHashForTest(newPayload)}`;
+    expect(dashDb.getSemanticEnrichmentEventByIdempotencyKey).toHaveBeenCalledWith(expectedNewKey);
+    expect(dashDb.refreshActiveSemanticEnrichmentEventPayload).not.toHaveBeenCalled();
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(insertedRows[0]).toMatchObject({
+      kind: 'chat_turn',
+      idempotency_key: expectedNewKey,
       status: 'pending',
       semantic_triple_count: 0,
       attempts: 0,
-      lease_owner: null,
-      lease_expires_at: null,
-      last_error: null,
+    });
+    expect(JSON.parse(insertedRows[0].payload_json)).toMatchObject({
+      assistantReply: 'final answer with more grounded detail',
+      persistenceState: 'stored',
     });
     expect(descriptor).toMatchObject({
-      eventId: 'evt-chat-refresh',
+      eventId: insertedRows[0].id,
       status: 'pending',
       semanticTripleCount: 0,
     });

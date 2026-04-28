@@ -53,8 +53,8 @@ export interface SemanticTripleInput {
   object: string;
 }
 
-export function buildChatSemanticIdempotencyKey(turnId: string): string {
-  return `chat:${turnId}`;
+export function buildChatSemanticIdempotencyKey(turnId: string, payloadHash?: string): string {
+  return `chat:${turnId}${payloadHash ? `|${payloadHash}` : ''}`;
 }
 
 export function buildFileSemanticIdempotencyKey(args: {

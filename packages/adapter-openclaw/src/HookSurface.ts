@@ -26,11 +26,16 @@
  *
  * Kill-switch `strategyOverride`:
  *   - `'auto'` (default) — use the table.
- *   - `'api-on'`         — force `api.on` path for `'typed'` and `'legacy'`.
- *                          For `'internal'` kind, warn and fall back to
- *                          globalThis (N9 footgun guard) — internal events
- *                          are dispatched by the runtime into the globalThis
- *                          map, not the typed-hook dispatcher.
+ *   - `'api-on'`         — force `api.on` path for `'typed'` only. T50 —
+ *                          legacy installs continue to use `api.registerHook`
+ *                          regardless of the override, because legacy events
+ *                          dispatch from `registry.hooks` (not `typedHooks`),
+ *                          so an api.on install for a legacy event would
+ *                          silently never fire. For `'internal'` kind, warn
+ *                          and fall back to globalThis (N9 footgun guard) —
+ *                          internal events are dispatched by the runtime
+ *                          into the globalThis map, not the typed-hook
+ *                          dispatcher.
  *   - `'off'`            — skip all installs, return `null` from every call.
  *                          Emergency kill switch for prod gateway surprises.
  *
@@ -372,24 +377,18 @@ export class HookSurface {
   }
 
   private installLegacy(event: string, handler: HookHandler, key: string): Unsubscribe | null {
-    // R20.3 — Honor `strategyOverride === 'api-on'`. The class contract
-    // (file header) documents that 'api-on' forces both 'typed' AND
-    // 'legacy' onto the `api.on` path; previously this branch ignored
-    // the override and always used `registerHook`, so the documented
-    // override was unreachable. When forced to api-on we fall back to
-    // the typed-install code path so behavior matches the docstring.
-    if (this.strategyOverride === 'api-on') {
-      if (typeof this.api.on !== 'function') {
-        const msg =
-          `[hook-surface] install FAILED: legacy hook ${event} forced to api.on by ` +
-          `strategyOverride='api-on', but api.on is ${typeof this.api.on}.`;
-        this.logger.warn?.(msg);
-        this.setStat(key, { installedVia: 'none', commitState: 'committed-by-timeout', installError: 'api.on not a function' });
-        return null;
-      }
-      return this.installTyped(event, handler, key);
-    }
-
+    // T50 — Legacy events (`session_end`, ...) dispatch from
+    // `registry.hooks`, populated by `api.registerHook` only. Routing
+    // them through `api.on` (which writes to `registry.typedHooks`)
+    // is silent dead code — the dispatcher never looks for legacy
+    // events in the typed-hook map, so e.g. `session_end → stop()`
+    // would never fire and shutdown cleanup would silently break.
+    //
+    // The `'api-on'` override (kill-switch for typed-hook surprises)
+    // is now narrowed to typed installs only. Legacy installs always
+    // use `api.registerHook`; if that's unavailable, fail loud the
+    // same way the typed branch fails when `api.on` is missing.
+    // Documented in the file header.
     if (typeof this.api.registerHook !== 'function') {
       const msg = `api.registerHook is ${typeof this.api.registerHook}`;
       this.logger.warn?.(`[hook-surface] install FAILED: legacy hook ${event} requires api.registerHook: ${msg}`);

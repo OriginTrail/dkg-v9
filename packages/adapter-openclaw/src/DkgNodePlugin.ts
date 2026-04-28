@@ -1999,10 +1999,14 @@ export class DkgNodePlugin {
               type: 'string',
               description:
                 "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
-                'agent address (matches the default the memory plugin uses for its own WM reads). ' +
-                'Prefer the injected `current_agent_address` from chat context when available. Accepts ' +
-                'wallet/address form, raw peer ID, or DID form. Ignored for non-WM views. Supply an ' +
-                'explicit value to read another local agent\'s WM namespace in multi-agent deployments.',
+                'agent eth address (matches the default the memory plugin uses for its own WM reads). ' +
+                'Prefer the injected `current_agent_address` from chat context when available. T48 — ' +
+                'Post-PR-264 must be a 0x-prefixed eth address (matched against `/^0x[0-9a-f]{40}$/i`); ' +
+                'optionally wrapped in the legacy `did:dkg:agent:` prefix which is stripped before use. ' +
+                'Legacy peerId / DID-wrapped peerId values are no longer accepted — WM is keyed by the ' +
+                'daemon\'s writer-side eth identity, and a peerId would silently route to an empty ' +
+                'namespace. Ignored for non-WM views. Supply an explicit value to read another local ' +
+                'agent\'s WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],
@@ -2508,15 +2512,27 @@ export class DkgNodePlugin {
     // `DkgMemorySearchManager.search` returns [] in BOTH cases, but they
     // mean very different things to the agent: a not-ready response
     // should prompt a retry, an empty-result response should prompt a
-    // different query. The peer ID (agentAddress) is what the WM read
-    // path requires — if the resolver hasn't probed it yet, we cannot
-    // run the fan-out at all.
+    // different query. T31 — the WM read path keys by the daemon's
+    // eth-shaped agent address (read from agent-keystore.json); if
+    // the resolver hasn't probed it yet, we cannot run the fan-out
+    // at all.
     const session = this.memorySessionResolver.getSession(undefined);
     const agentAddress = session?.agentAddress ?? this.memorySessionResolver.getDefaultAgentAddress();
     if (!agentAddress) {
       return this.error(
-        'memory_search backend not ready: peer ID has not been resolved yet. ' +
-        'Retry shortly. This is normal for the first few seconds after gateway start.',
+        // T51 — message names the actual missing dependency (agent
+        // eth address, not peerId) and enumerates the operator
+        // recovery knobs so remote/multi-agent setups know where to
+        // look. Co-located default deployments self-heal once the
+        // daemon writes the keystore (typical first few seconds
+        // after gateway start); other shapes need explicit config.
+        'memory_search backend not ready: the node\'s agent eth address has not been ' +
+        'resolved yet. Retry shortly. This is normal for the first few seconds after ' +
+        'gateway start while the daemon writes `<DKG_HOME>/agent-keystore.json`. If it ' +
+        'persists, check: (a) `DKG_HOME` matches the daemon\'s home dir (or set the ' +
+        'adapter `dkgHome` config), (b) the keystore exists and contains a single eth ' +
+        'address, (c) for multi-agent keystores or remote daemonUrl, set ' +
+        '`DKG_AGENT_ADDRESS` env to the active eth address.',
       );
     }
 

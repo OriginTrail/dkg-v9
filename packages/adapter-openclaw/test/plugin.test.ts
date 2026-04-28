@@ -1010,7 +1010,11 @@ describe('DkgNodePlugin', () => {
       expect(query.description).toContain('current_agent_address');
       expect(query.description).toMatch(/retry alternate identity forms/i);
       expect(agentAddress.description).toContain('current_agent_address');
-      expect(agentAddress.description).toMatch(/wallet\/address form, raw peer ID, or DID form/i);
+      // T48/T49 — schema names eth-address shape and explicitly retires
+      // peerId / DID-wrapped peerId as accepted inputs for WM reads.
+      expect(agentAddress.description).toMatch(/0x-prefixed eth address/i);
+      expect(agentAddress.description).toMatch(/legacy peerId/i);
+      expect(agentAddress.description).toMatch(/did:dkg:agent:/);
     });
 
     it('share-flow tool descriptions prefer invite code output for friend-sharing requests', () => {

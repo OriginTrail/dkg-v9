@@ -102,9 +102,9 @@ describe('memory_search tool', () => {
     expect(typeof result).toBe('object');
   });
 
-  it('returns "not ready" error when the resolver has no peer ID yet (R7.6)', async () => {
+  it('returns "not ready" error when the resolver has no agent eth address yet (R7.6 / T51)', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
-    // Force resolver to surface no peer ID (neither session-bound nor default).
+    // Force resolver to surface no agent address (neither session-bound nor default).
     (plugin as any).memorySessionResolver.getSession = () => undefined;
     (plugin as any).memorySessionResolver.getDefaultAgentAddress = () => undefined;
 
@@ -112,7 +112,12 @@ describe('memory_search tool', () => {
     const text = (result as any).content?.[0]?.text ?? '';
     // Tool should return the structured "not ready" error, NOT an empty hits list.
     expect(text).toMatch(/not ready/i);
-    expect(text).toMatch(/peer ID/i);
+    // T51 — message names the actual missing dependency (agent eth address)
+    // and surfaces the operator recovery knobs (DKG_HOME/dkgHome/keystore/
+    // DKG_AGENT_ADDRESS) so remote/multi-agent setups know where to look.
+    expect(text).toMatch(/agent eth address/i);
+    expect(text).toMatch(/DKG_AGENT_ADDRESS/);
+    expect(text).toMatch(/dkgHome/);
   });
 
   it('re-asserts memory-slot capability before running the search (R7.5 mode-independent anchor)', async () => {

@@ -116,25 +116,30 @@ describe("HookSurface", () => {
       expect(logger.warn).toHaveBeenCalled();
     });
 
-    it("R20.3 — api-on strategy override forces legacy hooks onto api.on (not registerHook)", () => {
-      // Regression for R20.3: the class contract documents that
-      // `strategyOverride: 'api-on'` forces both 'typed' AND 'legacy'
-      // onto the `api.on` path, but `installLegacy` previously ignored
-      // the override and always called `registerHook`. The fix reroutes
-      // legacy installs through `api.on` when the override is set.
+    it("T50 — api-on strategy override does NOT route legacy hooks through api.on (would silently never fire)", () => {
+      // T50 supersedes R20.3. The earlier R20.3 routed legacy installs
+      // through api.on when the override was set (per the original
+      // docstring), but legacy events (e.g. `session_end`) dispatch
+      // from `registry.hooks`, NOT `registry.typedHooks`. An api.on
+      // install for a legacy event lands in typedHooks, where the
+      // dispatcher never looks for legacy events — silent no-fire,
+      // shutdown/cleanup hooks broken. The override is now narrowed
+      // to typed hooks only; legacy continues to use registerHook
+      // regardless.
       const api = mkApi();
       const hs = new HookSurface(api, mkLogger(), "api-on");
       const unsub = hs.install("legacy", "session_end", vi.fn());
       expect(unsub).not.toBeNull();
-      // api.on must have been called; api.registerHook must NOT.
-      expect(api.on).toHaveBeenCalled();
-      expect(api.registerHook).not.toHaveBeenCalled();
+      expect(api.registerHook).toHaveBeenCalled();
+      expect(api.on).not.toHaveBeenCalled();
     });
 
-    it("R20.3 — api-on strategy override returns null when api.on is absent", () => {
-      // The override reroutes to api.on, but if api.on isn't a function
-      // we should fail loud (not silently fall back to registerHook).
-      const api = mkApi({ on: undefined as any });
+    it("T50 — api-on strategy override on legacy returns null when registerHook is absent (fails loud)", () => {
+      // Same fail-loud shape as the typed branch when api.on is
+      // missing. Pre-T50 this case would have routed to api.on under
+      // the override; post-T50 it must surface the genuine missing-
+      // registerHook condition.
+      const api = mkApi({ registerHook: undefined as any });
       const logger = mkLogger();
       const hs = new HookSurface(api, logger, "api-on");
       const unsub = hs.install("legacy", "session_end", vi.fn());

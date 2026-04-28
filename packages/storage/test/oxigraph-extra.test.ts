@@ -690,3 +690,252 @@ describe('OxigraphStore — per-position numeric-subtype conflict (r31-8 regress
     await store.close();
   });
 });
+
+// =======================================================================
+// PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b): when the last
+// per-key conflict marker for a lexeme is evicted (because the
+// contributing quad was deleted, the graph dropped, or the subject
+// prefix wiped) the COMPANION lexeme-level marker MUST also be
+// recomputed against ground truth. Pre-r31-13 the lexeme marker was
+// kept "pessimistically" forever, so once `"V"` had a transient
+// conflict at any position EVERY future write of any
+// `"V"^^xsd:<numeric>` literal across the entire store fell back to
+// canonical xsd:integer regardless of whether any conflict still
+// existed.
+// =======================================================================
+describe('OxigraphStore — lexeme-marker GC after conflict-key eviction (r31-13 KK3b regression)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema';
+  const intType = `${XSD}#int`;
+  const positiveIntegerType = `${XSD}#positiveInteger`;
+  const integerType = `${XSD}#integer`;
+  const longType = `${XSD}#long`;
+  const predicate = 'http://ex.org/v';
+
+  it('after delete() removes the contributing quad, a FRESH write of the same lexeme on a clean key is restorable to its declared subtype (lexeme marker GC\'d)', async () => {
+    const store = new OxigraphStore();
+    const subject = 'urn:dkg:r31-13-kk3b:s';
+    const graph = 'urn:dkg:r31-13-kk3b:g';
+
+    await store.insert([
+      { subject, predicate, object: `"9"^^<${intType}>`, graph },
+    ]);
+    await store.insert([
+      { subject, predicate, object: `"9"^^<${positiveIntegerType}>`, graph },
+    ]);
+
+    {
+      const r = await store.query(
+        `SELECT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+      );
+      expect(r.type).toBe('bindings');
+      if (r.type !== 'bindings') return;
+      expect(r.bindings).toHaveLength(1);
+      expect(r.bindings[0]['o']).toBe(`"9"^^<${integerType}>`);
+    }
+
+    // Delete the conflicting canonical literal at this position.
+    // r31-8 already drops the per-key conflict marker; r31-13
+    // additionally GCs the lexeme-level marker because no remaining
+    // key still conflicts on `"9"`.
+    await store.delete([
+      { subject, predicate, object: `"9"^^<${integerType}>`, graph },
+    ]);
+
+    // Fresh write of the same lexeme on a clean key — pre-KK3b the
+    // stale lexeme marker would have permanently downgraded this
+    // restore to xsd:integer, even though there is no remaining
+    // conflict anywhere in the store.
+    const otherSubject = 'urn:dkg:r31-13-kk3b:other';
+    const otherGraph = 'urn:dkg:r31-13-kk3b:other-graph';
+    await store.insert([
+      { subject: otherSubject, predicate, object: `"9"^^<${longType}>`, graph: otherGraph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${otherGraph}> { <${otherSubject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    expect(r.bindings[0]['o']).toBe(`"9"^^<${longType}>`);
+    expect(r.bindings[0]['o']).not.toBe(`"9"^^<${integerType}>`);
+    await store.close();
+  });
+
+  it('after dropGraph() wipes the contributing graph, a fresh write of the same lexeme in a different graph is restorable (evict path GCs lexeme marker)', async () => {
+    const store = new OxigraphStore();
+    const conflictGraph = 'urn:dkg:r31-13-kk3b:dropme';
+    const subject = 'urn:dkg:r31-13-kk3b:dropsubject';
+
+    await store.insert([
+      { subject, predicate, object: `"3"^^<${intType}>`, graph: conflictGraph },
+    ]);
+    await store.insert([
+      { subject, predicate, object: `"3"^^<${positiveIntegerType}>`, graph: conflictGraph },
+    ]);
+
+    await store.dropGraph(conflictGraph);
+
+    // Fresh write of the same lexeme in a fully unrelated graph.
+    // Pre-KK3b the lexeme-level marker survived dropGraph and
+    // permanently downgraded this restore.
+    const cleanSubject = 'urn:dkg:r31-13-kk3b:cleansubject';
+    const cleanGraph = 'urn:dkg:r31-13-kk3b:cleangraph';
+    await store.insert([
+      { subject: cleanSubject, predicate, object: `"3"^^<${longType}>`, graph: cleanGraph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${cleanGraph}> { <${cleanSubject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    expect(r.bindings[0]['o']).toBe(`"3"^^<${longType}>`);
+    expect(r.bindings[0]['o']).not.toBe(`"3"^^<${integerType}>`);
+    await store.close();
+  });
+
+  it('lexeme marker is RETAINED while ANOTHER per-key conflict still references that lexeme (partial eviction must not over-release)', async () => {
+    const store = new OxigraphStore();
+    const lexeme = '11';
+    const conflictPredicate = 'http://ex.org/conflict';
+    const aSubject = 'urn:dkg:r31-13-kk3b:guard:a';
+    const bSubject = 'urn:dkg:r31-13-kk3b:guard:b';
+    const aGraph = 'urn:dkg:r31-13-kk3b:guard:agraph';
+    const bGraph = 'urn:dkg:r31-13-kk3b:guard:bgraph';
+
+    // Conflict #1: subject A in graph A.
+    await store.insert([
+      { subject: aSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${intType}>`, graph: aGraph },
+    ]);
+    await store.insert([
+      { subject: aSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${positiveIntegerType}>`, graph: aGraph },
+    ]);
+    // Conflict #2: subject B in graph B (independent key, same lexeme).
+    await store.insert([
+      { subject: bSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${intType}>`, graph: bGraph },
+    ]);
+    await store.insert([
+      { subject: bSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${positiveIntegerType}>`, graph: bGraph },
+    ]);
+
+    // Drop graph A — releases conflict-key #1 only. Conflict-key #2
+    // still references lexeme `11`, so the lexeme marker MUST stay.
+    await store.dropGraph(aGraph);
+
+    // Fresh write of the same lexeme on a clean key — the lexeme
+    // marker must still suppress lexical-only restore here, because
+    // ambiguity for `11` is still real (subject B in graph B).
+    const guardSubject = 'urn:dkg:r31-13-kk3b:guard:fresh';
+    const guardGraph = 'urn:dkg:r31-13-kk3b:guard:freshgraph';
+    await store.insert([
+      { subject: guardSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${longType}>`, graph: guardGraph },
+    ]);
+
+    // Project across all graphs without binding ?g so the lexical
+    // fallback would fire if the lexeme marker had been mistakenly
+    // released.
+    const r = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH ?g { ?s <${conflictPredicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    const guardRow = r.bindings.find((b) => b['s'] === guardSubject);
+    expect(guardRow).toBeDefined();
+    if (!guardRow) return;
+    // Must remain canonical because lexeme `11` is still ambiguous
+    // somewhere in the live store.
+    expect(guardRow['o']).toBe(`"${lexeme}"^^<${integerType}>`);
+    expect(guardRow['o']).not.toBe(`"${lexeme}"^^<${longType}>`);
+
+    // Now drop graph B too — lexeme `11` finally has no remaining
+    // contributing key. The lexeme marker MUST now be released, and
+    // a fresh write on yet another clean key must restore correctly.
+    await store.dropGraph(bGraph);
+
+    const finalSubject = 'urn:dkg:r31-13-kk3b:guard:final';
+    const finalGraph = 'urn:dkg:r31-13-kk3b:guard:finalgraph';
+    await store.insert([
+      { subject: finalSubject, predicate: conflictPredicate, object: `"${lexeme}"^^<${longType}>`, graph: finalGraph },
+    ]);
+    const r2 = await store.query(
+      `SELECT ?o WHERE { GRAPH <${finalGraph}> { <${finalSubject}> <${conflictPredicate}> ?o } }`,
+    );
+    expect(r2.type).toBe('bindings');
+    if (r2.type !== 'bindings') return;
+    expect(r2.bindings).toHaveLength(1);
+    expect(r2.bindings[0]['o']).toBe(`"${lexeme}"^^<${longType}>`);
+    await store.close();
+  });
+
+  it('after deleteBySubjectPrefix() wipes the contributing subject, a fresh write of the same lexeme in another subject is restorable', async () => {
+    const store = new OxigraphStore();
+    // Conflict on subject prefix `urn:dkg:r31-13-kk3b:wipe:`.
+    const conflictSubject = 'urn:dkg:r31-13-kk3b:wipe:conflict';
+    const conflictGraph = 'urn:dkg:r31-13-kk3b:wipe:graph';
+
+    await store.insert([
+      { subject: conflictSubject, predicate, object: `"77"^^<${intType}>`, graph: conflictGraph },
+    ]);
+    await store.insert([
+      { subject: conflictSubject, predicate, object: `"77"^^<${positiveIntegerType}>`, graph: conflictGraph },
+    ]);
+
+    await store.deleteBySubjectPrefix(conflictGraph, 'urn:dkg:r31-13-kk3b:wipe:');
+
+    // Fresh write — must NOT be downgraded by a stale lexeme marker.
+    const cleanSubject = 'urn:dkg:r31-13-kk3b:wipe:clean';
+    await store.insert([
+      { subject: cleanSubject, predicate, object: `"77"^^<${longType}>`, graph: conflictGraph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${conflictGraph}> { <${cleanSubject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    expect(r.bindings[0]['o']).toBe(`"77"^^<${longType}>`);
+    expect(r.bindings[0]['o']).not.toBe(`"77"^^<${integerType}>`);
+    await store.close();
+  });
+
+  it('forgetNumericDatatype on a non-numeric quad does NOT release unrelated lexeme markers', async () => {
+    const store = new OxigraphStore();
+    const subject = 'urn:dkg:r31-13-kk3b:noop:s';
+    const graph = 'urn:dkg:r31-13-kk3b:noop:g';
+
+    // Establish a real conflict on lexeme `13` so a lexeme marker exists.
+    await store.insert([
+      { subject, predicate, object: `"13"^^<${intType}>`, graph },
+    ]);
+    await store.insert([
+      { subject, predicate, object: `"13"^^<${positiveIntegerType}>`, graph },
+    ]);
+
+    // Delete an UNRELATED non-numeric quad — must not GC anything.
+    await store.insert([
+      { subject, predicate: 'http://ex.org/label', object: '"hello"', graph },
+    ]);
+    await store.delete([
+      { subject, predicate: 'http://ex.org/label', object: '"hello"', graph },
+    ]);
+
+    // Lexeme marker for `13` must still suppress restore on a fresh key.
+    const cleanSubject = 'urn:dkg:r31-13-kk3b:noop:clean';
+    const cleanGraph = 'urn:dkg:r31-13-kk3b:noop:cleangraph';
+    await store.insert([
+      { subject: cleanSubject, predicate, object: `"13"^^<${longType}>`, graph: cleanGraph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${cleanGraph}> { <${cleanSubject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    expect(r.bindings[0]['o']).toBe(`"13"^^<${integerType}>`);
+    await store.close();
+  });
+});

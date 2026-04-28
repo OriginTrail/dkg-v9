@@ -1169,11 +1169,48 @@ export async function persistChatTurnImpl(
       };
     }
 
-    const assistantText = (message as any)?.content?.text
-      ?? optsAny.assistantText
-      ?? optsAny.assistantReply?.text
-      ?? (state as any)?.lastAssistantReply
-      ?? '';
+    // PR #229 bot review (r31-13 — actions.ts:1172, KK3X).
+    //
+    // Pre-r31-13 used `??` for the entire fallback chain. `??` only
+    // bridges null/undefined — `''` is a defined-but-empty string and
+    // SHORT-CIRCUITS the chain, so an assistant hook that delivers
+    // the final text in `options.assistantText` /
+    // `options.assistantReply.text` / `state.lastAssistantReply` and
+    // leaves `message.content.text` as `''` (the real-world shape:
+    // ElizaOS assistant memories often surface only `options.text`
+    // when the runtime accepts the raw model output before stamping
+    // the memory record) ended up persisting a BLANK
+    // `schema:text` on the canonical `msg:agent:K` subject —
+    // exactly the regression the documented fallback chain was
+    // there to PREVENT.
+    //
+    // Fix: select the FIRST non-empty string in the chain, mirroring
+    // the wrapper boundary (`onAssistantReplyHandler` in src/index.ts)
+    // which already uses explicit length checks for the same reason.
+    // A string is "non-empty" when it's a string AND has at least one
+    // non-whitespace character — purely-whitespace text would still
+    // be a degenerate reply payload and we'd rather fall back to the
+    // next candidate than persist `"   "` as the final assistant
+    // reply. If ALL candidates are empty/whitespace/missing the chain
+    // collapses to `''` exactly as before (preserving the original
+    // semantics for the fully-empty case — that branch is what the
+    // r31-11 IoNQ guard actively short-circuits upstream of this
+    // path; reaching here with an all-empty payload is degenerate
+    // either way).
+    const pickNonEmptyText = (...candidates: unknown[]): string => {
+      for (const candidate of candidates) {
+        if (typeof candidate !== 'string') continue;
+        if (candidate.trim().length === 0) continue;
+        return candidate;
+      }
+      return '';
+    };
+    const assistantText = pickNonEmptyText(
+      (message as any)?.content?.text,
+      optsAny.assistantText,
+      optsAny.assistantReply?.text,
+      (state as any)?.lastAssistantReply,
+    );
     if (headlessAssistantReply) {
       // PR #229 bot review round 8 (actions.ts:746): the reader in
       // `packages/node-ui/src/chat-memory.ts` requires BOTH
@@ -1376,11 +1413,31 @@ export async function persistChatTurnImpl(
     // message, the turn envelope, and (if the same call has captured an
     // assistant reply on `state` / `options`) the assistant message.
     const userText = message.content?.text ?? '';
-    const assistantText =
-      optsAny.assistantText
-      ?? optsAny.assistantReply?.text
-      ?? (state as any)?.lastAssistantReply
-      ?? '';
+    // PR #229 bot review (r31-13 — actions.ts:1172, KK3X). Same
+    // short-circuit hazard as the assistant-reply branch above:
+    // `??` only bridges null/undefined, so an explicit `''` on
+    // `optsAny.assistantText` (or `optsAny.assistantReply.text`)
+    // would have suppressed the legitimate fallback to the next
+    // candidate. In the user-turn path the symptom is different —
+    // the `if (assistantText)` guard on line 1448 means an empty
+    // first candidate causes the entire assistant leg to be
+    // SILENTLY DROPPED even though `state.lastAssistantReply`
+    // had the real text. Use the same first-non-empty selector
+    // as the assistant-reply branch so the documented fallback
+    // chain actually runs.
+    const pickNonEmptyAssistantText = (...candidates: unknown[]): string => {
+      for (const candidate of candidates) {
+        if (typeof candidate !== 'string') continue;
+        if (candidate.trim().length === 0) continue;
+        return candidate;
+      }
+      return '';
+    };
+    const assistantText = pickNonEmptyAssistantText(
+      optsAny.assistantText,
+      optsAny.assistantReply?.text,
+      (state as any)?.lastAssistantReply,
+    );
 
     // PR #229 r3131820483 + r31-11: synchronous atomic reservation.
     // See the rationale block above on the headless branch — same

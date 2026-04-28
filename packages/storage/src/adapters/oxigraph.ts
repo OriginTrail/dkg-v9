@@ -88,6 +88,66 @@ export class OxigraphStore implements TripleStore {
   }
 
   /**
+   * Reverse of {@link numericDatatypeKey} — extract the lexeme `value`
+   * field from a key. Used by {@link maybeReleaseLexemeMarker} to walk
+   * the remaining conflict-key set when deciding whether the
+   * companion lexeme-level marker is still needed.
+   *
+   * Returns `undefined` for malformed keys (e.g. legacy hydrated keys
+   * whose serialisation predates the 4-segment NUL shape) so the
+   * caller treats them as "lexeme unknown — keep the marker
+   * pessimistically" instead of falsely releasing it.
+   *
+   * PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b).
+   */
+  private static parseLexemeFromNumericDatatypeKey(key: string): string | undefined {
+    const parts = key.split('\u0000');
+    if (parts.length !== 4) return undefined;
+    return parts[2];
+  }
+
+  /**
+   * After removing one or more entries from
+   * {@link conflictedNumericDatatypeKeys}, check whether the
+   * companion lexeme markers in {@link conflictedNumericDatatypeLexemes}
+   * are still warranted. A lexeme marker is only meaningful when AT
+   * LEAST ONE per-key conflict still references that exact lexeme —
+   * once every contributing key has been evicted (e.g. the
+   * conflicting quad was deleted, the graph dropped, or the subject
+   * prefix wiped) the lexeme marker becomes a phantom that
+   * permanently downgrades unrelated future writes for the same
+   * lexeme to Oxigraph's canonical `xsd:integer`.
+   *
+   * PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). Pre-r31-13
+   * the lexeme marker was kept "pessimistically" forever — once
+   * `"1"` had a transient conflict at any position, EVERY future
+   * SELECT/CONSTRUCT of any `"1"^^xsd:long` literal across the
+   * entire store fell back to `xsd:integer` regardless of whether
+   * any conflict still actually existed in the live quad set, even
+   * after the contributing quad was deleted or the graph was
+   * dropped. This recomputes the marker from ground truth.
+   */
+  private maybeReleaseLexemeMarkers(lexemes: Iterable<string>): void {
+    const candidates = new Set<string>();
+    for (const lex of lexemes) {
+      if (typeof lex === 'string' && lex.length > 0 && this.conflictedNumericDatatypeLexemes.has(lex)) {
+        candidates.add(lex);
+      }
+    }
+    if (candidates.size === 0) return;
+    for (const k of this.conflictedNumericDatatypeKeys) {
+      if (candidates.size === 0) return;
+      const lex = OxigraphStore.parseLexemeFromNumericDatatypeKey(k);
+      if (lex !== undefined && candidates.has(lex)) {
+        candidates.delete(lex);
+      }
+    }
+    for (const lex of candidates) {
+      this.conflictedNumericDatatypeLexemes.delete(lex);
+    }
+  }
+
+  /**
    * @param persistPath  If provided, the store will dump/load N-Quads
    *   to this file path for persistence across restarts. The underlying
    *   store is still in-memory, but data is hydrated on construction
@@ -163,10 +223,21 @@ export class OxigraphStore implements TripleStore {
     // marker becomes meaningless — Oxigraph collapsed both writes
     // into the single canonical literal that the caller is now
     // removing, so there is nothing left to restore-or-refuse for
-    // this key. Drop the key marker. The lexeme marker is kept
-    // pessimistically because OTHER positions for the same lexeme
-    // may still be ambiguous in SELECT projections.
+    // this key. Drop the key marker.
+    //
+    // PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). The
+    // companion lexeme marker MUST also be re-evaluated against
+    // ground truth: if no remaining conflict-key still references
+    // this lexeme, the lexeme marker is dead too. Pre-r31-13 the
+    // lexeme marker was kept "pessimistically" forever, which made
+    // subtype loss permanent for that literal — every later SELECT
+    // of an otherwise unambiguous `"V"^^...` would fall back to
+    // Oxigraph's canonical `xsd:integer` even after the contributing
+    // quad / graph was gone. `maybeReleaseLexemeMarkers()` walks the
+    // remaining conflict-key set and only releases the lexeme when
+    // no key still contributes.
     this.conflictedNumericDatatypeKeys.delete(key);
+    this.maybeReleaseLexemeMarkers([value]);
   }
 
   /**
@@ -192,10 +263,25 @@ export class OxigraphStore implements TripleStore {
     // graph would leave dangling conflict markers that block
     // unrelated future writes from the same key shape (e.g. a fresh
     // graph re-using a UAL pattern).
+    //
+    // PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). Collect
+    // every lexeme that we drop a key for, then re-evaluate the
+    // companion lexeme markers from ground truth. Without this, a
+    // `dropGraph()` would erase the per-key conflict markers but
+    // leave the lexeme markers behind forever, permanently
+    // downgrading every future write of those literals to Oxigraph's
+    // canonical `xsd:integer` even though no actual conflict
+    // remains anywhere in the live store.
+    const evictedLexemes = new Set<string>();
     for (const k of this.conflictedNumericDatatypeKeys) {
       if (!k.endsWith(suffix)) continue;
       if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
+      const lex = OxigraphStore.parseLexemeFromNumericDatatypeKey(k);
+      if (lex !== undefined) evictedLexemes.add(lex);
       this.conflictedNumericDatatypeKeys.delete(k);
+    }
+    if (evictedLexemes.size > 0) {
+      this.maybeReleaseLexemeMarkers(evictedLexemes);
     }
   }
 

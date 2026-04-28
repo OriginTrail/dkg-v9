@@ -2319,3 +2319,210 @@ describe('persistChatTurnImpl — r31-11 (IoNR): session-root reservation race +
     expect(convRoot(publishes[0].quads)).toHaveLength(1);
   });
 });
+
+// ===========================================================================
+// PR #229 round 31 (r31-13 — actions.ts:1172, KK3X): the assistantText
+// fallback chain used `??`, which only bridges null/undefined and
+// SHORT-CIRCUITS on `''`. The bug fires in TWO places: the
+// `mode: 'assistant-reply'` branch (where an ElizaOS assistant memory
+// often surfaces with `message.content.text === ''` while the real
+// reply rides on `options.assistantText` / `options.assistantReply.text`
+// / `state.lastAssistantReply`) and the user-turn branch (where an
+// explicit `optsAny.assistantText = ''` short-circuited the chain and
+// silently dropped the assistant leg even though
+// `state.lastAssistantReply` carried the real text). Fix: in BOTH
+// branches use a first-non-empty selector that mirrors the wrapper
+// boundary in `src/index.ts`.
+// ===========================================================================
+describe('persistChatTurnImpl — PR #229 round 31 (r31-13, KK3X): assistantText fallback honours ALL non-empty candidates', () => {
+  const findAssistantText = (quads: any[], assistantMsgUri: string): string | undefined => {
+    const match = quads.find(
+      (q) => q.subject === assistantMsgUri && q.predicate === `${SCHEMA}text`,
+    );
+    return match?.object;
+  };
+
+  // -----------------------------------------------------------------
+  // assistant-reply branch — the bug's original site (actions.ts:1172).
+  // -----------------------------------------------------------------
+
+  it('assistant-reply: empty message.content.text + non-empty options.assistantText → assistantText IS persisted (NOT blank schema:text)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    // The assistant memory's own content is empty (real-world shape:
+    // ElizaOS surfaces the raw model output via options before
+    // stamping the memory record). The fallback chain MUST find the
+    // text on optsAny.assistantText.
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('', { id: 'asst-mem-1', roomId: 'kk3x-r', userId: 'agent-eliza' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'mem-u', userTurnPersisted: true, assistantText: 'real reply via options' } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-r:mem-u';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    // Pre-fix: '""' (empty literal). Post-fix: the real reply text.
+    expect(text).toBe('"real reply via options"');
+    expect(text).not.toBe('""');
+  });
+
+  it('assistant-reply: empty content.text + empty options.assistantText + non-empty assistantReply.text → assistantReply.text IS persisted', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('', { id: 'asst-mem-2', roomId: 'kk3x-r', userId: 'agent-eliza' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-u-2',
+        userTurnPersisted: true,
+        assistantText: '',
+        assistantReply: { text: 'real reply via assistantReply' },
+      } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-r:mem-u-2';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"real reply via assistantReply"');
+    expect(text).not.toBe('""');
+  });
+
+  it('assistant-reply: empty content.text + empty options chain + non-empty state.lastAssistantReply → state IS used', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('', { id: 'asst-mem-3', roomId: 'kk3x-r', userId: 'agent-eliza' } as any),
+      { lastAssistantReply: 'real reply via state' } as unknown as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-u-3',
+        userTurnPersisted: true,
+        assistantText: '',
+        assistantReply: { text: '' },
+      } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-r:mem-u-3';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"real reply via state"');
+  });
+
+  it('assistant-reply: whitespace-only content.text falls through to the next candidate (whitespace is NOT a real reply)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('   \n\t  ', { id: 'asst-mem-4', roomId: 'kk3x-r', userId: 'agent-eliza' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-u-4',
+        userTurnPersisted: true,
+        assistantText: 'real reply',
+      } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-r:mem-u-4';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    // Pre-fix `??` kept the whitespace-only string verbatim.
+    // Post-fix the selector also rejects whitespace-only candidates.
+    expect(text).toBe('"real reply"');
+  });
+
+  it('assistant-reply: non-empty content.text wins — the selector does NOT skip the first candidate when it is genuinely populated', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('FIRST WINS', { id: 'asst-mem-5', roomId: 'kk3x-r', userId: 'agent-eliza' } as any),
+      { lastAssistantReply: 'should not appear' } as unknown as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-u-5',
+        userTurnPersisted: true,
+        assistantText: 'should not appear',
+        assistantReply: { text: 'nor this' },
+      } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-r:mem-u-5';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"FIRST WINS"');
+  });
+
+  // -----------------------------------------------------------------
+  // user-turn branch — the SAME `??` short-circuit hazard with a
+  // different symptom: when `optsAny.assistantText` is `''`, the
+  // legitimate fallbacks on `assistantReply.text` /
+  // `state.lastAssistantReply` were SKIPPED and the `if (assistantText)`
+  // guard on line 1448 SILENTLY DROPPED the entire assistant leg
+  // even though the real reply text was right there in state.
+  // -----------------------------------------------------------------
+
+  it('user-turn: empty options.assistantText + non-empty assistantReply.text → assistant leg IS emitted (NOT silently dropped)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'kk3x-ut-1', roomId: 'kk3x-ut', userId: 'u' } as any),
+      {} as State,
+      { assistantText: '', assistantReply: { text: 'real reply via assistantReply' } } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-ut:kk3x-ut-1';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    // Pre-fix this was UNDEFINED (assistant leg dropped because
+    // `'' ?? ...` returned `''` and `if (assistantText)` was falsy).
+    expect(text).toBe('"real reply via assistantReply"');
+    // The hasAssistantMessage link must also be present.
+    expect(publishes[0].quads).toContainEqual(
+      expect.objectContaining({ subject: out.turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri }),
+    );
+  });
+
+  it('user-turn: empty options.assistantText + empty assistantReply.text + non-empty state.lastAssistantReply → state IS used (NOT dropped)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'kk3x-ut-2', roomId: 'kk3x-ut', userId: 'u' } as any),
+      { lastAssistantReply: 'real reply via state' } as unknown as State,
+      { assistantText: '', assistantReply: { text: '' } } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-ut:kk3x-ut-2';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"real reply via state"');
+  });
+
+  it('user-turn: whitespace-only options.assistantText falls through to next candidate', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'kk3x-ut-3', roomId: 'kk3x-ut', userId: 'u' } as any),
+      {} as State,
+      { assistantText: '   \t\n   ', assistantReply: { text: 'real reply' } } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-ut:kk3x-ut-3';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"real reply"');
+  });
+
+  it('user-turn: ALL assistant candidates empty → user-only turn (no assistant subject, no hasAssistantMessage link)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'kk3x-ut-4', roomId: 'kk3x-ut', userId: 'u' } as any),
+      {} as State,
+      {},
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-ut:kk3x-ut-4';
+    // Empty/missing chain MUST collapse to the user-only turn shape
+    // exactly as before the fix — preserve the all-empty contract.
+    expect(findAssistantText(publishes[0].quads, assistantMsgUri)).toBeUndefined();
+    expect(publishes[0].quads.some((q) => q.predicate === `${DKG_ONT}hasAssistantMessage`)).toBe(false);
+    expect(out.turnUri).toBe('urn:dkg:chat:turn:kk3x-ut:kk3x-ut-4');
+  });
+
+  it('user-turn: non-empty options.assistantText wins (selector does not skip a populated first candidate)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'kk3x-ut-5', roomId: 'kk3x-ut', userId: 'u' } as any),
+      { lastAssistantReply: 'should not appear' } as unknown as State,
+      { assistantText: 'first wins', assistantReply: { text: 'nor this' } } as any,
+    );
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:kk3x-ut:kk3x-ut-5';
+    const text = findAssistantText(publishes[0].quads, assistantMsgUri);
+    expect(text).toBe('"first wins"');
+  });
+});

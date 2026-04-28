@@ -2427,6 +2427,79 @@ describe('DkgNodePlugin', () => {
     expect((plugin as any).chatTurnWriter).toBeNull();
   });
 
+  it('R24.2 — DKG-Memory prompt section is NOT installed in setup-runtime mode (tools not registered there)', () => {
+    // Regression for R24.2: pre-fix, the "Prefer memory_search" prompt
+    // guidance was installed on every runtime-enabled registration
+    // including `setup-runtime`. But `memory_search` / `dkg_query` are
+    // registered only in `full` mode (the tool-registration loop in
+    // register() is `fullRuntime`-gated). So in setup-runtime the model
+    // would be told to use a tool that does not exist on this phase.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-runtime',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).not.toHaveBeenCalled();
+  });
+
+  it('R24.2 — DKG-Memory prompt section is NOT installed when memory.enabled is false (tool would error)', () => {
+    // Regression for R24.2: when memory is config-disabled, `memory_search`
+    // returns "memory unavailable" and the prompt guidance is misleading.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).not.toHaveBeenCalled();
+  });
+
+  it('R24.2 — DKG-Memory prompt section IS installed in full mode with memory enabled', () => {
+    // Positive control: confirms the gate is not too tight.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    const call = promptSpy.mock.calls[0][0];
+    expect(call.title).toBe('DKG Memory');
+    expect(call.body).toContain('memory_search');
+  });
+
   it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {
     // Regression for R23.2: pre-fix, stop() called hookSurface.destroy()
     // but left this.hookSurface and this.hookSurfaceApi populated.

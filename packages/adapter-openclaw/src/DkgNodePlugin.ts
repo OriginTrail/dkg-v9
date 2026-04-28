@@ -505,10 +505,28 @@ export class DkgNodePlugin {
     // I8 — tool-selection guidance injected into the system prompt every turn.
     // Reaches the agent model directly (unlike SKILL.md which only reaches
     // doc-readers). Feature-detected: no-op on gateways that haven't wired it.
+    //
+    // R24.2 — Gate the prompt-section install on actual tool availability:
+    //   1. `fullRuntime` — `memory_search` / `dkg_query` are registered only
+    //      in full mode (the tool registration loop in `register()` is
+    //      `if (fullRuntime)`-gated). Installing the "Prefer `memory_search`"
+    //      guidance under setup-runtime would tell the model to use a tool
+    //      that does not exist on this gateway phase.
+    //   2. `this.config.memory?.enabled` — when memory is config-disabled,
+    //      `memory_search` returns a "memory unavailable" error and the
+    //      guidance is misleading.
+    // We don't gate on `memoryPlugin?.isRegistered()` here because
+    // `registerIntegrationModules` runs AFTER this method on the first-time
+    // path; the prompt section would be missing when registration succeeded
+    // later. Slot-ownership lost mid-session is a rarer state that the
+    // tool's own runtime check already handles by returning "memory
+    // unavailable" from `memory_search`.
+    const isFullMode = api.registrationMode === 'full' || api.registrationMode === undefined;
+    const memoryEnabled = !!this.config.memory?.enabled;
     const registerPromptSection = (api as any).registerMemoryPromptSection as
       | ((section: { title: string; body: string }) => void)
       | undefined;
-    if (typeof registerPromptSection === 'function') {
+    if (isFullMode && memoryEnabled && typeof registerPromptSection === 'function') {
       try {
         registerPromptSection({
           title: 'DKG Memory',

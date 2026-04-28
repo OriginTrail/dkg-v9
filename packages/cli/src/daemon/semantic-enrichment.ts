@@ -95,9 +95,11 @@ export async function notifyLocalAgentIntegrationWake(
   if (stored && integration?.enabled !== true) return { status: 'skipped', reason: 'integration_disabled' };
   if (!stored && !fallbackTransport?.wakeUrl) return { status: 'skipped', reason: 'integration_disabled' };
 
-  const wakeTransport = integration?.transport?.wakeUrl?.trim()
-    ? integration.transport
-    : fallbackTransport;
+  const wakeTransport = fallbackTransport?.wakeUrl?.trim()
+    ? fallbackTransport
+    : integration?.transport?.wakeUrl?.trim()
+      ? integration.transport
+      : undefined;
   const wakeUrl = wakeTransport?.wakeUrl?.trim();
   if (!wakeUrl) return { status: 'skipped', reason: 'wake_unavailable' };
   const inferredWakeAuth = inferSafeLocalAgentWakeAuthFromUrl(wakeUrl);

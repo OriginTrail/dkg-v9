@@ -772,6 +772,35 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
+  it('processInbound drops invalid UI context graph ids before persisting the turn', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+      },
+    });
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = runtime;
+    api.cfg = mockCfg;
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    plugin.register(api);
+
+    await plugin.processInbound('User message', 'corr-invalid-cg', 'owner', {
+      uiContextGraphId: 'bad project id!',
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'User message',
+      'Agent reply',
+      { turnId: 'corr-invalid-cg' },
+    ]);
+  });
+
   it('processInbound does not queue an in-memory semantic wake before the daemon callback arrives', async () => {
     const mockRuntime = {
       channel: {

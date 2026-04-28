@@ -23,6 +23,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
@@ -46,6 +47,13 @@ const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function normalizeOptionalContextGraphId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return validateContextGraphId(trimmed).valid ? trimmed : undefined;
 }
 
 function finalizeAgentReplyText(text: string): string {
@@ -892,9 +900,7 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
-    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
-      ? opts.uiContextGraphId.trim()
-      : undefined;
+    const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -1205,9 +1211,7 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
-    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
-      ? opts.uiContextGraphId.trim()
-      : undefined;
+    const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -1586,6 +1590,7 @@ export class DkgChannelPlugin {
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
+    const projectContextGraphId = normalizeOptionalContextGraphId(opts?.projectContextGraphId);
     await this.client.storeChatTurn(
       sessionId,
       userMessage,
@@ -1595,7 +1600,7 @@ export class DkgChannelPlugin {
         ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
         ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
-        ...(opts?.projectContextGraphId ? { projectContextGraphId: opts.projectContextGraphId } : {}),
+        ...(projectContextGraphId ? { projectContextGraphId } : {}),
       },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
@@ -1741,9 +1746,7 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
           return;
         }
-        const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
-          ? parsed.uiContextGraphId.trim()
-          : undefined;
+        const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
         const { text, correlationId, identity } = parsed;
         if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1807,9 +1810,7 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
-      const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
-        ? parsed.uiContextGraphId.trim()
-        : undefined;
+      const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
       const { text, correlationId, identity } = parsed;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1865,9 +1866,7 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
-      const uiContextGraphId = typeof body.uiContextGraphId === 'string' && body.uiContextGraphId.trim()
-        ? body.uiContextGraphId.trim()
-        : undefined;
+      const uiContextGraphId = normalizeOptionalContextGraphId(body.uiContextGraphId);
       const { text, correlationId, identity } = body;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });

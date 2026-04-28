@@ -2668,6 +2668,75 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('preserves an explicitly configured gateway wake transport instead of replacing it with a bridge candidate', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              transport: {
+                kind: 'openclaw-channel',
+                gatewayUrl: 'http://127.0.0.1:18789',
+                wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+                wakeAuth: 'gateway',
+              },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {
+          gateway: {
+            port: 18789,
+          },
+        },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerHttpRoute: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+
+      expect(connectCall).toBeTruthy();
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+        transport: {
+          gatewayUrl: 'http://127.0.0.1:18789',
+          wakeUrl: 'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
+          wakeAuth: 'gateway',
+        },
+      });
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('refreshes a stored bridge-derived wakeUrl when the live bridge port rotates', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {

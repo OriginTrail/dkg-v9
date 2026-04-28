@@ -230,9 +230,6 @@ export class DkgNodePlugin {
       return matchingCandidate;
     }
     const inferredAuth = existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl);
-    if (inferredAuth === 'gateway') {
-      return candidates[0];
-    }
     return {
       url: normalizedExistingWakeUrl,
       auth: inferredAuth,

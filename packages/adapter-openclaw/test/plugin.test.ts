@@ -2740,6 +2740,75 @@ describe('DkgNodePlugin', () => {
     await plugin.stop();
   });
 
+  it('T20 — single-flight key includes projectContextGraphId; switching projects mid-conversation does NOT block recall under the old key', async () => {
+    // Regression for T20: pre-fix, the single-flight key only included
+    // the conversation tuple. searchNarrow's fan-out scopes through
+    // the resolver's projectContextGraphId, so two recalls in the same
+    // conversation but for DIFFERENT projects are semantically distinct
+    // queries. If a slow recall for project A hung and the user
+    // switched to project B in the same conversation, project B's
+    // recall would be falsely suppressed under A's key.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    (plugin as any).nodePeerId = '12D3KooWTestT20';
+
+    // Stub the resolver so we can flip the resolved project mid-test.
+    let currentProject = 'project-A';
+    (plugin as any).memorySessionResolver = {
+      getSession: () => ({ projectContextGraphId: currentProject, agentAddress: '12D3KooWTestT20' }),
+      getDefaultAgentAddress: () => '12D3KooWTestT20',
+      listAvailableContextGraphs: () => [],
+    };
+
+    const event = { messages: [{ role: 'user', content: 'find x' }] };
+    const ctx = { channelId: 'tg', accountId: 'a', conversationId: 'c', sessionKey: 'sk' };
+
+    // Turn 1: project A — recall hangs.
+    const turn1 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    await turn1;
+    const queriesAfterA = queryCalls;
+    expect(queriesAfterA).toBeGreaterThan(0);
+
+    // User switches to project B in the SAME conversation.
+    currentProject = 'project-B';
+
+    // Turn 2: same ctx, different project. Pre-fix, the in-flight key
+    // ignored project, so this would be suppressed. Post-fix, the
+    // key includes projectCG, so B issues fresh queries.
+    const turn2 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    await turn2;
+    expect(queryCalls).toBeGreaterThan(queriesAfterA);
+
+    // Cleanup.
+    while (pendingResolvers.length) pendingResolvers.shift()!();
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  });
+
   it('T18 — ensureChatTurnWriter rebuilds and migrates when a better stateDir becomes available on a later register()', () => {
     // Regression for T18: pre-fix, once `chatTurnWriter` was constructed
     // with the home-dir fallback (because setup-runtime register had

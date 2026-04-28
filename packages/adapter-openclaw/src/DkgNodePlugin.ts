@@ -1993,11 +1993,21 @@ export class DkgNodePlugin {
     // when one slow conversation has work in flight. JSON.stringify
     // gives a deterministic, collision-safe key without coupling to
     // ChatTurnWriter's internal encoding.
+    // T20 — Include the resolved project context graph in the key.
+    // `searchNarrow` fans out across project-WM/SWM/VM and the resolver
+    // returns whichever project the user has currently selected. If
+    // the user switches projects mid-conversation while a recall is
+    // still hanging on the daemon, the next turn must NOT be
+    // suppressed under the old key — it would lose project-scoped
+    // recall for the new project.
+    const projectCgForKey =
+      this.memorySessionResolver.getSession(ctx?.sessionKey)?.projectContextGraphId ?? '';
     const recallSessionKey = JSON.stringify([
       ctx?.channelId ?? 'unknown',
       ctx?.accountId ?? '',
       ctx?.conversationId ?? '',
       ctx?.sessionKey ?? '__default__',
+      projectCgForKey,
     ]);
     if (this.autoRecallInFlight.has(recallSessionKey)) return undefined;
 

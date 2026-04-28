@@ -1925,4 +1925,45 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("retry");
   });
+
+  it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
+    // Regression for T19: pre-fix, the success === false branch shifted
+    // only the OLDEST pending inbound, but T15 changed the success path
+    // to drain the WHOLE queue. The asymmetry meant siblings stayed
+    // queued on failure and got mis-paired with the next unrelated
+    // reply. Post-fix, failure deletes the whole queue.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u1", messageId: "in-1" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u2", messageId: "in-2" },
+    } as any);
+    // Failure event: must consume BOTH pending inbounds, not just u1.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "failed-reply", success: false, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+
+    // Pending queue MUST be empty. Pre-fix u2 lingered.
+    const pending = (writer as any).pendingUserMessages;
+    expect(pending.size).toBe(0);
+
+    // A later unrelated exchange must pair with NEW inbounds, not stale u2.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u3", messageId: "in-3" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "ok", success: true, messageId: "out-2" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u3"); // NOT "u2", not "u2\nu3"
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("ok");
+  });
 });

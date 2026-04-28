@@ -530,13 +530,17 @@ export class ChatTurnWriter {
       if (pendingReset) await pendingReset;
       const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
-      // user never received. Still consume the oldest pending inbound so the
-      // next successful turn does not pair its reply with a stale inbound
-      // from the aborted exchange.
+      // user never received. Consume the SAME set of pending inbounds that
+      // a successful send would have collapsed into one user-side, so the
+      // next REAL textual outbound for this conversation does not pair
+      // its reply with stale inbounds from the aborted exchange.
+      // T19 — Pre-fix this path shifted only the OLDEST pending message.
+      // After T15 the success path drains the WHOLE queue (joined into
+      // one logical user-side), so leaving siblings queued on failure
+      // makes them get mis-paired with the next unrelated reply. Delete
+      // the whole queue here to match the success consumption.
       if (success === false) {
-        const failedQueue = this.pendingUserMessages.get(conversationKey);
-        if (failedQueue && failedQueue.length > 0) failedQueue.shift();
-        if (failedQueue && failedQueue.length === 0) this.pendingUserMessages.delete(conversationKey);
+        this.pendingUserMessages.delete(conversationKey);
         return;
       }
       // Strip injected `<recalled-memory>` from assistant text — the model may

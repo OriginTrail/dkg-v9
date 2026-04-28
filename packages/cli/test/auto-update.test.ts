@@ -1596,16 +1596,26 @@ describe('autoupdater hardening', () => {
     }
   });
 
-  it('does NOT record an attempt when the update is up-to-date (preserves consecutiveFailures from a prior failure)', async () => {
-    // Prior state: 2 consecutive failures persisted on disk. A subsequent
-    // up-to-date check must NOT reset the counter to 0 — that would mask a
-    // real preceding failure from any alerting based on consecutiveFailures.
-    let writtenStatus: any = null;
+  it('up-to-date does NOT record an attempt (no lastAttempt overwrite), but a clean check clears consecutiveFailures', async () => {
+    // Two distinct semantics, deliberately split:
+    //  - `recordAttempt` is for "did we try to apply an update" — skipped
+    //    on up-to-date because no attempt happened, so `lastAttempt`
+    //    history stays accurate to real attempts.
+    //  - `recordCheck('up-to-date')` proves the node is currently healthy
+    //    (remote reachable AND local matches), so it MUST clear
+    //    `consecutiveFailures` — otherwise after manual remediation or a
+    //    remote rollback, the documented `consecutiveFailures >= 3` alert
+    //    would never resolve.
+    const statusWrites: any[] = [];
     readFileImpl = async (path: any) => {
       const p = String(path);
       if (p.endsWith('.current-commit')) return 'aaa111';
       if (p.endsWith('.update-status.json')) {
-        return JSON.stringify({ consecutiveFailures: 2, lastAttempt: { status: 'failed' } });
+        // Latest persisted state — read-modify-write semantics.
+        return JSON.stringify(
+          statusWrites[statusWrites.length - 1]
+            ?? { consecutiveFailures: 2, lastAttempt: { status: 'failed', fromCommit: 'aaa111', toCommit: 'old222', ref: 'main', at: '', elapsedMs: 0 } },
+        );
       }
       return '';
     };
@@ -1613,12 +1623,48 @@ describe('autoupdater hardening', () => {
     makeFetchOk('aaa111');
     writeFileImpl = async (path: any, data: any) => {
       if (String(path).includes('.update-status.json')) {
-        writtenStatus = JSON.parse(String(data));
+        statusWrites.push(JSON.parse(String(data)));
       }
     };
     await performUpdate(AU, () => {});
-    // up-to-date path must not write status (recordAttempt is skipped).
-    expect(writtenStatus).toBeNull();
+    // The check path writes once with cleared counter and a populated lastCheck.
+    expect(statusWrites.length).toBeGreaterThan(0);
+    const last = statusWrites[statusWrites.length - 1];
+    expect(last.consecutiveFailures).toBe(0);
+    expect(last.lastCheck?.status).toBe('up-to-date');
+    // Critically, `lastAttempt` from the prior failure is preserved verbatim —
+    // we did NOT record this no-op poll as an attempt.
+    expect(last.lastAttempt?.status).toBe('failed');
+    expect(last.lastAttempt?.fromCommit).toBe('aaa111');
+  });
+
+  it('error and available checks do NOT clear consecutiveFailures (preserves alerting signal across transient remote errors)', async () => {
+    let writtenStatus: any = null;
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.update-status.json')) {
+        return JSON.stringify({ consecutiveFailures: 2 });
+      }
+      return '';
+    };
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    // Force an error from resolveRemoteCommitSha (no fetch.ok and no
+    // ls-remote → returns null → status='error').
+    fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({}) });
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'ls-remote') {
+        throw new Error('connection refused');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const result = await checkForNewCommitWithStatus(AU as any, () => {});
+    expect(result.status).toBe('error');
+    expect(writtenStatus.consecutiveFailures).toBe(2);
+    expect(writtenStatus.lastCheck?.status).toBe('error');
   });
 
   it('records a `failed` attempt when an unexpected exception escapes _performUpdateInner after fromCommit is captured', async () => {
@@ -1675,5 +1721,38 @@ describe('autoupdater hardening', () => {
     expect(writtenStatus).toBeTruthy();
     expect(writtenStatus.lastCheck?.status).toBe('error');
     expect(writtenStatus.lastCheck?.ref).toBe('--evil-flag');
+  });
+
+  it('persists the attempt status BEFORE releasing the update lock (avoids cross-process clobber)', async () => {
+    // The status file is read-modify-write and is now the alerting source
+    // of truth. If we released the lock first, another daemon could grab
+    // it, write a newer status, and have it clobbered by this late write.
+    // Order must be: write status → release lock.
+    const order: string[] = [];
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
+      if (p.endsWith('.update-status.json')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return '';
+    };
+    makeFetchOk('bbb222');
+    writeFileImpl = async (path: any, _data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        order.push('writeStatus');
+      }
+    };
+    // Spy on lock release via the unlinkSync hook (releaseUpdateLock removes
+    // the lockfile via unlinkSync).
+    _autoUpdateIo.unlinkSync = ((p: any) => {
+      if (String(p).endsWith('/.update.lock')) {
+        order.push('releaseLock');
+      }
+    }) as any;
+    await performUpdate(AU, () => {});
+    const writeIdx = order.indexOf('writeStatus');
+    const releaseIdx = order.indexOf('releaseLock');
+    expect(writeIdx).toBeGreaterThanOrEqual(0);
+    expect(releaseIdx).toBeGreaterThanOrEqual(0);
+    expect(writeIdx).toBeLessThan(releaseIdx);
   });
 });

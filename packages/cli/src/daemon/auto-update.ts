@@ -644,7 +644,18 @@ export async function checkForNewCommitWithStatus(
 async function recordCheck(args: { ref: string; status: 'available' | 'up-to-date' | 'error'; remoteCommit?: string }): Promise<void> {
   try {
     const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
-    await writeAutoUpdateStatus({
+    // A clean `up-to-date` poll means the remote was reachable AND the local
+    // commit matches it — i.e. the node is currently healthy. Clear the
+    // failure counter so the documented `consecutiveFailures >= 3` alert
+    // resolves itself after a manual remediation (or a remote rollback that
+    // brings the upstream tip back to our local commit), without requiring
+    // a fresh successful build/swap to happen first.
+    //
+    // We deliberately do NOT clear on `available` (an attempt is about to
+    // run; let `recordAttempt` reflect its true outcome) or on `error`
+    // (transient or persistent — preserve the signal so the alert keeps
+    // firing if the remote stays unreachable).
+    const next: AutoUpdateStatusFile = {
       ...prev,
       lastCheck: {
         at: new Date().toISOString(),
@@ -652,7 +663,9 @@ async function recordCheck(args: { ref: string; status: 'available' | 'up-to-dat
         status: args.status,
         ...(args.remoteCommit ? { remoteCommit: args.remoteCommit } : {}),
       },
-    });
+      ...(args.status === 'up-to-date' ? { consecutiveFailures: 0 } : {}),
+    };
+    await writeAutoUpdateStatus(next);
   } catch {
     /* observability-only */
   }
@@ -1137,14 +1150,19 @@ export async function performUpdateWithStatus(
     errorMessage = err?.message ?? String(err);
     throw err;
   } finally {
-    await releaseUpdateLock();
-    _updateInProgress = false;
+    // Persist the attempt BEFORE releasing the update lock. The status file
+    // is the alerting source of truth and is read-modify-write; if we
+    // unlocked first, another daemon/CLI could acquire the lock, write a
+    // newer status, and then this late write would clobber it. Doing the
+    // status write inside the lock makes it serialized w.r.t. any other
+    // status writer that respects the same lock.
+    //
     // Only persist when we got far enough to know the current commit;
     // otherwise the attempt is uninteresting (slots not initialized, etc.)
     // and would just pollute consecutiveFailures. Also skip "up-to-date"
-    // outcomes — those are no-ops, not attempts, and recording them would
-    // reset `consecutiveFailures` back to 0 on every idle poll, masking
-    // a real preceding failure from the alerting signal.
+    // outcomes — those are no-ops, not attempts, and recording them as
+    // attempts would pollute `lastAttempt` history. The counter for healthy
+    // idle polls is cleared via `recordCheck('up-to-date')` instead.
     if (outcome.fromCommit && status !== 'up-to-date') {
       try {
         await recordAttempt({
@@ -1160,6 +1178,8 @@ export async function performUpdateWithStatus(
         /* status persistence is observability-only */
       }
     }
+    await releaseUpdateLock();
+    _updateInProgress = false;
   }
 }
 

@@ -141,17 +141,36 @@ function inferWakeAuthFromUrl(wakeUrl: string): 'bridge-token' | 'gateway' | 'no
 export function canQueueLocalAgentSemanticEnrichment(
   config: DkgConfig,
   integrationId: string,
-  opts?: { liveSemanticEnrichmentSupported?: boolean },
+  opts?: { liveSemanticEnrichmentSupported?: boolean; requestFromIntegration?: boolean },
 ): boolean {
   const normalizedId = normalizeIntegrationId(integrationId);
   const stored = getStoredLocalAgentIntegrations(config)[normalizedId];
+  if (opts?.liveSemanticEnrichmentSupported === false && normalizedId === 'openclaw') return false;
+  if (stored && stored.enabled !== true) return false;
+  if (!stored) {
+    return normalizedId === 'openclaw'
+      && opts?.requestFromIntegration === true
+      && opts?.liveSemanticEnrichmentSupported !== false;
+  }
   if (opts?.liveSemanticEnrichmentSupported === true && normalizedId === 'openclaw') {
     return stored?.enabled === true;
   }
-  if (!stored?.enabled) return false;
-  if (opts?.liveSemanticEnrichmentSupported === false && normalizedId === 'openclaw') return false;
   if (stored.capabilities?.semanticEnrichment === false) return false;
-  return stored.capabilities?.semanticEnrichment === true;
+  if (stored.capabilities?.semanticEnrichment === true) return true;
+  return normalizedId === 'openclaw'
+    && opts?.requestFromIntegration === true
+    && opts?.liveSemanticEnrichmentSupported !== false;
+}
+
+export function requestTargetsLocalAgentIntegration(
+  req: IncomingMessage,
+  integrationId: string,
+): boolean {
+  const requestedIntegrationId = normalizeIntegrationId(integrationId);
+  const headerIntegrationId = normalizeIntegrationId(
+    readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
+  );
+  return !!requestedIntegrationId && headerIntegrationId === requestedIntegrationId;
 }
 
 function readSingleHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -179,11 +198,7 @@ export function requestAdvertisesLocalAgentSemanticEnrichment(
   req: IncomingMessage,
   integrationId: string,
 ): boolean | undefined {
-  const requestedIntegrationId = normalizeIntegrationId(integrationId);
-  const headerIntegrationId = normalizeIntegrationId(
-    readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
-  );
-  if (!requestedIntegrationId || headerIntegrationId !== requestedIntegrationId) return undefined;
+  if (!requestTargetsLocalAgentIntegration(req, integrationId)) return undefined;
   return parseBooleanHeaderValue(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-semantic-enrichment']),
   );
@@ -262,6 +277,7 @@ export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
   bridgeAuthToken?: string;
   skipWhenUnavailable?: boolean;
   liveSemanticEnrichmentSupported?: boolean;
+  requestFromIntegration?: boolean;
   logLabel: string;
   semanticTripleCount?: number;
 }): SemanticEnrichmentDescriptor | undefined {
@@ -269,6 +285,7 @@ export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
     args.skipWhenUnavailable
     && !canQueueLocalAgentSemanticEnrichment(args.config, args.integrationId, {
       liveSemanticEnrichmentSupported: args.liveSemanticEnrichmentSupported,
+      requestFromIntegration: args.requestFromIntegration,
     })
   ) {
     return undefined;
@@ -644,7 +661,7 @@ function refreshActiveChatSemanticEventPayloadIfNeeded(
     kind !== 'chat_turn'
     || payload.kind !== 'chat_turn'
     || row.payload_json === payloadJson
-    || row.status !== 'pending'
+    || !['pending', 'leased'].includes(row.status)
   ) {
     return undefined;
   }
@@ -661,11 +678,9 @@ function refreshActiveChatSemanticEventPayloadIfNeeded(
     dashDb.getSemanticEnrichmentEvent(row.id) ?? {
       ...row,
       payload_json: payloadJson,
-      status: 'pending',
+      status: row.status,
       semantic_triple_count: semanticTripleCount,
       attempts: 0,
-      lease_owner: null,
-      lease_expires_at: null,
       last_error: null,
       updated_at: now,
     },
@@ -955,6 +970,27 @@ function rowLeaseOwnedBy(
     && (!options.payloadHash || semanticEnrichmentPayloadHash(row.payload_json) === options.payloadHash);
 }
 
+function releaseSupersededSemanticLeaseIfOwned(
+  dashDb: DashboardDB,
+  row: SemanticEnrichmentEventRow | undefined,
+  leaseOwner: string,
+  options: { now?: number; payloadHash?: string } = {},
+): boolean {
+  const payloadHash = options.payloadHash;
+  if (!row || !payloadHash) return false;
+  const now = options.now ?? Date.now();
+  if (
+    row.status !== 'leased'
+    || row.lease_owner !== leaseOwner
+    || typeof row.lease_expires_at !== 'number'
+    || row.lease_expires_at <= now
+    || semanticEnrichmentPayloadHash(row.payload_json) === payloadHash
+  ) {
+    return false;
+  }
+  return dashDb.releaseSemanticEnrichmentLease(row.id, leaseOwner, now);
+}
+
 function failLeasedSemanticEvent(
   dashDb: DashboardDB,
   row: SemanticEnrichmentEventRow,
@@ -1065,6 +1101,7 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row || !rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
+      releaseSupersededSemanticLeaseIfOwned(dashDb, row, leaseOwner, { payloadHash });
       return jsonResponse(res, 409, { renewed: false });
     }
     const renewed = dashDb.renewSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
@@ -1079,7 +1116,10 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { released: false });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
+      releaseSupersededSemanticLeaseIfOwned(dashDb, row, leaseOwner, { payloadHash });
+      return jsonResponse(res, 409, { released: false });
+    }
     const released = dashDb.releaseSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
     if (!released) return jsonResponse(res, 409, { released: false });
     const updated = dashDb.getSemanticEnrichmentEvent(eventId);
@@ -1103,7 +1143,10 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { completed: false });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
+      releaseSupersededSemanticLeaseIfOwned(dashDb, row, leaseOwner, { payloadHash });
+      return jsonResponse(res, 409, { completed: false });
+    }
     const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
     if (!eventPayload) return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
     const now = Date.now();
@@ -1164,7 +1207,10 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     if (!payloadHash) return jsonResponse(res, 400, { error: 'Missing or invalid "payloadHash"' });
     const row = dashDb.getSemanticEnrichmentEvent(eventId);
     if (!row) return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
-    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) return jsonResponse(res, 409, { status: null });
+    if (!rowLeaseOwnedBy(row, leaseOwner, { payloadHash })) {
+      releaseSupersededSemanticLeaseIfOwned(dashDb, row, leaseOwner, { payloadHash });
+      return jsonResponse(res, 409, { status: null });
+    }
     const status = failLeasedSemanticEvent(dashDb, row, leaseOwner, errorMessage);
     if (!status) return jsonResponse(res, 409, { status: null });
     const updated = dashDb.getSemanticEnrichmentEvent(eventId);
@@ -1206,6 +1252,7 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
           semanticEnrichment: semanticEnrichmentDescriptorFromRow(row, semanticTripleCount),
         });
       }
+      releaseSupersededSemanticLeaseIfOwned(dashDb, row, leaseOwner, { payloadHash });
       return jsonResponse(res, 409, { error: 'Semantic enrichment lease is no longer owned by this worker' });
     }
 

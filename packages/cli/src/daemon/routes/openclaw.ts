@@ -329,6 +329,7 @@ import {
   buildChatSemanticEventPayload,
   queueLocalAgentSemanticEnrichmentBestEffort,
   requestAdvertisesLocalAgentSemanticEnrichment,
+  requestTargetsLocalAgentIntegration,
   resolveChatTurnsAssertionAgentAddress,
 } from '../semantic-enrichment.js';
 
@@ -863,6 +864,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         bridgeAuthToken,
         skipWhenUnavailable: true,
         liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
+        requestFromIntegration: requestTargetsLocalAgentIntegration(req, 'openclaw'),
         logLabel: `chat turn semantic event for ${normalizedTurnId}`,
       });
       return jsonResponse(res, 200, {

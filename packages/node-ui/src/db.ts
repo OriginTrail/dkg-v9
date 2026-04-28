@@ -1017,12 +1017,9 @@ export class DashboardDB {
     const result = this.stmt('refreshActiveSemanticEnrichmentEventPayload', `
       UPDATE semantic_enrichment_events
       SET payload_json = ?,
-          status = 'pending',
           semantic_triple_count = ?,
           attempts = 0,
           next_attempt_at = ?,
-          lease_owner = NULL,
-          lease_expires_at = NULL,
           last_error = NULL,
           updated_at = ?
       WHERE id = ? AND status IN ('pending', 'leased')

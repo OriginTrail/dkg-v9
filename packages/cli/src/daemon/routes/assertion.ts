@@ -331,6 +331,7 @@ import {
   getHydratedExtractionStatusRecord,
   queueLocalAgentSemanticEnrichmentBestEffort,
   requestAdvertisesLocalAgentSemanticEnrichment,
+  requestTargetsLocalAgentIntegration,
   setPersistedExtractionStatusRecord,
   updateExtractionStatusSemanticDescriptor,
 } from '../semantic-enrichment.js';
@@ -1556,6 +1557,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         bridgeAuthToken,
         skipWhenUnavailable: true,
         liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
+        requestFromIntegration: requestTargetsLocalAgentIntegration(req, 'openclaw'),
         logLabel: `file import semantic event for ${assertionUri}`,
       });
       if (semanticEnrichment) {

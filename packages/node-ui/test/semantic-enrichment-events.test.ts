@@ -37,7 +37,7 @@ function insertEvent(overrides: Partial<InsertEventInput> = {}): void {
 }
 
 describe('DashboardDB — semantic enrichment events', () => {
-  it('refreshes active chat-turn payloads and resets stale leases and attempts', () => {
+  it('refreshes active chat-turn payloads without clearing an owned lease', () => {
     insertEvent({
       id: 'semantic-event-refresh-pending',
       kind: 'chat_turn',
@@ -85,21 +85,15 @@ describe('DashboardDB — semantic enrichment events', () => {
     });
     expect(db.getSemanticEnrichmentEvent('semantic-event-refresh-leased')).toMatchObject({
       payload_json: JSON.stringify({ assistantReply: 'final' }),
-      status: 'pending',
+      status: 'leased',
       attempts: 0,
       semantic_triple_count: 0,
-      lease_owner: null,
-      lease_expires_at: null,
+      lease_owner: 'worker-a',
+      lease_expires_at: 2_000,
       last_error: null,
       next_attempt_at: 3_000,
       updated_at: 3_000,
     });
-    expect(db.completeSemanticEnrichmentEvent(
-      'semantic-event-refresh-leased',
-      'worker-a',
-      3_100,
-      2,
-    )).toBe(false);
   });
 
   it('does not refresh completed or dead-lettered semantic payloads', () => {

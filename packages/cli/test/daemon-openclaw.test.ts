@@ -644,6 +644,52 @@ describe('best-effort semantic enqueue helper', () => {
     });
   });
 
+  it('allows queueing for an OpenClaw request while semantic support is still unknown on cold start', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw', {
+      requestFromIntegration: true,
+    })).toBe(true);
+
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-cold-start',
+        status: 'pending',
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig(),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-cold-start',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-cold-start',
+        userMessage: 'remember this before sync',
+        assistantReply: 'queued',
+        persistenceState: 'stored',
+      },
+      skipWhenUnavailable: true,
+      requestFromIntegration: true,
+      logLabel: 'chat cold-start semantic hint',
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-cold-start',
+      status: 'pending',
+    });
+  });
+
   it('does not queue semantic jobs from stale ready OpenClaw state when explicit capability support is missing', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
@@ -1007,6 +1053,7 @@ describe('best-effort semantic enqueue helper', () => {
       persistenceState: 'stored',
     };
     const insert = vi.fn();
+    const releaseSemanticEnrichmentLease = vi.fn().mockReturnValue(true);
     const body = JSON.stringify({
       eventId: 'evt-stale-chat',
       leaseOwner: 'host-a:123:boot-1',
@@ -1046,6 +1093,7 @@ describe('best-effort semantic enqueue helper', () => {
           created_at: Date.now(),
           updated_at: Date.now(),
         }),
+        releaseSemanticEnrichmentLease,
       },
       agent: {
         resolveAgentByToken: () => undefined,
@@ -1063,6 +1111,11 @@ describe('best-effort semantic enqueue helper', () => {
       error: 'Semantic enrichment lease is no longer owned by this worker',
     });
     expect(insert).not.toHaveBeenCalled();
+    expect(releaseSemanticEnrichmentLease).toHaveBeenCalledWith(
+      'evt-stale-chat',
+      'host-a:123:boot-1',
+      expect.any(Number),
+    );
   });
 
   it('cleans event provenance and semantic count when semantic append insert fails', async () => {

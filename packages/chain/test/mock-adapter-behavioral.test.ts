@@ -289,6 +289,86 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(created[0].data.batchId).toBe(out.batchId.toString());
   });
 
+  // PR #229 bot review (r31-12 — mock-adapter.ts:200, J8hn).
+  //
+  // Bot's exact concern: "This new V10KnowledgeBatchEmitted shim
+  // hardcodes publicByteSize and tokenAmount to "0" here (and again
+  // in the permanent path below), even though both values are
+  // available on params. The real chain event carries the actual
+  // publish cost fields, so mock-backed tests and consumers now see
+  // a different payload and can miss regressions in byte-size or
+  // token accounting. Populate these fields from params to keep the
+  // mock aligned with the production adapter."
+  //
+  // Pin the byte-size + token-amount projection from params on both
+  // V10 publish paths so the mock can never silently regress to the
+  // original "always zero" shape.
+  it('r31-12 (J8hn): publishKnowledgeAssets V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PublishParams (no hardcoded zeros)', async () => {
+    // makePublishParams ships publicByteSize=1024n and tokenAmount=500n.
+    // The shape pins the EXACT values the real EVM adapter would
+    // decode off the on-chain log (evm-adapter.ts:890 / :896).
+    const params = makePublishParams(1);
+    await m.publishKnowledgeAssets(params);
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(1);
+    const ev = evs[0];
+    // Pre-r31-12 these were `'0'` regardless of params — the J8hn bug.
+    expect(ev.data.publicByteSize).toBe('1024');
+    expect(ev.data.tokenAmount).toBe('500');
+    // Defence-in-depth — the values are SERIALISED bigint strings so
+    // downstream BigInt(...) decoders can round-trip without losing
+    // precision (matches evm-adapter.ts which does .toString() on the
+    // raw BigNumberish off the parsed log).
+    expect(typeof ev.data.publicByteSize).toBe('string');
+    expect(typeof ev.data.tokenAmount).toBe('string');
+    expect(BigInt(ev.data.publicByteSize)).toBe(params.publicByteSize);
+    expect(BigInt(ev.data.tokenAmount)).toBe(params.tokenAmount);
+  });
+
+  it('r31-12 (J8hn): publishKnowledgeAssetsPermanent V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PermanentPublishParams (parity with regular publish)', async () => {
+    // Mirror the regular-publish test against the permanent path —
+    // the bot called out BOTH emission sites; both must project from
+    // params, not hardcode zero.
+    const params = makePublishParams(1, { publicByteSize: 4096n, tokenAmount: 12345n });
+    await m.publishKnowledgeAssetsPermanent(params);
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(1);
+    const ev = evs[0];
+    expect(ev.data.publicByteSize).toBe('4096');
+    expect(ev.data.tokenAmount).toBe('12345');
+    expect(ev.data.isPermanent).toBe(true);
+  });
+
+  it('r31-12 (J8hn): distinct publish-cost params produce DISTINCT V10KnowledgeBatchEmitted payloads (no constant-zero collapse)', async () => {
+    // Pin the projection's actual differentiation: two publishes with
+    // different byte-size / token-amount must land as DIFFERENT events
+    // on the stream. Pre-r31-12 both events would have `'0' / '0'` so
+    // any consumer aggregating on these fields couldn't tell them
+    // apart — and that aggregation regression was the J8hn risk.
+    await m.publishKnowledgeAssets(makePublishParams(1, { publicByteSize: 100n, tokenAmount: 10n }));
+    await m.publishKnowledgeAssets(makePublishParams(1, { publicByteSize: 9999n, tokenAmount: 99999n }));
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(2);
+    expect(evs[0].data.publicByteSize).toBe('100');
+    expect(evs[0].data.tokenAmount).toBe('10');
+    expect(evs[1].data.publicByteSize).toBe('9999');
+    expect(evs[1].data.tokenAmount).toBe('99999');
+    // Negative pin: NEITHER event collapses to the pre-fix shape.
+    expect(evs[0].data.publicByteSize).not.toBe('0');
+    expect(evs[1].data.publicByteSize).not.toBe('0');
+    expect(evs[0].data.tokenAmount).not.toBe('0');
+    expect(evs[1].data.tokenAmount).not.toBe('0');
+  });
+
   it('r30-6: multiple V10 publishes each produce one V10KnowledgeBatchEmitted (no missed emissions, no spurious extras)', async () => {
     // WAL recovery iterates events looking for a matching merkleRoot;
     // missing OR duplicated emissions both break it. Pin both shapes.

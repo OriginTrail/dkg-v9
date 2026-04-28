@@ -193,21 +193,36 @@ export class MockChainAdapter implements ChainAdapter {
     // from a real EVM chain. (Without this the mock-vs-real split
     // would silently desync test fixtures from production
     // behaviour — bot's exact concern.)
+    //
+    // PR #229 bot review (r31-12 — mock-adapter.ts:200, J8hn).
+    // `publicByteSize` and `tokenAmount` are first-class fields on
+    // `PublishParams` and are decoded straight off the on-chain log
+    // by the real EVM adapter (evm-adapter.ts:890 / :896). Pre-r31-12
+    // the mock hardcoded both to `"0"`, which silently desynced
+    // mock-backed fixtures from production: any test or consumer that
+    // asserted on byte-size or token-cost accounting would pass
+    // against the mock while regressing against the real chain. Pull
+    // the values from `params` so the emitted event carries the same
+    // shape the real adapter would surface.
+    //
+    // Epoch fields stay zero — the mock doesn't model the on-chain
+    // epoch counter (real KASStorage computes startEpoch/endEpoch
+    // from `block.timestamp` at write time). `params.epochs` is the
+    // EPOCH COUNT the publisher requested, not the start/end window,
+    // so we cannot reconstruct the on-chain values without a wall
+    // clock — emit schema-compatible zeros and leave epoch-window
+    // assertions to the EVM e2e suite.
     this.pushEvent('V10KnowledgeBatchEmitted', {
       batchId: batchId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
-      publicByteSize: '0',
+      publicByteSize: params.publicByteSize.toString(),
       knowledgeAssetsCount: params.kaCount.toString(),
       startKAId: startId.toString(),
       endKAId: endId.toString(),
-      // Epoch / token fields are not modelled in the mock; emit
-      // schema-compatible zero values so downstream decoders never
-      // see an `undefined` where the real chain would carry a
-      // value.
       startEpoch: '0',
       endEpoch: '0',
-      tokenAmount: '0',
+      tokenAmount: params.tokenAmount.toString(),
       isPermanent: false,
       txHash,
     });
@@ -272,17 +287,23 @@ export class MockChainAdapter implements ChainAdapter {
     // (real KASStorage emits the same topic for both
     // permanent/non-permanent V10 publishes; only the `isPermanent`
     // field differs).
+    //
+    // PR #229 bot review (r31-12 — mock-adapter.ts:285, J8hn): same
+    // fix as the regular publish path above — `publicByteSize` and
+    // `tokenAmount` are on `PermanentPublishParams` and the real
+    // adapter surfaces them on the event. Pull from `params` so
+    // permanent-publish mock fixtures stay aligned with production.
     this.pushEvent('V10KnowledgeBatchEmitted', {
       batchId: batchId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
-      publicByteSize: '0',
+      publicByteSize: params.publicByteSize.toString(),
       knowledgeAssetsCount: params.kaCount.toString(),
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       startEpoch: '0',
       endEpoch: '0',
-      tokenAmount: '0',
+      tokenAmount: params.tokenAmount.toString(),
       isPermanent: true,
       txHash,
     });

@@ -1564,9 +1564,28 @@ export class DkgNodePlugin {
    */
   private async probeNodeAgentAddressOnce(api: OpenClawPluginApi): Promise<void> {
     try {
-      const address = loadAgentEthAddressSync(undefined, {
-        explicitAddress: process.env.DKG_AGENT_ADDRESS,
-      });
+      // T38 — Local-keystore read is only safe when the daemon is
+      // co-located with the gateway. For remote/custom-daemon setups
+      // (`daemonUrl` pointing off-host), the gateway's `<DKG_HOME>/
+      // agent-keystore.json` either doesn't exist or belongs to a
+      // different identity, and using it would silently scope WM
+      // reads/writes to the wrong agent address. Until the daemon
+      // exposes an HTTP endpoint for the active agent address (filed
+      // as a follow-up against the daemon repo), gate the keystore
+      // read on a localhost daemonUrl. Honor `DKG_AGENT_ADDRESS` env
+      // override regardless — operators who need to point at a remote
+      // daemon can disambiguate manually.
+      const explicitAddress = process.env.DKG_AGENT_ADDRESS;
+      if (!explicitAddress && !this.daemonIsLocalhost()) {
+        api.logger.warn?.(
+          '[dkg-memory] Daemon URL is non-local; skipping keystore read. ' +
+          'Working-memory reads and writes will return needs_clarification ' +
+          'until either DKG_AGENT_ADDRESS env is set, daemonUrl points at ' +
+          'localhost, or the daemon exposes an active-agent-address endpoint.',
+        );
+        return;
+      }
+      const address = loadAgentEthAddressSync(undefined, { explicitAddress });
       if (address) {
         this.nodeAgentAddress = address;
         return;
@@ -1608,6 +1627,32 @@ export class DkgNodePlugin {
    *   memory module was disabled — nothing to log against),
    * - a probe is already in flight.
    */
+  /**
+   * T38 — Whether the configured `daemonUrl` points at the same host
+   * as the gateway. Localhost-only is treated as "co-located" — the
+   * keystore at `<DKG_HOME>/agent-keystore.json` belongs to the same
+   * daemon process the adapter talks to, so its identity is
+   * authoritative for WM scope. Anything else (DNS, public IP, LAN
+   * IP) is remote: the gateway's local keystore is either absent or
+   * an unrelated identity, and using it would silently scope WM
+   * queries to the wrong agent.
+   *
+   * Localhost set: 127.0.0.0/8, ::1, 0.0.0.0, 'localhost'. URL parse
+   * failures default to `false` (treat as remote / unsafe).
+   */
+  private daemonIsLocalhost(): boolean {
+    const url = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true;
+      // 127.0.0.0/8 (loopback range)
+      if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private ensureNodeAgentAddress(): Promise<void> {
     if (this.nodeAgentAddress !== undefined) return Promise.resolve();
     const api = this.memoryResolverApi;
@@ -2260,16 +2305,16 @@ export class DkgNodePlugin {
     event: any,
     ctx: any,
   ): Promise<{ appendSystemContext: string } | undefined> {
-    // T31 (Bug B diagnostic) — Distinguish "hook never fires" from "hook
-    // fires but exits early." Logged at info so it's visible without
-    // bumping default log levels; quiet in absolute terms (one line per
-    // turn). If this line appears in operator logs but the agent still
-    // sees no recall, the bug is downstream (gate, missing keystore,
-    // empty hits). If this line is ABSENT despite turn traffic, the
-    // hook isn't bound to the dispatch surface the gateway uses — fall
-    // through to the multi-phase-init re-binding fix in
+    // T31/T39 (Bug B diagnostic) — Distinguish "hook never fires"
+    // from "hook fires but exits early." Logged at `debug` so a busy
+    // gateway doesn't drown out warnings (info-per-turn for every
+    // active chat materially increases volume). Operators chasing
+    // the rollout can flip log level to debug for verification; if
+    // this line is ABSENT at debug level despite turn traffic, the
+    // hook isn't bound to the dispatch surface the gateway uses —
+    // fall through to the multi-phase-init re-binding fix in
     // `installHooksIfNeeded`'s apiChanged branch.
-    this.memoryResolverApi?.logger.info?.(
+    this.memoryResolverApi?.logger.debug?.(
       `[dkg] before_prompt_build fired (sessionKey=${ctx?.sessionKey ?? '∅'})`,
     );
     // Gate on slot ownership — without this, the hook would inject DKG

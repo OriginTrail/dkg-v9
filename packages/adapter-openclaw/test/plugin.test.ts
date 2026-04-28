@@ -3979,6 +3979,49 @@ describe('DkgNodePlugin', () => {
         await plugin.stop();
       }
     });
+
+    it('skips keystore read for remote daemonUrl + warns operator (T38)', async () => {
+      // T38 — Remote/custom-daemon setup: gateway's local keystore is
+      // either absent or belongs to a different identity. Reading it
+      // would silently scope WM queries to the wrong agent. Adapter
+      // must skip the read, leave nodeAgentAddress undefined, and
+      // surface an operator-actionable warn.
+      writeKeystore([ETH_PRIMARY]);
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('honors DKG_AGENT_ADDRESS even when daemonUrl is remote (T38)', async () => {
+      // T38 — Operator escape hatch: setting DKG_AGENT_ADDRESS lets
+      // remote-daemon deployments scope WM correctly without waiting
+      // for the daemon-side endpoint to ship.
+      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
   });
 
   describe('context-graph cache filter on synced + non-system (Codex B51 + B54)', () => {

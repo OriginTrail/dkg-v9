@@ -143,6 +143,46 @@ export interface DKGService extends Service {
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
   ): Promise<ChatTurnPersistResult>;
+  /**
+   * @deprecated PR #229 bot review (r31-2 — service.ts:133).
+   *
+   * Restored as a `@deprecated` catch-all overload after r30-8 removed
+   * it outright. The runtime path in `dkgServiceImpl` always supported
+   * a generic `Record<string, unknown>` options bag (it has to — the
+   * adapter plugin wires up framework-shaped hook handlers whose
+   * options shape is determined by the host, not the adapter), so
+   * removing the overload from the public surface turned previously-
+   * working dynamic-bag integrations into compile failures without a
+   * runtime migration path. The bot's r31-2 thread on this same line
+   * called that out as a source-breaking API change without a version
+   * bump.
+   *
+   * **Migration path** for new code (and TypeScript consumers who can
+   * narrow at the call site): use the typed
+   * {@link UserTurnChatTurnOptions} or
+   * {@link AssistantReplyChatTurnOptions} overloads above. They
+   * enforce mandatory fields (`mode` / `userMessageId` /
+   * `userTurnPersisted`) at compile time and prevent the
+   * `{ mode: 'assistant-reply' }`-without-`userMessageId` smuggling
+   * that the typed overloads were originally added (r18-2) to catch.
+   *
+   * **Why this is still safe**: callers who reach for this overload
+   * pass through the same runtime guard inside
+   * `persistChatTurnImpl` that defends against malformed payloads
+   * coming from `as any` callers and the internal-only
+   * {@link _dkgServiceLoose} handle. The guard predates the typed
+   * overloads and has not been weakened. If a host drops a payload
+   * that the typed overloads would reject, the runtime check
+   * throws loudly — the only thing this overload restores is the
+   * compile-time tolerance that previously-working integrations
+   * relied on.
+   */
+  persistChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options?: Record<string, unknown>,
+  ): Promise<ChatTurnPersistResult>;
 
   onChatTurn(
     runtime: IAgentRuntime,
@@ -155,6 +195,17 @@ export interface DKGService extends Service {
     message: Memory,
     state: State | undefined,
     options: AssistantReplyChatTurnOptions,
+  ): Promise<ChatTurnPersistResult>;
+  /**
+   * @deprecated PR #229 bot review (r31-2 — service.ts:133). Same
+   * rationale + migration path as the deprecated `persistChatTurn`
+   * catch-all overload above.
+   */
+  onChatTurn(
+    runtime: IAgentRuntime,
+    message: Memory,
+    state?: State,
+    options?: Record<string, unknown>,
   ): Promise<ChatTurnPersistResult>;
 }
 

@@ -474,78 +474,86 @@ async function onChatTurnHandler(
   state?: Parameters<typeof _dkgServiceLoose.onChatTurn>[2],
   options?: Parameters<typeof _dkgServiceLoose.onChatTurn>[3],
 ) {
+  // PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:635).
+  //
+  // Defence-in-depth dispatch: a host that wires this handler into a
+  // reply path (or that calls the public `chatPersistenceHook` /
+  // `dkgPlugin.hooks.onChatTurn` with `mode: 'assistant-reply'`)
+  // would, pre-fix, bypass `onAssistantReplyHandler`'s `replyTo` /
+  // `parentId` / `inReplyTo` inference AND the r31-1
+  // `assistantAlreadyPersisted` cache check. The same assistant
+  // message could then persist with different shapes depending on
+  // which exported hook the host happened to use.
+  //
+  // Route assistant-reply payloads through the dedicated handler so
+  // BOTH the typed hook surface (`DkgAssistantReplyHook` on
+  // `dkgPlugin.hooks.onAssistantReply`) AND any caller that drops
+  // an assistant-shaped options bag into a user-turn-typed hook get
+  // the same correct semantics. The narrow `DkgUserTurnHook` type
+  // on `chatPersistenceHook` enforces user-turn-only at compile
+  // time; this dispatch is the runtime safety net for `as any`
+  // callers and frameworks that route options dynamically.
+  const optsForDispatch = options as Record<string, unknown> | undefined;
+  if (optsForDispatch?.mode === 'assistant-reply') {
+    return onAssistantReplyHandler(runtime, message, state, optsForDispatch);
+  }
   // r30-8: route through the loose internal handle (see comment in
   // `onAssistantReplyHandler`).
   const result = await _dkgServiceLoose.persistChatTurn(runtime, message, state, options);
-  // PR #229 bot review (r3147347... — adapter-elizaos/src/index.ts:353).
-  // Pre-fix this wrapper recorded the user-turn cache entry
-  // UNCONDITIONALLY using `(message as any)?.id` as the cache key.
-  // The exported `DkgChatTurnHook` interface ALSO accepts the
-  // assistant-reply overload (`mode: 'assistant-reply'` plus the
-  // assistant `Memory`), so a caller wiring the same handler into
-  // both `dkgPlugin.hooks.onChatTurn` and a reply-shaped path could
-  // poison the cache under the ASSISTANT message id. A subsequent
-  // `onAssistantReply` for the actual user message would then miss
-  // the cache (correct), BUT — worse — a stray collision between an
-  // assistant id we recorded here and a future `userMessageId` would
-  // make `hasUserTurnBeenPersisted(...)` return true and the impl
-  // would take the append-only path against a turn envelope that
-  // never existed. Skip the cache write entirely on assistant-reply
-  // mode; if the caller really intends to mark a user-turn as
-  // persisted while in reply mode they must pass `userMessageId`
-  // explicitly via options (handled by the explicit reply hook
-  // below, not this one).
+  // r31-2: the assistant-reply branch is handled by the dispatch
+  // above, so reaching this point implies user-turn mode. We still
+  // read `optsAny` because downstream cache calls need
+  // `optsAny?.userMessageId` (r29-2) and the `assistantText`
+  // fields (r31-1).
+  //
+  // r17-1: scope the record by the runtime identity so runtime B
+  // never sees runtime A's successful user-turn writes. r24-2:
+  // ALSO scope by the destination tuple so the same (roomId,
+  // userMsgId) routed into a second store re-emits the full
+  // envelope there.
   const optsAny = options as Record<string, unknown> | undefined;
-  const isAssistantReply = optsAny?.mode === 'assistant-reply';
-  if (!isAssistantReply) {
-    // r17-1: scope the record by the runtime identity so runtime B
-    // never sees runtime A's successful user-turn writes. r24-2:
-    // ALSO scope by the destination tuple so the same (roomId,
-    // userMsgId) routed into a second store re-emits the full
-    // envelope there.
-    const roomId = (message as any)?.roomId;
-    // r29-2: when the caller intentionally drove the user-turn path
-    // with an explicit `options.userMessageId` (rare but legal —
-    // e.g. multi-step pipelines that pre-mint a user-turn id before
-    // the message lands) prefer that id over `message.id` so the
-    // cache key matches the id `onAssistantReply` will look up.
-    const userMsgId =
-      typeof optsAny?.userMessageId === 'string'
-        ? (optsAny.userMessageId as string)
-        : (message as any)?.id;
-    const dest = resolveDestinationFromOptions(runtime, options);
-    markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
-    // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
-    // The user-turn branch in `persistChatTurnImpl` ALSO writes the
-    // assistant leg when the host plumbed
-    // `assistantText` / `assistantReply.text` /
-    // `state.lastAssistantReply` into the same call. If we don't
-    // record this fact, a follow-up `onAssistantReply` for the
-    // SAME turn (typical ElizaOS hook chain — onChatTurn fires
-    // synchronously before the assistant reply hook) would take
-    // the append-only branch and re-emit the assistant Message
-    // quads onto the SAME `msg:agent:${turnKey}` URI, stacking
-    // duplicate `schema:text` / `schema:dateCreated` /
-    // `schema:author` triples (multi-valued RDF predicates) and
-    // making downstream `LIMIT 1` queries nondeterministic.
-    //
-    // We mirror the impl's own check (`assistantText` truthy) here
-    // so the cache fires only when the impl actually wrote those
-    // quads. Reading `(message as any).content?.text` is NOT
-    // sufficient — that's the user message's text on the
-    // user-turn path; the assistant leg comes exclusively from
-    // `options` / `state`.
-    const optsForAssistant = (optsAny ?? {}) as Record<string, unknown>;
-    const assistantReplyOpt = optsForAssistant.assistantReply as { text?: unknown } | undefined;
-    const stateForAssistant = (state ?? {}) as { lastAssistantReply?: unknown };
-    const assistantText =
-      (typeof optsForAssistant.assistantText === 'string' && optsForAssistant.assistantText)
-      || (typeof assistantReplyOpt?.text === 'string' && assistantReplyOpt.text)
-      || (typeof stateForAssistant.lastAssistantReply === 'string' && stateForAssistant.lastAssistantReply)
-      || '';
-    if (assistantText) {
-      markAssistantPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
-    }
+  const roomId = (message as any)?.roomId;
+  // r29-2: when the caller intentionally drove the user-turn path
+  // with an explicit `options.userMessageId` (rare but legal —
+  // e.g. multi-step pipelines that pre-mint a user-turn id before
+  // the message lands) prefer that id over `message.id` so the
+  // cache key matches the id `onAssistantReply` will look up.
+  const userMsgId =
+    typeof optsAny?.userMessageId === 'string'
+      ? (optsAny.userMessageId as string)
+      : (message as any)?.id;
+  const dest = resolveDestinationFromOptions(runtime, options);
+  markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  // The user-turn branch in `persistChatTurnImpl` ALSO writes the
+  // assistant leg when the host plumbed
+  // `assistantText` / `assistantReply.text` /
+  // `state.lastAssistantReply` into the same call. If we don't
+  // record this fact, a follow-up `onAssistantReply` for the
+  // SAME turn (typical ElizaOS hook chain — onChatTurn fires
+  // synchronously before the assistant reply hook) would take
+  // the append-only branch and re-emit the assistant Message
+  // quads onto the SAME `msg:agent:${turnKey}` URI, stacking
+  // duplicate `schema:text` / `schema:dateCreated` /
+  // `schema:author` triples (multi-valued RDF predicates) and
+  // making downstream `LIMIT 1` queries nondeterministic.
+  //
+  // We mirror the impl's own check (`assistantText` truthy) here
+  // so the cache fires only when the impl actually wrote those
+  // quads. Reading `(message as any).content?.text` is NOT
+  // sufficient — that's the user message's text on the
+  // user-turn path; the assistant leg comes exclusively from
+  // `options` / `state`.
+  const optsForAssistant = (optsAny ?? {}) as Record<string, unknown>;
+  const assistantReplyOpt = optsForAssistant.assistantReply as { text?: unknown } | undefined;
+  const stateForAssistant = (state ?? {}) as { lastAssistantReply?: unknown };
+  const assistantText =
+    (typeof optsForAssistant.assistantText === 'string' && optsForAssistant.assistantText)
+    || (typeof assistantReplyOpt?.text === 'string' && assistantReplyOpt.text)
+    || (typeof stateForAssistant.lastAssistantReply === 'string' && stateForAssistant.lastAssistantReply)
+    || '';
+  if (assistantText) {
+    markAssistantPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
   }
   return result;
 }
@@ -596,12 +604,71 @@ export interface DkgChatTurnHook {
   ): Promise<ChatTurnPersistResult>;
 }
 
+/**
+ * PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:602).
+ *
+ * Reply-only hook surface. Pre-fix, `onAssistantReply` was typed as
+ * `DkgChatTurnHook`, which still includes the user-turn overload —
+ * a downstream caller could write
+ * `dkgPlugin.hooks.onAssistantReply(runtime, msg, state, {})`
+ * (no `mode`, no `userMessageId`, no `userTurnPersisted`) and
+ * compile cleanly even though the implementation only makes sense
+ * for assistant replies. The runtime handler `onAssistantReplyHandler`
+ * coerces `mode: 'assistant-reply'` and synthesises
+ * `userTurnPersisted: false` for missing fields, but the bot's point
+ * was that the typed surface should reject the user-turn shape at
+ * compile time.
+ *
+ * `DkgAssistantReplyHook` is a single-overload callable that ONLY
+ * accepts `AssistantReplyChatTurnOptions` (mandatory `mode`,
+ * `userMessageId`, `userTurnPersisted`). User-turn callers get a
+ * compile error and must use `dkgPlugin.hooks.onChatTurn` /
+ * `chatPersistenceHook` instead.
+ */
+export interface DkgAssistantReplyHook {
+  (
+    runtime: IAgentRuntime,
+    message: Memory,
+    state: State | undefined,
+    options: AssistantReplyChatTurnOptions,
+  ): Promise<ChatTurnPersistResult>;
+}
+
+/**
+ * PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:635).
+ *
+ * User-turn-only hook surface for the `chatPersistenceHook` alias.
+ * Pre-fix, `chatPersistenceHook` was typed as `DkgChatTurnHook` (the
+ * user-turn / assistant-reply union) but wired to
+ * `onChatTurnHandler` — assistant replies routed through this alias
+ * would bypass `onAssistantReplyHandler`'s `replyTo` / `parentId` /
+ * `inReplyTo` inference AND the r31-1 `assistantAlreadyPersisted`
+ * cache check. The same logical message could persist with
+ * different shapes depending on which exported hook a host used.
+ *
+ * `DkgUserTurnHook` enforces user-turn-only at compile time so
+ * downstream callers must reach for `onAssistantReply` (typed as
+ * `DkgAssistantReplyHook`) when they want reply semantics. The
+ * runtime dispatch inside `onChatTurnHandler` (route
+ * `mode: 'assistant-reply'` payloads through the dedicated handler)
+ * is the parallel defence-in-depth for `as any` callers and
+ * frameworks that route options dynamically.
+ */
+export interface DkgUserTurnHook {
+  (
+    runtime: IAgentRuntime,
+    message: PersistableMemory,
+    state?: State,
+    options?: UserTurnChatTurnOptions,
+  ): Promise<ChatTurnPersistResult>;
+}
+
 export const dkgPlugin: Plugin & {
   hooks: {
     onChatTurn: DkgChatTurnHook;
-    onAssistantReply: DkgChatTurnHook;
+    onAssistantReply: DkgAssistantReplyHook;
   };
-  chatPersistenceHook: DkgChatTurnHook;
+  chatPersistenceHook: DkgUserTurnHook;
 } = {
   name: 'dkg',
   description:
@@ -629,11 +696,32 @@ export const dkgPlugin: Plugin & {
       onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
     // A6: dedicated handler — merges assistant text into the matching
     // turnUri rather than duplicating the whole turn.
+    // r31-2: `DkgAssistantReplyHook` rejects the user-turn overload
+    // at compile time so direct callers can't accidentally route a
+    // user-turn-shaped payload through this hook.
     onAssistantReply: ((runtime, message, state, options) =>
-      onAssistantReplyHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
+      onAssistantReplyHandler(
+        runtime,
+        message,
+        state,
+        // r31-2: `DkgAssistantReplyHook` types `options` as the
+        // strict `AssistantReplyChatTurnOptions` (no `string` index
+        // signature), so direct cast to `Record<string, unknown>`
+        // is rejected by `--strict`. Bounce through `unknown` —
+        // the impl-side path is `Record<string, unknown>`-shaped
+        // by design.
+        options as unknown as Record<string, unknown> | undefined,
+      )) as DkgAssistantReplyHook,
   },
+  // r31-2: `DkgUserTurnHook` rejects the assistant-reply overload at
+  // compile time. Hosts that need reply semantics use
+  // `dkgPlugin.hooks.onAssistantReply` instead. The runtime dispatch
+  // inside `onChatTurnHandler` (`mode: 'assistant-reply'` →
+  // `onAssistantReplyHandler`) is the defence-in-depth safety net
+  // for `as any` callers and frameworks that route options
+  // dynamically.
   chatPersistenceHook: ((runtime, message, state, options) =>
-    onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
+    onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgUserTurnHook,
 };
 
 export { dkgService, getAgent } from './service.js';

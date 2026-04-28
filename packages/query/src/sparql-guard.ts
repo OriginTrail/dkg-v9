@@ -115,6 +115,95 @@ export function emptyResultForSparql(sparql: string): QueryResult {
   return emptyResultForForm(detectSparqlQueryForm(sparql));
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+//
+// r30-3 consolidated two parallel SPARQL form classifier pairs onto
+// the canonical `detectSparqlQueryForm` + `emptyResultForForm` pair
+// and DELETED the legacy `classifySparqlForm` + `emptyQueryResultForKind`
+// + `SparqlForm` symbols outright. The bot's r31-2 thread on
+// `packages/query/src/index.ts:7` flagged the deletion as a source-
+// breaking API change for downstream consumers of
+// `@origintrail-official/dkg-query` even though the package version
+// here is unchanged.
+//
+// Restored as `@deprecated` wrappers + a re-exported type alias.
+// Same semantic behaviour as the legacy pair (notably:
+// `classifySparqlForm` silently mapped unparseable input to
+// `'SELECT'` rather than `'UNKNOWN'`, which the wrapper preserves
+// to keep BYTE-COMPATIBLE branching for any caller that switches
+// on the form). The internal call sites in `dkg-query-engine.ts`
+// and `dkg-agent.ts` continue to use the canonical pair so the
+// drift surface r30-3 closed stays closed.
+//
+// Migration path for consumers:
+//   - `classifySparqlForm(s)` → `detectSparqlQueryForm(s)` (returns
+//     `'UNKNOWN'` instead of silently coercing to `'SELECT'`).
+//   - `emptyQueryResultForKind(form)` → `emptyResultForForm(form)`
+//     (drop-in replacement; same shape, same fresh-object guarantee).
+//   - `SparqlForm` type → `SparqlQueryForm` (adds the `'UNKNOWN'`
+//     variant so unparseable input is observable rather than
+//     silently coerced).
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ *
+ * Legacy SPARQL form type. The canonical replacement is
+ * {@link SparqlQueryForm}, which adds an explicit `'UNKNOWN'`
+ * variant so unparseable input is observable rather than silently
+ * coerced to `'SELECT'`. Migrate at your earliest convenience —
+ * this alias will be removed in the next breaking release of
+ * `@origintrail-official/dkg-query`.
+ */
+export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
+
+/**
+ * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ *
+ * Legacy classifier preserved as a thin wrapper. Use
+ * {@link detectSparqlQueryForm} for new code — it returns the
+ * richer {@link SparqlQueryForm} type with a `'UNKNOWN'` variant so
+ * unparseable input is observable rather than silently coerced to
+ * `'SELECT'`.
+ *
+ * **Behavioural compat note**: this wrapper preserves the legacy
+ * "unparseable → `'SELECT'`" mapping so any caller that switches
+ * on the returned string keeps branching identically across the
+ * deprecation window. New code should call `detectSparqlQueryForm`
+ * directly and handle the `'UNKNOWN'` variant explicitly — the
+ * silent SELECT coercion is exactly the drift hazard r30-3 set out
+ * to close.
+ */
+export function classifySparqlForm(sparql: string): SparqlForm {
+  const form = detectSparqlQueryForm(sparql);
+  if (form === 'UNKNOWN') return 'SELECT';
+  return form;
+}
+
+/**
+ * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ *
+ * Legacy one-shot helper preserved as a thin composition over the
+ * canonical primitives. Use {@link emptyResultForSparql} for new
+ * code (drop-in replacement that exists for the same ergonomic
+ * "single call" reason this helper did) or
+ * {@link emptyResultForForm} when the form is already known.
+ *
+ * Behaviour matches the legacy implementation: for unparseable
+ * input this routes onto the canonical `'SELECT'` empty shape
+ * (`{ bindings: [] }`), preserving downstream callers' branching
+ * across the deprecation window. The `quads`-presence parity that
+ * matters for CONSTRUCT/DESCRIBE branching is unchanged because
+ * the canonical {@link emptyResultForForm} already handles those
+ * forms identically.
+ */
+export function emptyQueryResultForKind(form: SparqlForm): QueryResult {
+  // Widening to the richer `SparqlQueryForm` is safe — `SparqlForm`
+  // is a strict subset (`'UNKNOWN'` is the only added variant).
+  return emptyResultForForm(form as SparqlQueryForm);
+}
+
 export interface SparqlGuardResult {
   safe: boolean;
   reason?: string;

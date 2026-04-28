@@ -194,37 +194,115 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
     expect(b.bindings).toEqual([]);
   });
 
-  it('legacy `classifySparqlForm` and `emptyQueryResultForKind` are NOT exported from the package barrel (anti-drift)', async () => {
-    // Dynamic import so the test still loads even if the symbols
-    // were re-introduced (would just observe their presence and
-    // fail the assertion below).
-    const exports = (await import('../src/index.js')) as Record<string, unknown>;
-    expect(exports.classifySparqlForm).toBeUndefined();
-    expect(exports.emptyQueryResultForKind).toBeUndefined();
-    // The legacy `SparqlForm` type alias was the second exported
-    // surface that proved drift was happening. Confirm it's gone too.
-    // (Type aliases don't appear at runtime, so this is satisfied
-    // structurally by tsc — re-introducing the export would be a
-    // compile error in this file's import statement.)
+  // PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+  //
+  // r30-3 deleted the legacy `classifySparqlForm` /
+  // `emptyQueryResultForKind` / `SparqlForm` symbols outright; the
+  // bot's r31-2 thread flagged the deletion as a source-breaking
+  // API change for downstream consumers without a version bump.
+  // Restored as `@deprecated` wrappers + a `SparqlForm` type alias
+  // (defined in `sparql-guard.ts`, re-exported from the barrel).
+  //
+  // The anti-drift contract still holds — it just shifted shape:
+  //   - Internal call sites (`dkg-query-engine.ts`, `dkg-agent.ts`)
+  //     continue to use the canonical pair (`detectSparqlQueryForm`
+  //     + `emptyResultForForm` / `emptyResultForSparql`).
+  //   - The deprecated wrappers are PURE COMPOSITION over the
+  //     canonical pair (`classifySparqlForm` =
+  //     `detectSparqlQueryForm` with `'UNKNOWN'` → `'SELECT'`
+  //     mapping; `emptyQueryResultForKind` =
+  //     `emptyResultForForm`). No parallel logic path is
+  //     reintroduced — any future change to ASK/CONSTRUCT shaping
+  //     still has to touch ONE canonical spot.
+  it('the @deprecated `classifySparqlForm` wrapper composes `detectSparqlQueryForm` with the legacy `UNKNOWN → SELECT` mapping', async () => {
+    const { classifySparqlForm, detectSparqlQueryForm } = await import(
+      '../src/index.js'
+    );
+    // Parseable shapes: identical to the canonical classifier.
+    for (const q of [
+      'SELECT ?s WHERE { ?s ?p ?o }',
+      'CONSTRUCT { ?s ?p ?o } WHERE {}',
+      'DESCRIBE <urn:x>',
+      'ASK { ?s ?p ?o }',
+    ]) {
+      expect(classifySparqlForm(q)).toBe(detectSparqlQueryForm(q));
+    }
+    // Unparseable shapes: legacy wrapper coerces to `'SELECT'`,
+    // canonical returns `'UNKNOWN'`. This is the byte-compat
+    // anchor for any downstream caller that switches on the
+    // returned string.
+    for (const q of ['not-a-query', '']) {
+      expect(detectSparqlQueryForm(q)).toBe('UNKNOWN');
+      expect(classifySparqlForm(q)).toBe('SELECT');
+    }
   });
 
-  it('legacy identifiers are NOT defined in the source (anti-regression source guard)', () => {
-    // Source-level guard: if a future commit re-adds
-    // `classifySparqlForm` / `emptyQueryResultForKind` / `SparqlForm`
-    // to `sparql-guard.ts` (even unexported), this check fails and
-    // forces the author to choose: extend the canonical pair instead.
-    // This is the "any future change to ASK/CONSTRUCT shaping has to
-    // touch ONE spot, not two" enforcement the bot asked for.
+  it('the @deprecated `emptyQueryResultForKind` wrapper is byte-compatible with `emptyResultForForm` for every legacy form', async () => {
+    const { emptyQueryResultForKind, emptyResultForForm } = await import(
+      '../src/index.js'
+    );
+    for (const form of ['SELECT', 'CONSTRUCT', 'DESCRIBE', 'ASK'] as const) {
+      const legacy = emptyQueryResultForKind(form);
+      const canonical = emptyResultForForm(form);
+      expect(legacy).toEqual(canonical);
+      // `quads`-presence parity is the property that determines
+      // whether CONSTRUCT/DESCRIBE callers branch correctly. Pin
+      // it explicitly so any future shape drift is caught here.
+      expect(Object.prototype.hasOwnProperty.call(legacy, 'quads')).toBe(
+        Object.prototype.hasOwnProperty.call(canonical, 'quads'),
+      );
+    }
+  });
+
+  it('the @deprecated `emptyQueryResultForKind` wrapper inherits the FRESH-object guarantee', async () => {
+    // Same freshness invariant as the canonical builder — the
+    // deprecated wrapper must NOT cache or share return values
+    // across calls.
+    const { emptyQueryResultForKind } = await import('../src/index.js');
+    const a = emptyQueryResultForKind('CONSTRUCT');
+    const b = emptyQueryResultForKind('CONSTRUCT');
+    expect(a).not.toBe(b);
+    expect(a.bindings).not.toBe(b.bindings);
+    expect(a.quads).not.toBe(b.quads);
+    a.bindings.push({ forged: 'v' });
+    expect(b.bindings).toEqual([]);
+  });
+
+  it('the deprecated barrel exports are PRESENT (anti-removal: keeps backwards compat for downstream consumers)', async () => {
+    // r31-2 inverts the r30-3 anti-drift assertion: the legacy
+    // symbols MUST be present on the package barrel so existing
+    // `@origintrail-official/dkg-query` consumers don't hard-fail
+    // on a non-major version bump. If a future refactor removes
+    // them again, this test fails and forces an explicit decision
+    // (deprecate-then-remove with version bump, NOT silent removal).
+    const exports = (await import('../src/index.js')) as Record<string, unknown>;
+    expect(typeof exports.classifySparqlForm).toBe('function');
+    expect(typeof exports.emptyQueryResultForKind).toBe('function');
+    // `SparqlForm` is a type alias and doesn't appear at runtime,
+    // but its source-level presence is asserted by the source guard
+    // below.
+  });
+
+  it('the deprecated wrappers ARE defined in the source AND ARE annotated `@deprecated` (downstream tooling surfaces the migration)', () => {
+    // Source-level guard: the wrappers MUST exist (so the public
+    // surface is whole) AND MUST carry `@deprecated` JSDoc
+    // annotations (so downstream IDEs surface the strikethrough).
+    // This is the reverse of the r30-3 anti-drift guard: the
+    // symbols are intentionally back, but they must be marked
+    // deprecated so callers see the migration path.
     const here = dirname(fileURLToPath(import.meta.url));
     const guardPath = resolve(here, '..', 'src', 'sparql-guard.ts');
     const src = readFileSync(guardPath, 'utf-8');
-    // Match the IDENTIFIER (function/type definition tokens), not
-    // the comment/historical references. We allow the symbols to
-    // appear in JSDoc strings explaining the consolidation.
-    expect(src).not.toMatch(/\bexport\s+function\s+classifySparqlForm\b/);
-    expect(src).not.toMatch(/\bexport\s+function\s+emptyQueryResultForKind\b/);
-    expect(src).not.toMatch(/\bexport\s+type\s+SparqlForm\b/);
-    expect(src).not.toMatch(/\bfunction\s+classifySparqlForm\b/);
-    expect(src).not.toMatch(/\bfunction\s+emptyQueryResultForKind\b/);
+    expect(src).toMatch(/\bexport\s+function\s+classifySparqlForm\b/);
+    expect(src).toMatch(/\bexport\s+function\s+emptyQueryResultForKind\b/);
+    expect(src).toMatch(/\bexport\s+type\s+SparqlForm\b/);
+    // JSDoc `@deprecated` tag presence — checked structurally so
+    // a future refactor that drops the deprecation marker (which
+    // would silently un-deprecate the wrappers) is caught here.
+    // The `s` flag makes `.` match newlines so the regex can span
+    // a multi-line JSDoc block ending right before the export.
+    expect(src).toMatch(/@deprecated[\s\S]*?export\s+function\s+classifySparqlForm/);
+    expect(src).toMatch(/@deprecated[\s\S]*?export\s+function\s+emptyQueryResultForKind/);
+    expect(src).toMatch(/@deprecated[\s\S]*?export\s+type\s+SparqlForm/);
   });
 });

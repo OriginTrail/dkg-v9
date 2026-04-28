@@ -11,6 +11,10 @@ import {
   dkgService,
   __resetPersistedUserTurnCacheForTests,
 } from '../src/index.js';
+import type {
+  DkgAssistantReplyHook,
+  DkgUserTurnHook,
+} from '../src/index.js';
 import type { AssistantReplyChatTurnOptions } from '../src/service.js';
 
 describe('dkgPlugin', () => {
@@ -989,6 +993,253 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
 
       const replyOpts = spy.mock.calls[1][3] as any;
       expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:602 + :635).
+//
+// Pre-r31-2:
+//   - `dkgPlugin.hooks.onAssistantReply` was typed as `DkgChatTurnHook`,
+//     a union of user-turn AND assistant-reply overloads. A downstream
+//     caller could write `hooks.onAssistantReply(runtime, msg, state, {})`
+//     (no `mode`, no `userMessageId`, no `userTurnPersisted`) and
+//     compile cleanly even though the implementation only makes sense
+//     for assistant replies.
+//   - `dkgPlugin.chatPersistenceHook` was exported with the same union
+//     type but wired to `onChatTurnHandler`. Assistant replies routed
+//     through this alias bypassed `onAssistantReplyHandler`'s
+//     `replyTo` / `parentId` / `inReplyTo` inference AND the r31-1
+//     `assistantAlreadyPersisted` cache check. Same logical message
+//     could persist with different shapes depending on which
+//     exported hook a host happened to use.
+//
+// Fix:
+//   - `DkgAssistantReplyHook`: single-overload callable that ONLY
+//     accepts `AssistantReplyChatTurnOptions` (mandatory `mode`,
+//     `userMessageId`, `userTurnPersisted`).
+//   - `DkgUserTurnHook`: single-overload callable that ONLY accepts
+//     `UserTurnChatTurnOptions`.
+//   - `onAssistantReply` is now typed `DkgAssistantReplyHook`;
+//     `chatPersistenceHook` is now typed `DkgUserTurnHook`.
+//   - Defence-in-depth runtime dispatch in `onChatTurnHandler`: if
+//     `options.mode === 'assistant-reply'`, route through
+//     `onAssistantReplyHandler` so `as any` callers and
+//     framework-driven dynamic options bags still get the correct
+//     reply-side semantics.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dkgPlugin.hooks — r31-2: hook-surface narrowing + dispatch', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('`DkgAssistantReplyHook` is the assistant-reply-only callable shape (compile-time pin)', () => {
+    // Direct typed cast: the plugin's `onAssistantReply` MUST be
+    // assignable to `DkgAssistantReplyHook`. If the type ever
+    // widens back to `DkgChatTurnHook` or similar, this assignment
+    // becomes a structural mismatch and tsc surfaces it.
+    const hook: DkgAssistantReplyHook = dkgPlugin.hooks.onAssistantReply;
+    expect(typeof hook).toBe('function');
+
+    // Positive control: a strict assistant-reply tuple satisfies
+    // the single overload.
+    type Args = Parameters<DkgAssistantReplyHook>;
+    const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+    const msg = { content: { text: 'reply' }, id: 'm', userId: 'u', roomId: 'r' } as any;
+    const positive: Args = [
+      runtime,
+      msg,
+      undefined,
+      { mode: 'assistant-reply', userMessageId: 'u-1', userTurnPersisted: false },
+    ];
+    expect(positive.length).toBe(4);
+
+    // Negative control: a literal that's missing
+    // `userMessageId` / `userTurnPersisted` MUST be rejected by
+    // the strict overload. If TS ever stops flagging this, the
+    // hook surface has regressed back to the union type.
+    // @ts-expect-error r31-2: assistant-reply literal missing
+    // userMessageId AND userTurnPersisted is rejected by the
+    // strict single-overload `DkgAssistantReplyHook` shape.
+    const badOpts: AssistantReplyChatTurnOptions = { mode: 'assistant-reply' };
+    const negative: Args = [runtime, msg, undefined, badOpts];
+    expect(negative.length).toBe(4);
+  });
+
+  it('`DkgUserTurnHook` is the user-turn-only callable shape (compile-time pin)', () => {
+    // Direct typed cast: the plugin's `chatPersistenceHook` MUST
+    // be assignable to `DkgUserTurnHook`. Future widening would
+    // surface as a structural mismatch.
+    const hook: DkgUserTurnHook = dkgPlugin.chatPersistenceHook;
+    expect(typeof hook).toBe('function');
+
+    // Positive control: a strict user-turn tuple satisfies the
+    // single overload (omitting options is also legal because
+    // `UserTurnChatTurnOptions` parameter is `?` on `DkgUserTurnHook`).
+    type Args = Parameters<DkgUserTurnHook>;
+    const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+    const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r' } as any;
+    const positive: Args = [runtime, msg, undefined, { mode: 'user-turn' }];
+    expect(positive.length).toBe(4);
+  });
+
+  it('`onChatTurnHandler` dispatches assistant-reply payloads through `onAssistantReplyHandler` (defence-in-depth)', async () => {
+    // The narrow types reject mis-typed calls at compile time. The
+    // RUNTIME dispatch covers everything that bypasses the typed
+    // surface — `as any` callers, framework-driven dynamic options
+    // bags, and tests like this one. We assert the dispatch fires
+    // by observing that `onAssistantReply`-style logic
+    // (`replyTo` → `userMessageId` inference) runs even when the
+    // payload lands on `dkgPlugin.hooks.onChatTurn` with
+    // `mode: 'assistant-reply'`.
+    const spy = vi
+      .spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const reply = {
+        content: { text: 'r' },
+        id: 'asst-1',
+        userId: 'a',
+        roomId: 'room-r31-2',
+        // `replyTo` is the canonical field
+        // `onAssistantReplyHandler` reads to derive
+        // `userMessageId`. If the dispatch is missing,
+        // `onChatTurnHandler` would just route the payload as-is
+        // and `userMessageId` would be `undefined` on the call.
+        replyTo: 'parent-user-msg',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, reply, {}, {
+        mode: 'assistant-reply',
+      });
+
+      // `onAssistantReplyHandler` derives `userMessageId` from
+      // `message.replyTo`. The dispatch fired iff the spied call
+      // sees that derived field.
+      const callOpts = spy.mock.calls[0][3] as any;
+      expect(callOpts.mode).toBe('assistant-reply');
+      expect(callOpts.userMessageId).toBe('parent-user-msg');
+      // r14-2: `userTurnPersisted` defaulted to `false` (no cache hit).
+      expect(callOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('`chatPersistenceHook` ALSO dispatches assistant-reply payloads correctly (parity with onChatTurn — same handler underneath)', async () => {
+    // The whole point of bug 4 was that `chatPersistenceHook`
+    // (wired to `onChatTurnHandler`) and `onAssistantReply` (wired
+    // to `onAssistantReplyHandler`) used to behave differently for
+    // the same assistant-reply payload. Post-fix, both surfaces
+    // route assistant-reply payloads through the same handler, so
+    // their behaviour is identical.
+    const spy = vi
+      .spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const reply = {
+        content: { text: 'r' },
+        id: 'asst-2',
+        userId: 'a',
+        roomId: 'room-parity',
+        parentId: 'parent-via-parentId',
+      } as any;
+
+      await (dkgPlugin as any).chatPersistenceHook(runtime, reply, {}, {
+        mode: 'assistant-reply',
+      });
+
+      const callOpts = spy.mock.calls[0][3] as any;
+      expect(callOpts.mode).toBe('assistant-reply');
+      // `parentId` is the second-tier fallback in
+      // `onAssistantReplyHandler`'s inference chain. If
+      // `chatPersistenceHook` had bypassed the dispatch, this
+      // field would be missing.
+      expect(callOpts.userMessageId).toBe('parent-via-parentId');
+      expect(callOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('user-turn payloads through `onChatTurn` STILL take the user-turn handler path (dispatch is mode-gated, not unconditional)', async () => {
+    // Negative control on the dispatch: a user-turn payload (no
+    // `mode: 'assistant-reply'`) MUST NOT trip the assistant-reply
+    // dispatch. We pin this by observing that the user-turn cache
+    // gets populated (cache write only fires on the user-turn
+    // branch of `onChatTurnHandler`).
+    const spy = vi
+      .spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hi' },
+        id: 'user-msg-r31-2',
+        userId: 'u',
+        roomId: 'room-cache-pin',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+
+      // First call: user-turn → no `mode: 'assistant-reply'`
+      // injected by the handler.
+      const userCallOpts = spy.mock.calls[0][3] as any;
+      expect(userCallOpts?.mode).toBeUndefined();
+
+      // Reset spy and fire a follow-up assistant reply against
+      // the same user-message id. Cache hit → `userTurnPersisted: true`.
+      const reply = {
+        content: { text: 'r' },
+        id: 'asst-cache-pin',
+        userId: 'a',
+        roomId: 'room-cache-pin',
+        replyTo: 'user-msg-r31-2',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('the `chatPersistenceHook` user-turn cache is populated when called with a plain user-turn payload (no mode override)', async () => {
+    // Same pin as the previous test, but routing through the
+    // `chatPersistenceHook` alias to confirm the user-turn branch
+    // of `onChatTurnHandler` still fires correctly post-dispatch
+    // refactor.
+    const spy = vi
+      .spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hi' },
+        id: 'user-msg-cph',
+        userId: 'u',
+        roomId: 'room-cph',
+      } as any;
+
+      await (dkgPlugin as any).chatPersistenceHook(runtime, userMsg, {}, {});
+
+      const reply = {
+        content: { text: 'r' },
+        id: 'asst-cph',
+        userId: 'a',
+        roomId: 'room-cph',
+        replyTo: 'user-msg-cph',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(true);
     } finally {
       spy.mockRestore();
     }

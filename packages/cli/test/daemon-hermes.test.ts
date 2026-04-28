@@ -630,7 +630,12 @@ describe('Hermes daemon routes', () => {
         return new Response('bridge failed', { status: 502 });
       }
       if (requestUrl === 'https://hermes.example.com/api/hermes-channel/stream') {
-        return new Response(JSON.stringify({ text: 'gateway stream', correlationId: 'corr-1' }), {
+        return new Response(JSON.stringify({
+          text: 'gateway stream',
+          correlationId: 'corr-1',
+          sessionId: 'bridge-session',
+          turnId: 'bridge-turn',
+        }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -661,6 +666,8 @@ describe('Hermes daemon routes', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['Content-Type']).toContain('text/event-stream');
     expect(res.body).toContain('"text":"gateway stream"');
+    expect(res.body).toContain('"sessionId":"bridge-session"');
+    expect(res.body).toContain('"turnId":"bridge-turn"');
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/stream',
@@ -721,6 +728,38 @@ describe('Hermes daemon routes', () => {
       }),
     );
     expect(importMemories).toHaveBeenCalledWith('hi', `hermes-session:hermes:default:turn:${body.turnId}`);
+  });
+
+  it('does not import Hermes assistant replies until the turn is durably stored', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'partial reply',
+      turnId: 'turn-1',
+      persistenceState: 'pending',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    });
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:default',
+      'hello',
+      'partial reply',
+      undefined,
+      expect.objectContaining({
+        turnId: 'turn-1',
+        persistenceState: 'pending',
+      }),
+    );
+    expect(importMemories).not.toHaveBeenCalled();
   });
 
   it('treats a repeated Hermes turn id as an idempotent duplicate', async () => {

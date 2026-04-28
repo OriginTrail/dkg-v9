@@ -236,9 +236,13 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           Connection: 'keep-alive',
           ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
         });
-        res.write(
-          `data: ${JSON.stringify({ type: 'final', text: reply.text ?? '', correlationId: reply.correlationId ?? payload.correlationId })}\n\n`,
-        );
+        res.write(`data: ${JSON.stringify({
+          type: 'final',
+          text: reply.text ?? '',
+          correlationId: reply.correlationId ?? payload.correlationId,
+          ...(typeof reply.sessionId === 'string' && reply.sessionId ? { sessionId: reply.sessionId } : {}),
+          ...(typeof reply.turnId === 'string' && reply.turnId ? { turnId: reply.turnId } : {}),
+        })}\n\n`);
         res.end();
         return;
       } catch (err: any) {
@@ -361,7 +365,9 @@ async function persistHermesTurnUnlocked(
         failureReason: payload.failureReason,
       },
     );
-    await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+    if (payload.persistenceState === 'stored') {
+      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+    }
     return { statusCode: 200, body: { ok: true, turnId: payload.turnId } };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };

@@ -90,19 +90,5 @@ export default function (api) {
     log.debug?.(`[dkg-entry] SKILL.md sync skipped: ${err.message}`);
   }
 
-  // Reset singleton on gateway teardown so in-process restart re-registers fresh.
-  // Listen on multiple lifecycle events - whichever the gateway version supports.
-  if (typeof api.on === 'function') {
-    const reset = () => {
-      if (instance) {
-        instance.stop().catch(() => {});
-      }
-      instance = null;
-    };
-    for (const event of ['shutdown', 'close', 'restart', 'reload']) {
-      api.on(event, reset);
-    }
-  }
-
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

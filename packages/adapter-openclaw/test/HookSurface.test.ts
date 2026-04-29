@@ -285,6 +285,33 @@ describe("HookSurface", () => {
       const stats = hs.getDispatchStats();
       expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
     });
+
+    it("logs non-rare commit timeouts at warn", async () => {
+      const logger = mkLogger();
+      const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 10 });
+      hs.install("typed", "agent_end", vi.fn());
+      await new Promise((r) => setTimeout(r, 30));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+      expect(logger.debug).not.toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+    });
+
+    it("logs rare-fire commit timeouts at debug for infrequent hooks", async () => {
+      const logger = mkLogger();
+      const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 10 });
+      hs.install("legacy", "session_end", vi.fn(), { rareFireExpected: true });
+      hs.install("internal", "message:received", vi.fn(), { rareFireExpected: true });
+      hs.install("internal", "message:sent", vi.fn(), { rareFireExpected: true });
+      await new Promise((r) => setTimeout(r, 30));
+
+      const debugMessages = logger.debug.mock.calls.map((args) => String(args[0]));
+      const warnMessages = logger.warn.mock.calls.map((args) => String(args[0]));
+      expect(debugMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:received"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(true);
+      expect(warnMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:received"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
+    });
   });
 
   describe("N5 partial-install policy", () => {

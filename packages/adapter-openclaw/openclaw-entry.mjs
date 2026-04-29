@@ -6,6 +6,7 @@ import { DkgNodePlugin } from './dist/index.js';
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
 const lifecycleServiceApis = new WeakMap();
+let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -101,11 +102,14 @@ function registerLifecycleService(api, log) {
   if (lifecycleServiceApis.get(api) === instance) return;
 
   const serviceInstance = instance;
+  const serviceToken = {};
   try {
     api.registerService({
       name: 'dkg-adapter-openclaw-runtime',
       start: async () => {},
       stop: async () => {
+        if (lifecycleOwnerToken !== serviceToken) return;
+        lifecycleOwnerToken = null;
         try {
           await serviceInstance.stop();
         } finally {
@@ -116,6 +120,7 @@ function registerLifecycleService(api, log) {
       },
     });
     lifecycleServiceApis.set(api, serviceInstance);
+    lifecycleOwnerToken = serviceToken;
   } catch (err) {
     log.debug?.(`[dkg-entry] lifecycle service registration skipped: ${err.message}`);
   }

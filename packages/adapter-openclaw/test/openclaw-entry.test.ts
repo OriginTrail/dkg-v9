@@ -126,8 +126,15 @@ describe('openclaw-entry', () => {
     entry(firstApi);
     entry(secondApi);
 
+    const instance = globalThis.__openclawEntryTestInstances![0];
     expect(globalThis.__openclawEntryTestInstances).toHaveLength(1);
-    expect(globalThis.__openclawEntryTestInstances![0].registerCalls).toEqual([firstApi, secondApi]);
+    expect(instance.registerCalls).toEqual([firstApi, secondApi]);
     expect(secondApi.registerService).toHaveBeenCalledTimes(1);
+
+    await firstApi.services[0].stop();
+    expect(instance.stopCalls).toBe(0);
+
+    await secondApi.services[0].stop();
+    expect(instance.stopCalls).toBe(1);
   });
 });

@@ -1313,6 +1313,37 @@ async function _performUpdateInner(
         log(
           "Auto-update: contract folder changes detected; building @origintrail-official/dkg-evm-module...",
         );
+        // Run `hardhat clean` first so stale artifacts/, abi/, and typechain
+        // outputs from a deleted/renamed contract don't survive into the
+        // inactive slot. We deliberately scope this to the
+        // `shouldBuildContracts` branch:
+        //   - the no-change branch keeps the Hardhat compile cache intact,
+        //     which is what saves us from the cold-solc / ARM64 build
+        //     timeout that the rest of this helper exists to prevent;
+        //   - when contract sources actually changed we're already paying
+        //     for a recompile, so wiping the cache here is essentially free
+        //     and guarantees the swap doesn't activate ghost ABIs/types.
+        // Best-effort: a clean failure must not abort an otherwise-valid
+        // contract rebuild — `hardhat compile` will still recreate every
+        // artifact that the new source tree references; only stale outputs
+        // for *deleted* contracts would be missed, which is a strict
+        // improvement over today's behaviour anyway.
+        try {
+          await runBuildStep(
+            execAsync,
+            "pnpm --filter @origintrail-official/dkg-evm-module clean",
+            {
+              cwd: targetDir,
+              timeoutMs: timeouts.contracts,
+              label: "pnpm --filter dkg-evm-module clean",
+              log,
+            },
+          );
+        } catch (cleanErr: any) {
+          log(
+            `Auto-update: hardhat clean failed (${cleanErr?.message ?? String(cleanErr)}); proceeding with rebuild — stale artifacts for renamed/deleted contracts may persist.`,
+          );
+        }
         await runBuildStep(
           execAsync,
           "pnpm --filter @origintrail-official/dkg-evm-module build",

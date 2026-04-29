@@ -1417,6 +1417,31 @@ describe('autoupdater hardening', () => {
     expect(contractsBuilt).toBe(false);
   });
 
+  it('runs `hardhat clean` before the contract rebuild so stale artifacts/abi/typechain from renamed/deleted contracts do not survive into the slot', async () => {
+    // Default path skips `git clean -fdx` (cold-solc on ARM64 trips the
+    // build timeout) and cleanGeneratedOutputs intentionally spares
+    // evm-module/{cache,artifacts}/. So when contract sources actually
+    // change we run `hardhat clean` first to drop ghost outputs from
+    // deleted contracts. Scoped to the same trigger as the rebuild so
+    // no-change updates still benefit from the Hardhat compile cache.
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const order: string[] = [];
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module clean')) order.push('clean');
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) order.push('build');
+      return { stdout: '', stderr: '' };
+    };
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(order).toEqual(['clean', 'build']);
+  });
+
   it('contract-diff retries via `git fetch --depth=1` for the missing parent commit before giving up', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');

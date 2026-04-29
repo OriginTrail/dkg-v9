@@ -960,10 +960,11 @@ export function mergeOpenClawConfig(
     delete existingEntryConfig.stateDirSource;
   } else if (existingStateDir) {
     preservedExistingStateDir = true;
-    // A preserved stateDir is user-owned, even when it happens to equal an
-    // old default path. Do not let the incoming setup marker survive the
-    // spread below.
-    delete existingEntryConfig.stateDirSource;
+    // A preserved stateDir is user-owned unless the existing marker proves it
+    // came from setup and no replacement stateDir was supplied.
+    if (!existingStateDirIsSetupOwned || incomingStateDir) {
+      delete existingEntryConfig.stateDirSource;
+    }
   }
 
   entryForConfig.config = {
@@ -975,11 +976,20 @@ export function mergeOpenClawConfig(
     // for the adapter-owned pointer so a re-install updates it cleanly.
     installedWorkspace,
   };
+  const finalStateDir = trimmedNonEmpty(entryForConfig.config.stateDir);
+  const preservedSetupDefault =
+    preservedExistingStateDir &&
+    existingStateDirIsSetupOwned &&
+    !incomingStateDir &&
+    !!finalStateDir &&
+    sameResolvedPath(finalStateDir, existingStateDir);
   if (
     incomingStateDirIsSetupDefault &&
     !preservedExistingStateDir &&
-    trimmedNonEmpty(entryForConfig.config.stateDir) === incomingStateDir
+    finalStateDir === incomingStateDir
   ) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else if (preservedSetupDefault) {
     entryForConfig.config.stateDirSource = 'setup-default';
   } else {
     delete entryForConfig.config.stateDirSource;

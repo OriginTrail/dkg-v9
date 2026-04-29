@@ -67,6 +67,23 @@ const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   nodeServedSkill: true,
 } as const;
 
+type ChatTurnWriterStateDirSource =
+  | 'runtime'
+  | 'env'
+  | 'config'
+  | 'workspace'
+  | 'setup-default'
+  | 'home';
+
+const STATE_DIR_SOURCE_PRIORITY: Record<ChatTurnWriterStateDirSource, number> = {
+  runtime: 0,
+  env: 1,
+  config: 2,
+  workspace: 3,
+  'setup-default': 4,
+  home: 5,
+};
+
 const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
@@ -196,6 +213,7 @@ export class DkgNodePlugin {
   // when a better (workspace-scoped) path becomes available and rebuild
   // the writer at the upgraded location.
   private chatTurnWriterStateDir: string | null = null;
+  private chatTurnWriterStateDirSource: ChatTurnWriterStateDirSource | null = null;
   // T24 — Tracks the target stateDir of an in-flight async migration.
   // The migration is fire-and-forget from `register()` so we need a
   // separate flag from `chatTurnWriterStateDir` (which only flips on
@@ -615,20 +633,53 @@ export class DkgNodePlugin {
       !!setupDefaultStateDir &&
       canonicalPathForCompare(configuredStateDir) === canonicalPathForCompare(setupDefaultStateDir);
     const workspaceStateDir = trimmedWorkspaceDir ? join(trimmedWorkspaceDir, '.openclaw') : undefined;
-    const stateDir =
-      trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.()) ??
-      trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR) ??
-      (!configuredIsSetupDefault ? configuredStateDir : undefined) ??
-      workspaceStateDir ??
-      configuredStateDir ??
-      homeDir;
+    const runtimeStateDir = trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.());
+    const envStateDir = trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR);
+    let stateDir = homeDir;
+    let stateDirSource: ChatTurnWriterStateDirSource = 'home';
+    if (runtimeStateDir) {
+      stateDir = runtimeStateDir;
+      stateDirSource = 'runtime';
+    } else if (envStateDir) {
+      stateDir = envStateDir;
+      stateDirSource = 'env';
+    } else if (!configuredIsSetupDefault && configuredStateDir) {
+      stateDir = configuredStateDir;
+      stateDirSource = 'config';
+    } else if (workspaceStateDir) {
+      stateDir = workspaceStateDir;
+      stateDirSource = 'workspace';
+    } else if (configuredStateDir) {
+      stateDir = configuredStateDir;
+      stateDirSource = 'setup-default';
+    }
+
+    const inferCurrentStateDirSource = (currentStateDir: string): ChatTurnWriterStateDirSource => {
+      const current = canonicalPathForCompare(currentStateDir);
+      const matches = (candidate: string | undefined): boolean =>
+        !!candidate && current === canonicalPathForCompare(candidate);
+      if (matches(runtimeStateDir)) return 'runtime';
+      if (matches(envStateDir)) return 'env';
+      if (matches(configuredStateDir)) return configuredIsSetupDefault ? 'setup-default' : 'config';
+      if (matches(workspaceStateDir)) return 'workspace';
+      if (current === canonicalPathForCompare(homeDir)) return 'home';
+      return 'config';
+    };
+    const canMigrateWithinSource = (source: ChatTurnWriterStateDirSource): boolean =>
+      source === 'runtime' || source === 'env' || source === 'workspace';
+    const stateDirSourceLabel = (source: ChatTurnWriterStateDirSource, currentStateDir: string): string => {
+      if (source === 'home') return `fallback '${homeDir}'`;
+      if (source === 'setup-default') return `setup-owned '${currentStateDir}'`;
+      return `${source} '${currentStateDir}'`;
+    };
 
     if (this.chatTurnWriter) {
       // T18 — Already constructed. If a better stateDir is now
       // available, in-place migrate the writer to the new location.
-      // Only upgrade fallback/setup-owned defaults to a better source;
-      // never migrate away from an explicit user-owned stateDir. Same-path
-      // is a no-op, with canonical comparison covering symlink aliases.
+      // Migrate only when the newly resolved source outranks the source that
+      // created the writer, or when the same dynamic source changed value.
+      // Same-path is a no-op, with canonical comparison covering symlink
+      // aliases.
       const currentStateDir = this.chatTurnWriterStateDir;
       if (!currentStateDir) return;
       const currentCanonicalStateDir = canonicalPathForCompare(currentStateDir);
@@ -643,17 +694,19 @@ export class DkgNodePlugin {
         this.chatTurnWriterMigrationTarget &&
         canonicalPathForCompare(this.chatTurnWriterMigrationTarget) === nextCanonicalStateDir
       ) return;
-      const homeCanonicalStateDir = canonicalPathForCompare(homeDir);
-      const wasFallback = currentCanonicalStateDir === homeCanonicalStateDir;
-      const wasSetupDefault =
-        configuredIsSetupDefault &&
-        !!configuredStateDir &&
-        currentCanonicalStateDir === canonicalPathForCompare(configuredStateDir);
+      const currentStateDirSource =
+        this.chatTurnWriterStateDirSource ?? inferCurrentStateDirSource(currentStateDir);
       const isUpgrade =
-        (wasFallback || wasSetupDefault) &&
-        nextCanonicalStateDir !== homeCanonicalStateDir;
+        (
+          STATE_DIR_SOURCE_PRIORITY[stateDirSource] < STATE_DIR_SOURCE_PRIORITY[currentStateDirSource] ||
+          (
+            stateDirSource === currentStateDirSource &&
+            canMigrateWithinSource(stateDirSource)
+          )
+        ) &&
+        stateDirSource !== 'home';
       if (!isUpgrade) return; // Don't downgrade or sidestep.
-      const sourceLabel = wasFallback ? `fallback '${homeDir}'` : `setup-owned '${currentStateDir}'`;
+      const sourceLabel = stateDirSourceLabel(currentStateDirSource, currentStateDir);
       api.logger.info?.(
         `[dkg] Migrating ChatTurnWriter stateDir from ${sourceLabel} to '${stateDir}'.`,
       );
@@ -677,6 +730,7 @@ export class DkgNodePlugin {
       this.chatTurnWriter.setStateDir(stateDir).then(
         () => {
           this.chatTurnWriterStateDir = stateDir;
+          this.chatTurnWriterStateDirSource = stateDirSource;
           this.chatTurnWriterMigrationTarget = null;
         },
         (err: any) => {
@@ -689,7 +743,7 @@ export class DkgNodePlugin {
       return;
     }
 
-    if (stateDir === homeDir) {
+    if (stateDirSource === 'home') {
       api.logger.warn?.(
         '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / config.stateDir / api.workspaceDir all unavailable); ' +
         `falling back to '${homeDir}'. Two workspaces on the same machine will share chat-turn watermarks. ` +
@@ -698,6 +752,7 @@ export class DkgNodePlugin {
     }
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     this.chatTurnWriterStateDir = stateDir;
+    this.chatTurnWriterStateDirSource = stateDirSource;
   }
 
 

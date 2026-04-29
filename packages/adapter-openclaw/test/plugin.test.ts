@@ -3964,6 +3964,132 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - writer migrates from configured stateDir when runtime state API appears later', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const configStateDir = path.join(require('os').tmpdir(), `dkg-t75-config-first-${Date.now()}`);
+    const runtimeStateDir = path.join(require('os').tmpdir(), `dkg-t75-runtime-later-${Date.now()}`);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir: configStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiWithoutRuntime: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithoutRuntime);
+      const writer = (plugin as any).chatTurnWriter;
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        configStateDir.replace(/\\/g, '/'),
+      );
+
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
+      const apiWithRuntime: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => runtimeStateDir } },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithRuntime);
+      expect(setStateDirSpy).toHaveBeenCalledWith(runtimeStateDir);
+      expect((plugin as any).chatTurnWriter).toBe(writer);
+
+      await new Promise((r) => setTimeout(r, 100));
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        runtimeStateDir.replace(/\\/g, '/'),
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(configStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(runtimeStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - writer migrates from configured stateDir when OPENCLAW_STATE_DIR appears later', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const configStateDir = path.join(require('os').tmpdir(), `dkg-t75-config-first-env-${Date.now()}`);
+    const envStateDir = path.join(require('os').tmpdir(), `dkg-t75-env-later-${Date.now()}`);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir: configStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const writer = (plugin as any).chatTurnWriter;
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
+
+      process.env.OPENCLAW_STATE_DIR = envStateDir;
+      plugin.register(mockApi);
+      expect(setStateDirSpy).toHaveBeenCalledWith(envStateDir);
+      expect((plugin as any).chatTurnWriter).toBe(writer);
+
+      await new Promise((r) => setTimeout(r, 100));
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        envStateDir.replace(/\\/g, '/'),
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(configStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(envStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - explicit config.stateDir equal to home fallback does not emit fallback warning', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const homeStateDir = path.join(require('os').homedir(), '.openclaw');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir: homeStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const warn = vi.fn();
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn, debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      expect(warn.mock.calls.some((args) =>
+        String(args?.[0] ?? '').includes('Could not resolve a workspace-scoped state dir'),
+      )).toBe(false);
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+  });
+
   it('warns once when legacy OriginTrail Game config is still present', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',

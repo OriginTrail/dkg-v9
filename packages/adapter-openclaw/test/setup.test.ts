@@ -599,6 +599,36 @@ describe('mergeOpenClawConfig', () => {
     expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBeUndefined();
   });
 
+  it('preserves an existing setup-owned stateDir marker when entryConfig omits stateDir', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const stateDir = join(defaultInstalledWorkspace, '.openclaw');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              installedWorkspace: defaultInstalledWorkspace,
+              stateDir,
+              stateDirSource: 'setup-default',
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const entryConfig = config.plugins.entries['adapter-openclaw'].config;
+    expect(entryConfig.stateDir).toBe(stateDir);
+    expect(entryConfig.stateDirSource).toBe('setup-default');
+  });
+
   it('preserves existing entry.config values on re-merge (first-wins semantics)', () => {
     const configPath = join(testDir, 'openclaw.json');
     // Seed: user has a prior merge with a custom daemonUrl and a memory

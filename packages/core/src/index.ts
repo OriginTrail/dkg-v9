@@ -46,6 +46,7 @@ export {
   loadAuthToken,
   loadAgentAuthTokenSync,
   loadAgentAuthToken,
+  type KeystoreAuthTokenResult,
   MultipleAgentsError,
   toEip55Checksum,
 } from './dkg-home.js';

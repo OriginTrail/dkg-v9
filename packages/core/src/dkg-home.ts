@@ -213,47 +213,82 @@ function resolveExplicitAddress(explicit: string | undefined): string | undefine
 }
 
 /**
+ * Discriminated result of the keystore agent-auth-token read.
+ *
+ * T64/T66 — The adapter's probe needs to distinguish three end-states so it
+ * can correctly drive the `localKeystoreCheckedAndAbsent` flag (which gates
+ * the peerId fallback in `resolveDefaultAgentAddress`):
+ *
+ * - `'absent'` — file does not exist OR file exists, parses cleanly, and
+ *   contains zero eth-shaped keys (legitimate "no agent registered yet"
+ *   state). The daemon's `ChatMemoryManager` was almost certainly
+ *   constructed with `peerId` (one-shot at lifecycle), so the peerId
+ *   fallback is the correct WM scope. Probe sets the flag.
+ *
+ * - `'unusable'` — file exists but cannot yield a usable token (malformed
+ *   JSON, EACCES, eth entries missing `authToken`, or only non-eth keys
+ *   that should be eth-shaped). Could be transient (operator mid-write,
+ *   permissions blip) or permanently broken — either way, the peerId
+ *   fallback is unsafe (the daemon may be using eth on this same host).
+ *   Probe does NOT set the flag; warns so operators see the gap.
+ *
+ * - `{ authToken }` — usable agent token. Probe forwards to the daemon's
+ *   `/api/agent/identity` HTTP endpoint.
+ *
+ * Throws `MultipleAgentsError` for multi-agent without env override
+ * (refuse-to-guess); the adapter probe surfaces a warn and the resolver
+ * stays at undefined.
+ */
+export type KeystoreAuthTokenResult =
+  | { kind: 'token'; authToken: string }
+  | { kind: 'absent' }
+  | { kind: 'unusable' };
+
+/**
  * Load the agent's auth token from `<DKG_HOME>/agent-keystore.json`.
  *
- * T63 — Replaces `loadAgentEthAddressSync`. The adapter no longer derives
- * the eth address from the keystore JSON key; instead it reads the agent's
- * auth token here, then HTTP-probes the daemon's `/api/agent/identity`
- * endpoint with that token to get the canonical eth (the daemon already
- * stores it in EIP-55 form via `verifyWallet.address`). Single source of
- * truth, no case-conversion plumbing in the adapter.
+ * T63 — The adapter no longer derives the eth address from the keystore
+ * JSON key; instead it reads the agent's auth token here, then HTTP-probes
+ * the daemon's `/api/agent/identity` endpoint with that token to get the
+ * canonical eth (the daemon already stores it in EIP-55 form via
+ * `verifyWallet.address`). Single source of truth, no case-conversion
+ * plumbing in the adapter.
+ *
+ * T64/T66 — Returns a discriminated `KeystoreAuthTokenResult` so the probe
+ * can distinguish "no agent yet" (peerId fallback OK) from "file present
+ * but unusable" (no fallback — could be transient).
  *
  * The keystore is written by `packages/agent/src/dkg-agent.ts:saveToKeystore`
  * as `{ <lowercase-eth>: { authToken, privateKey? } }`.
  *
- * - Single-agent keystore: returns `{ authToken: parsed[onlyKey].authToken }`.
- * - Multi-agent keystore + no `explicitAddress`: throws `MultipleAgentsError`
- *   (refuse to guess — silent mis-routing across identities is a
- *   security/correctness footgun).
- * - Multi-agent keystore + `explicitAddress` matching one entry (case-
- *   insensitive): returns that entry's `authToken`.
- * - Missing/empty/malformed keystore: returns `undefined` (caller's
- *   "keystore absent" path takes over).
- * - Missing `authToken` field on a present eth entry: returns `undefined`
- *   (treated as malformed entry).
+ * - Single-agent keystore with usable `authToken`: returns
+ *   `{ kind: 'token', authToken }`.
+ * - Multi-agent + `explicitAddress` (case-insensitive match) with usable
+ *   `authToken` on the matched entry: returns
+ *   `{ kind: 'token', authToken }`.
+ * - Missing keystore file OR file with zero eth-shaped keys: returns
+ *   `{ kind: 'absent' }`.
+ * - File present but unreadable/malformed/missing-authToken: returns
+ *   `{ kind: 'unusable' }`.
+ * - Multi-agent without env: throws `MultipleAgentsError`.
  *
- * `opts.explicitAddress` (typically `process.env.DKG_AGENT_ADDRESS`) is the
- * disambiguator for multi-agent setups. The eth address sent on the wire
- * comes from the daemon's HTTP response, NOT from this argument — operators
- * who want to override the daemon's reported identity entirely (remote-daemon
- * deployments) handle that at the call site, not here.
+ * T67 — When the keystore has duplicate case variants of the same eth
+ * (checksum + lowercase), the helper scans ALL case-insensitive matches
+ * and returns the first one with a non-empty `authToken`, instead of
+ * giving up on the first match.
  */
 export function loadAgentAuthTokenSync(
   dkgHome?: string,
   opts?: { explicitAddress?: string },
-): { authToken: string } | undefined {
+): KeystoreAuthTokenResult {
   const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
-  if (!existsSync(filePath)) return undefined;
+  if (!existsSync(filePath)) return { kind: 'absent' };
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
   } catch {
-    return undefined;
+    return { kind: 'unusable' };
   }
 
   return resolveAuthTokenFromParsed(parsed, opts?.explicitAddress);
@@ -263,15 +298,15 @@ export function loadAgentAuthTokenSync(
 export async function loadAgentAuthToken(
   dkgHome?: string,
   opts?: { explicitAddress?: string },
-): Promise<{ authToken: string } | undefined> {
+): Promise<KeystoreAuthTokenResult> {
   const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
-  if (!existsSync(filePath)) return undefined;
+  if (!existsSync(filePath)) return { kind: 'absent' };
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(filePath, 'utf-8'));
   } catch {
-    return undefined;
+    return { kind: 'unusable' };
   }
 
   return resolveAuthTokenFromParsed(parsed, opts?.explicitAddress);
@@ -281,13 +316,32 @@ export async function loadAgentAuthToken(
  * Shared resolution body for sync + async `loadAgentAuthToken*`.
  * Walks the parsed keystore, applies the multi-agent guardrail, picks the
  * matching entry, and extracts its `authToken` field.
+ *
+ * T67 — Scans ALL case-insensitive matches for the chosen key, not just
+ * the first one. Keystores that recorded the same identity in both
+ * checksum and lowercase form (operator hand-edit, two writer paths with
+ * different normalisation) might have one duplicate stale/malformed and
+ * another carrying the valid token. Pre-fix the helper picked the first
+ * raw match and gave up; post-fix it returns the first usable token.
  */
 function resolveAuthTokenFromParsed(
   parsed: unknown,
   explicitAddress: string | undefined,
-): { authToken: string } | undefined {
+): KeystoreAuthTokenResult {
   const keys = extractEthAddressKeys(parsed);
-  if (keys.length === 0) return undefined;
+  if (keys.length === 0) {
+    // Two sub-cases: (a) parsed value isn't an object at all (malformed
+    // structure that JSON.parse accepted but `extractEthAddressKeys`
+    // rejected — e.g. a JSON literal of `null` or a string), and (b)
+    // parsed object had keys but none were eth-shaped. (a) is genuinely
+    // unusable; (b) is the legitimate "empty keystore" / "non-eth keys
+    // only" state where the daemon almost certainly uses peerId. Without
+    // finer-grained discrimination, `'absent'` is the safer default
+    // (peerId fallback engages) — non-eth-only keystores in practice
+    // mean no agent is registered yet, same end-state as a missing file.
+    if (!parsed || typeof parsed !== 'object') return { kind: 'unusable' };
+    return { kind: 'absent' };
+  }
 
   let chosenKey: string;
   if (keys.length === 1) {
@@ -300,14 +354,17 @@ function resolveAuthTokenFromParsed(
     chosenKey = match;
   }
 
-  // The keystore JSON's keys may be in any case (typically lowercase per
-  // `saveToKeystore` normalization, but defensively also accept others).
-  // We've already lowercased and deduped via `extractEthAddressKeys`; pull
-  // the entry by case-insensitive lookup against the original parsed object.
+  // T67 — Collect ALL entries whose key matches the chosen lowercase eth
+  // (case-insensitive). For each, try to extract a usable `authToken`;
+  // return the first one. If every match is malformed, return 'unusable'.
   const obj = parsed as Record<string, unknown>;
-  const entry = Object.entries(obj).find(([k]) => k.toLowerCase() === chosenKey)?.[1];
-  if (!entry || typeof entry !== 'object') return undefined;
-  const tok = (entry as Record<string, unknown>).authToken;
-  if (typeof tok !== 'string' || tok.length === 0) return undefined;
-  return { authToken: tok };
+  const matchingEntries = Object.entries(obj).filter(([k]) => k.toLowerCase() === chosenKey);
+  for (const [, entry] of matchingEntries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const tok = (entry as Record<string, unknown>).authToken;
+    if (typeof tok === 'string' && tok.length > 0) {
+      return { kind: 'token', authToken: tok };
+    }
+  }
+  return { kind: 'unusable' };
 }

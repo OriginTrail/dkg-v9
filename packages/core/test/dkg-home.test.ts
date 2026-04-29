@@ -197,13 +197,12 @@ describe('loadAuthToken / loadAuthTokenSync', () => {
   });
 });
 
-describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
+describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63/T64/T67)', () => {
   let tempDir: string;
-  // T63 — Helpers return `{ authToken }`, not the eth address. The eth comes
-  // from the daemon's `/api/agent/identity` HTTP probe in the adapter call
-  // site. Test fixtures are LOWERCASE keystore JSON keys (the standard form
-  // the daemon writes); explicit-address inputs to the helper are ALSO
-  // lowercased for case-insensitive matching against keystore keys.
+  // T63 — Helpers return a discriminated `KeystoreAuthTokenResult`. Test
+  // fixtures are LOWERCASE keystore JSON keys (the standard form the daemon
+  // writes); explicit-address inputs to the helper are lowercased for
+  // case-insensitive matching against keystore keys.
   const ETH_A = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
   const ETH_B = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
 
@@ -221,49 +220,52 @@ describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ [ETH_A]: { authToken: 'tok-a', privateKey: '0xpk' } }),
     );
-    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ authToken: 'tok-a' });
-    expect(await loadAgentAuthToken(tempDir)).toEqual({ authToken: 'tok-a' });
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'token', authToken: 'tok-a' });
+    expect(await loadAgentAuthToken(tempDir)).toEqual({ kind: 'token', authToken: 'tok-a' });
   });
 
-  it('returns undefined when keystore file does not exist', async () => {
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
-    expect(await loadAgentAuthToken(tempDir)).toBeUndefined();
+  it('returns kind=absent when keystore file does not exist', async () => {
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'absent' });
+    expect(await loadAgentAuthToken(tempDir)).toEqual({ kind: 'absent' });
   });
 
-  it('returns undefined for an empty object keystore', async () => {
+  it('returns kind=absent for an empty object keystore (legitimate "no agent yet" — peerId fallback OK)', async () => {
     await writeFile(join(tempDir, 'agent-keystore.json'), '{}');
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'absent' });
   });
 
-  it('returns undefined for keystore with only non-eth-shaped keys', async () => {
+  it('returns kind=absent for keystore with only non-eth-shaped keys', async () => {
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ 'not-an-eth-key': { authToken: 'tok' }, '12D3KooWPeerLike': {} }),
     );
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    // Same end-state semantically as missing file — daemon would also see
+    // no usable agent and write under peerId.
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'absent' });
   });
 
-  it('returns undefined for malformed JSON (treat as missing, do not throw)', async () => {
+  it('returns kind=unusable for malformed JSON (T64 — TRANSIENT, do NOT trigger peerId fallback)', async () => {
     await writeFile(join(tempDir, 'agent-keystore.json'), '{ this is not json');
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
-    expect(await loadAgentAuthToken(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'unusable' });
+    expect(await loadAgentAuthToken(tempDir)).toEqual({ kind: 'unusable' });
   });
 
-  it('returns undefined when the matched entry is missing the authToken field', async () => {
-    // Malformed entry — eth key present but no authToken.
+  it('returns kind=unusable when the matched entry is missing the authToken field (T64)', async () => {
+    // Malformed entry — eth key present but no authToken. Could be operator
+    // mid-write or genuinely broken; either way, NOT "no keystore".
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ [ETH_A]: { privateKey: '0xpk' } }),
     );
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'unusable' });
   });
 
-  it('returns undefined when authToken field is empty string', async () => {
+  it('returns kind=unusable when authToken field is empty string (T64)', async () => {
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ [ETH_A]: { authToken: '' } }),
     );
-    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'unusable' });
   });
 
   it('throws MultipleAgentsError when keystore has multiple eth keys and no explicit override', async () => {
@@ -283,15 +285,15 @@ describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
     // Lowercase input.
     expect(
       loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B }),
-    ).toEqual({ authToken: 'tok-b' });
+    ).toEqual({ kind: 'token', authToken: 'tok-b' });
     // Mixed-case input — same result.
     expect(
       loadAgentAuthTokenSync(tempDir, { explicitAddress: '0x949eC97aB4eD1C9fb4C9A70C2dD368065d817B0c' }),
-    ).toEqual({ authToken: 'tok-b' });
+    ).toEqual({ kind: 'token', authToken: 'tok-b' });
     // All-caps input — same result.
     expect(
       loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B.toUpperCase() }),
-    ).toEqual({ authToken: 'tok-b' });
+    ).toEqual({ kind: 'token', authToken: 'tok-b' });
   });
 
   it('explicit override that does not match any keystore entry throws MultipleAgentsError', async () => {
@@ -314,7 +316,7 @@ describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
     // of any explicit override (override is for multi-agent disambiguation only).
     expect(
       loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B }),
-    ).toEqual({ authToken: 'only-tok' });
+    ).toEqual({ kind: 'token', authToken: 'only-tok' });
   });
 
   it('T46 — dedupes same address recorded in both checksum AND lowercase form (single-agent, not multi)', async () => {
@@ -328,8 +330,39 @@ describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
     // acceptable because `Object.entries` ordering is engine-defined; we just
     // need to confirm a token returns and no `MultipleAgentsError`.
     const result = loadAgentAuthTokenSync(tempDir);
-    expect(result).toBeDefined();
-    expect(['a', 'b']).toContain(result!.authToken);
+    expect(result.kind).toBe('token');
+    if (result.kind === 'token') {
+      expect(['a', 'b']).toContain(result.authToken);
+    }
+  });
+
+  it('T67 — returns the usable authToken when one duplicate is malformed and another has the token', async () => {
+    // Two case variants of the SAME identity. First entry malformed (no
+    // authToken), second entry usable. Pre-fix the helper picked the first
+    // raw match and returned undefined; post-fix it scans all matches and
+    // returns the first usable token.
+    const checksumA = '0x26C9B05A30138b35E84E60A5b778d580065FFBB8';
+    const lowercase = ETH_A;
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      // First entry: malformed (no authToken); second entry: usable.
+      JSON.stringify({ [checksumA]: { privateKey: '0xpk' }, [lowercase]: { authToken: 'usable-tok' } }),
+    );
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'token', authToken: 'usable-tok' });
+
+    // Reverse order — usable first, malformed second. Should still pick usable.
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [checksumA]: { authToken: 'usable-tok' }, [lowercase]: { privateKey: '0xpk' } }),
+    );
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'token', authToken: 'usable-tok' });
+
+    // Both malformed → kind=unusable.
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [checksumA]: { privateKey: '0xpk' }, [lowercase]: { authToken: '' } }),
+    );
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ kind: 'unusable' });
   });
 
   it('T62 / T63 — toEip55Checksum produces canonical EIP-55 form for known vectors', () => {

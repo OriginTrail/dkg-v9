@@ -1716,6 +1716,13 @@ export class DkgNodePlugin {
       return;
     }
 
+    // T64/T66 — Reset the absent-flag at probe entry. The flag drives the
+    // peerId fallback in the resolver chain; if a previous probe ran with
+    // a transient state (file mid-write, stale parse, etc.) and set the
+    // flag, leaving it set is wrong once the keystore stabilizes. Each
+    // probe re-derives the flag from current state.
+    this.localKeystoreCheckedAndAbsent = false;
+
     // Localhost: T42 — explicit `config.dkgHome` lets operators point at
     // the daemon's home dir when it differs from the gateway process's
     // own `DKG_HOME` (e.g., `dkg start --home /custom/path`).
@@ -1723,9 +1730,9 @@ export class DkgNodePlugin {
 
     // T63 — Read the agent's auth token from the keystore (no longer the
     // eth address — that comes from the HTTP probe response).
-    let tokenRecord: { authToken: string } | undefined;
+    let result: ReturnType<typeof loadAgentAuthTokenSync>;
     try {
-      tokenRecord = loadAgentAuthTokenSync(dkgHomeOverride, { explicitAddress });
+      result = loadAgentAuthTokenSync(dkgHomeOverride, { explicitAddress });
     } catch (err: any) {
       if (err instanceof MultipleAgentsError) {
         // T31 — multi-agent guardrail. Logger surface has only info/warn/
@@ -1743,22 +1750,33 @@ export class DkgNodePlugin {
       return;
     }
 
-    if (!tokenRecord) {
-      // T60 — Confirmed local-no-keystore case. The daemon at this host
-      // writes WM under `defaultAgentAddress ?? peerId`, so its peerId is
-      // the correct scope key. The resolver's
-      // `nodeAgentAddress ?? nodePeerId` fallback activates via this flag.
-      // Remote-daemon (probe-skipped, returned above) and multi-agent
-      // (refuse-to-guess, returned in catch) leave the flag at false so
-      // the resolver returns undefined and the operator gets the "not
-      // ready" path with recovery knobs.
+    if (result.kind === 'absent') {
+      // T68 — If the operator has supplied `DKG_AGENT_ADDRESS` AND the
+      // keystore is genuinely absent, the env override wins over the
+      // peerId fallback. Use case: localhost daemon in a container/
+      // service-unit split where the gateway can't see the daemon's
+      // home dir, so the operator manually asserts the daemon's
+      // identity. Without this branch the env override would be
+      // silently ignored on local deployments (the remote-daemon
+      // branch above handles non-localhost; this is the localhost
+      // missing-keystore counterpart).
+      if (explicitAddress) {
+        this.nodeAgentAddress = explicitAddress;
+        return;
+      }
+      // T60 — No env override + confirmed-absent keystore. Daemon at
+      // this host writes WM under `defaultAgentAddress ?? peerId` (peerId
+      // case in this scenario), so the resolver's peerId fallback is the
+      // correct scope key. T64 — flag is set ONLY on the genuinely-absent
+      // path; transient-unusable cases below leave it false so the next
+      // probe retries cleanly.
       this.localKeystoreCheckedAndAbsent = true;
       const homeLabel = dkgHomeOverride
         ? `\`${dkgHomeOverride}/agent-keystore.json\``
         : '`<DKG_HOME>/agent-keystore.json`';
       api.logger.warn?.(
-        `[dkg-memory] Agent auth token not found — ${homeLabel} is missing, empty, or has no usable authToken field. ` +
-        'Working-memory reads and writes will return needs_clarification until the daemon provisions an identity. ' +
+        `[dkg-memory] Agent keystore not found — ${homeLabel} is missing or has no eth-shaped keys. ` +
+        'Working-memory reads will use the daemon\'s peer-ID fallback until an agent is provisioned. ' +
         'If the daemon was started with a custom home dir (e.g. `dkg start --home /path`), ' +
         'set the adapter `dkgHome` config field or DKG_HOME env to that path. ' +
         'If the daemon is in a separate container/service unit, set `DKG_AGENT_ADDRESS` to the daemon\'s active agent eth address.',
@@ -1766,21 +1784,40 @@ export class DkgNodePlugin {
       return;
     }
 
+    if (result.kind === 'unusable') {
+      // T64 — File is present but unreadable / malformed JSON / missing
+      // authToken. Could be transient (operator mid-write, permission
+      // blip) or operator-fixable. The peerId fallback is UNSAFE here —
+      // the daemon may already be using eth on this host, and routing
+      // to peerId would silently scope reads to the wrong namespace.
+      // Leave the flag at false so the resolver surfaces "not ready"
+      // and the next probe retries.
+      const homeLabel = dkgHomeOverride
+        ? `\`${dkgHomeOverride}/agent-keystore.json\``
+        : '`<DKG_HOME>/agent-keystore.json`';
+      api.logger.warn?.(
+        `[dkg-memory] Agent keystore present but unusable — ${homeLabel} is unreadable, malformed JSON, or has eth entries with no usable authToken. ` +
+        'Working-memory reads and writes will return needs_clarification until the keystore is fixed. ' +
+        'This is treated as a TRANSIENT failure (no peer-ID fallback); a subsequent probe will retry once the keystore stabilizes.',
+      );
+      return;
+    }
+
     // T63 — HTTP-probe `/api/agent/identity` with the agent token. The
     // daemon returns the canonical EIP-55 eth address in `agentAddress`;
     // adapter trusts it verbatim (no client-side checksum conversion).
-    const result = await this.client.getAgentIdentity({ authToken: tokenRecord.authToken });
-    if (result.ok && result.identity?.agentAddress) {
-      this.nodeAgentAddress = result.identity.agentAddress;
+    const httpResult = await this.client.getAgentIdentity({ authToken: result.authToken });
+    if (httpResult.ok && httpResult.identity?.agentAddress) {
+      this.nodeAgentAddress = httpResult.identity.agentAddress;
       return;
     }
 
     // HTTP probe failed (transport / 401 / 5xx). This is a transient
-    // condition — do NOT set `localKeystoreCheckedAndAbsent` here, because
-    // the keystore was found and parsed cleanly. The resolver returns
-    // undefined and the next probe retries.
+    // condition — `localKeystoreCheckedAndAbsent` was already reset to
+    // false at probe entry (T64), so the resolver returns undefined and
+    // the next probe retries.
     api.logger.warn?.(
-      `[dkg-memory] Daemon /api/agent/identity probe failed: ${result.error ?? 'unknown error'}. ` +
+      `[dkg-memory] Daemon /api/agent/identity probe failed: ${httpResult.error ?? 'unknown error'}. ` +
       'Working-memory reads and writes will return needs_clarification until the next probe lands. ' +
       'This is normal during daemon startup; if it persists, check the daemon is healthy and the keystore authToken matches.',
     );
@@ -2888,13 +2925,21 @@ export class DkgNodePlugin {
         // keystore is present, writes go to `defaultAgentAddress` (eth)
         // and reads must use eth; on fresh/auth-disabled/no-keystore
         // nodes, the daemon's writer-side resolves to `peerId` and reads
-        // must use peerId. The adapter therefore can't unilaterally
-        // hard-reject non-eth values — that would break legitimate WM
-        // reads on no-keystore nodes that the daemon would otherwise
-        // serve. Strip the legacy DID wrapper, forward verbatim, and
-        // let the daemon's query engine route or empty-bind based on
-        // its own scope rules.
-        agentAddress = toAgentPeerId(agentAddress);
+        // must use peerId. Don't hard-reject non-eth values — that
+        // would break legitimate WM reads on no-keystore nodes.
+        const stripped = toAgentPeerId(agentAddress);
+        // T65 — If the post-strip value is eth-shaped, normalize to
+        // EIP-55 checksum form. The daemon stores chat-turn graph URIs
+        // under `agent.defaultAgentAddress` which ethers `verifyWallet
+        // .address` produces in EIP-55 form, and SPARQL graph URIs are
+        // case-sensitive. A caller-supplied lowercase wallet address
+        // would otherwise miss the daemon's checksum-case URI prefix
+        // and silently return zero bindings even when data exists.
+        // Non-eth-shaped values (peerIds, anything else) pass through
+        // verbatim — daemon contract still accepts them as self-aliases.
+        agentAddress = isValidEthAddressString(stripped)
+          ? toEip55Checksum(stripped)
+          : stripped;
       }
       const result = await this.client.query(sparql, {
         contextGraphId,

@@ -789,26 +789,25 @@ describe('DkgNodePlugin', () => {
       expect(msg).toMatch(/omit/i);
     });
 
-    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads', async () => {
+    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads (T65 — checksums eth)', async () => {
       // WM reads are agent-scoped; the daemon requires an agentAddress.
-      // The tool exposes `agent_address` so multi-agent callers can
-      // target another agent's WM namespace.
-      // T48 — Post-PR-264 the address must be a syntactically valid
-      // 0x-prefixed eth address; legacy peerId / short-prefix forms
-      // are rejected up front (see "dkg_query rejects non-eth WM
-      // agent_address" test below).
+      // T65 — Eth-shaped values are normalized to EIP-55 checksum form
+      // before forwarding so they match the daemon's checksum-case graph
+      // URI prefix. Caller-supplied lowercase wallet input → checksum on
+      // the wire.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
-      const eth = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethLowercase = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethChecksum = '0x26c9B05a30138b35e84e60A5B778d580065Ffbb8';
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
-        agent_address: eth,
+        agent_address: ethLowercase,
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
       expect(body.view).toBe('working-memory');
-      expect(body.agentAddress).toBe(eth);
+      expect(body.agentAddress).toBe(ethChecksum);
     });
 
     it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
@@ -870,22 +869,23 @@ describe('DkgNodePlugin', () => {
     });
 
     it('dkg_query normalizes DID-prefixed eth agent_address for WM reads (T31/T48)', async () => {
-      // T48 — Post-PR-264 WM is scoped by the daemon's eth address
-      // (T31). The handler still strips the legacy `did:dkg:agent:`
-      // prefix for backwards-compatibility, but the post-strip value
-      // must be eth-shaped or the call is rejected (see next test).
+      // T48 — Post-PR-264 WM is scoped by the daemon's eth address.
+      // T65 — DID-prefixed eth values: prefix stripped THEN checksummed
+      // (operator may supply lowercase under the DID wrapper; canonical
+      // EIP-55 must reach the daemon).
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
-      const eth = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethLowercase = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethChecksum = '0x26c9B05a30138b35e84e60A5B778d580065Ffbb8';
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
-        agent_address: `did:dkg:agent:${eth}`,
+        agent_address: `did:dkg:agent:${ethLowercase}`,
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.agentAddress).toBe(eth);
-      // Bare eth addresses must pass through unchanged.
+      expect(body.agentAddress).toBe(ethChecksum);
+      // DID prefix gone.
       expect(body.agentAddress).not.toContain('did:dkg:agent:');
     });
 
@@ -4354,6 +4354,118 @@ describe('DkgNodePlugin', () => {
         }
       } finally {
         try { fs.rmSync(otherHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+
+    it('localhost + DKG_AGENT_ADDRESS + missing keystore: env override wins, no peerId fallback (T68)', async () => {
+      // T68 — When the operator supplies `DKG_AGENT_ADDRESS` AND the local
+      // keystore is genuinely absent (e.g., container/service-unit split
+      // where the gateway can't see the daemon's home), the env value
+      // MUST flow into `nodeAgentAddress` directly. Pre-fix the probe
+      // unconditionally set `localKeystoreCheckedAndAbsent = true` on the
+      // missing-keystore branch and the env override was silently
+      // ignored — the resolver returned `nodePeerId` instead of the
+      // operator's asserted eth.
+      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        const spy = stubAgentIdentity(plugin, 'unused');
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        // No HTTP probe — env override short-circuited the resolution.
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('malformed keystore JSON triggers kind=unusable, NO peerId fallback, transient retry (T64)', async () => {
+      // T64 — File present but malformed (operator mid-write, JSON parse
+      // error, EACCES). The peerId fallback is UNSAFE — the daemon may
+      // already be using eth on this same host. Probe must NOT set the
+      // `localKeystoreCheckedAndAbsent` flag, so the resolver returns
+      // undefined (operator sees "not ready"), and the next probe retries.
+      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('keystore present but unusable'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('keystore eth entry without authToken triggers kind=unusable (T64)', async () => {
+      // Eth key present but no authToken field — malformed entry. Same
+      // semantics as malformed JSON: NO peerId fallback, transient retry.
+      fs.writeFileSync(
+        path.join(tempHome, 'agent-keystore.json'),
+        JSON.stringify({ [ETH_PRIMARY_LC]: { privateKey: '0xpk' } }),
+      );
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('localKeystoreCheckedAndAbsent resets on each probe (T64/T66 — sticky-flag fix)', async () => {
+      // T64/T66 — After a first probe that sets the flag (legitimate
+      // keystore-absent state), a second probe that finds the keystore
+      // present but mid-write (malformed) MUST clear the flag back to
+      // false. Pre-fix the flag was sticky and the resolver kept routing
+      // to peerId even after the keystore appeared.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Probe 1 — empty tempHome → kind=absent → flag set.
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
+        await new Promise((r) => setImmediate(r));
+
+        // Probe 2 — malformed JSON appears → kind=unusable → flag MUST
+        // reset to false (transient).
+        fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        await new Promise((r) => setImmediate(r));
+
+        // Probe 3 — valid keystore appears → flag stays false (real
+        // success path), nodeAgentAddress set from HTTP probe.
+        writeKeystore([ETH_PRIMARY_LC]);
+        stubAgentIdentity(plugin, ETH_PRIMARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+      } finally {
+        await plugin.stop();
       }
     });
 

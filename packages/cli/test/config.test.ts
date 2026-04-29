@@ -258,8 +258,8 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(merged?.chainId).toBeUndefined();
   });
 
-  it('keeps the operator\'s own fields under mock mode (no merge in either direction)', () => {
-    // A test fixture that pins a mock chainId (e.g. to exercise a specific
+  it('keeps mock-relevant fields (chainId, mockIdentityId) under mock mode', () => {
+    // A test fixture that pins a mock chainId (to exercise a specific
     // chain identifier inside MockChainAdapter) must round-trip without
     // network inheritance.
     const merged = resolveChainConfig(
@@ -277,6 +277,36 @@ describe('resolveChainConfig (field-level merge)', () => {
       chainId: 'mock:31337',
       mockIdentityId: '7',
     });
+  });
+
+  it('strips stale rpcUrl/hubAddress from operator config under mock mode', () => {
+    // Regression: an operator who flips an existing EVM config to mock
+    // without deleting rpcUrl/hubAddress would otherwise leave a hybrid
+    // resolved view. Every consumer that gates on `rpcUrl && hubAddress`
+    // (publisher-runner, the wallet/balance/rpc-health routes, `dkg set-ask`,
+    // and lifecycle's chainConfig forward to DKGAgent) would then open a
+    // real ethers.JsonRpcProvider against the operator's stale URL while
+    // lifecycle simultaneously wires up MockChainAdapter. resolveChainConfig
+    // must drop these fields so that mock mode is fully isolated.
+    const merged = resolveChainConfig(
+      {
+        chain: {
+          type: 'mock',
+          rpcUrl: 'https://stale-rpc.example',
+          hubAddress: '0xDEADBEEF00000000000000000000000000000000',
+          chainId: 'mock:31337',
+          mockIdentityId: '9',
+        },
+      },
+      { chain: fullNetworkChain },
+    );
+    expect(merged).toEqual({
+      type: 'mock',
+      chainId: 'mock:31337',
+      mockIdentityId: '9',
+    });
+    expect(merged?.rpcUrl).toBeUndefined();
+    expect(merged?.hubAddress).toBeUndefined();
   });
 
   it('does not return undefined fields as own keys (clean shape for downstream spread)', () => {

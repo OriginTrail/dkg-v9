@@ -439,18 +439,18 @@ export function resolveChainConfig(
   const net = network?.chain;
   if (!cfg && !net) return undefined;
 
-  // Short-circuit when the operator opts in to mock mode in their local
-  // config. We MUST NOT inherit EVM fields (rpcUrl/hubAddress/chainId)
-  // from network.chain in that case — otherwise we produce a hybrid view
-  // that the daemon partially honours: lifecycle wires up a MockChainAdapter
-  // (correct), but publisher-runner, the wallet/balance/RPC-health routes,
-  // and `dkg set-ask` see those inherited fields and try to talk to the
-  // real chain. Mock is an isolated test-only mode; keep the operator's
-  // own fields and stop.
+  // Short-circuit when the operator opts in to mock mode. We strip
+  // rpcUrl/hubAddress entirely (both inherited-from-network AND any stale
+  // values left over in the operator's own config from a previous EVM
+  // setup) so no downstream consumer can hit a real chain by accident.
+  // Without this, lifecycle.ts/publisher-runner.ts/status.ts/`dkg set-ask`
+  // all gate on `rpcUrl && hubAddress` but not on `type`, so a hybrid
+  // `{ type: 'mock', rpcUrl: '<real>', hubAddress: '<real>' }` would wire
+  // up MockChainAdapter (correct) AND open a real ethers.JsonRpcProvider
+  // / EVMChainAdapter against the live network in parallel. MockChainAdapter
+  // only needs chainId; rpcUrl/hubAddress are meaningless in mock mode.
   if (cfg?.type === 'mock') {
     const mockMerged: Partial<ChainConfig> = { type: 'mock' };
-    if (cfg.rpcUrl !== undefined) mockMerged.rpcUrl = cfg.rpcUrl;
-    if (cfg.hubAddress !== undefined) mockMerged.hubAddress = cfg.hubAddress;
     if (cfg.chainId !== undefined) mockMerged.chainId = cfg.chainId;
     if (cfg.mockIdentityId !== undefined) mockMerged.mockIdentityId = cfg.mockIdentityId;
     return mockMerged;

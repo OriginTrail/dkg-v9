@@ -3685,6 +3685,62 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - setup-owned configured stateDir migrates when api.workspaceDir appears later', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const staleInstalledWorkspace = path.join(require('os').tmpdir(), `dkg-t75-stale-first-${Date.now()}`);
+    const staleConfigStateDir = path.join(staleInstalledWorkspace, '.openclaw');
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-current-later-${Date.now()}`);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace: staleInstalledWorkspace,
+        stateDir: staleConfigStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiWithoutWorkspace: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithoutWorkspace);
+      const writer = (plugin as any).chatTurnWriter;
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        staleConfigStateDir.replace(/\\/g, '/'),
+      );
+
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
+      const apiWithWorkspace: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithWorkspace);
+      const targetStateDir = path.join(workspaceDir, '.openclaw');
+      expect(setStateDirSpy).toHaveBeenCalledWith(targetStateDir);
+      expect((plugin as any).chatTurnWriter).toBe(writer);
+
+      await new Promise((r) => setTimeout(r, 100));
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        targetStateDir.replace(/\\/g, '/'),
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(staleInstalledWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - setup-owned stateDir detection handles symlink aliases at runtime', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;

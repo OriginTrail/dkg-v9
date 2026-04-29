@@ -943,19 +943,16 @@ export function mergeOpenClawConfig(
   const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
     ? existingEntryConfig.channel
     : {};
+  const trimmedNonEmpty = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  };
   const priorInstalledWorkspace =
-    typeof existingEntryConfig.installedWorkspace === 'string'
-      ? existingEntryConfig.installedWorkspace
-      : undefined;
+    trimmedNonEmpty(existingEntryConfig.installedWorkspace);
 
-  const existingStateDir =
-    typeof existingEntryConfig.stateDir === 'string' && existingEntryConfig.stateDir.trim()
-      ? existingEntryConfig.stateDir
-      : undefined;
-  const incomingStateDir =
-    typeof entryConfig.stateDir === 'string' && entryConfig.stateDir.trim()
-      ? entryConfig.stateDir
-      : undefined;
+  const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
+  const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
   if (typeof existingEntryConfig.stateDir === 'string' && !existingEntryConfig.stateDir.trim()) {
     delete existingEntryConfig.stateDir;
   } else if (

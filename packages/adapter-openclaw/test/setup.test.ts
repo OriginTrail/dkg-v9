@@ -665,6 +665,36 @@ describe('mergeOpenClawConfig', () => {
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 
+  it('updates setup-owned stateDir when existing installedWorkspace and stateDir have surrounding whitespace', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const firstWs = join(testDir, 'workspace-whitespace-a');
+    const secondWs = join(testDir, 'workspace-whitespace-b');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              installedWorkspace: `  ${firstWs}  `,
+              stateDir: `  ${join(firstWs, '.openclaw')}  `,
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: join(secondWs, '.openclaw'),
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, secondWs);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
+  });
+
   it('updates setup-owned stateDir when the existing value uses a symlink alias', () => {
     const configPath = join(testDir, 'openclaw.json');
     const realWs = join(testDir, 'workspace-real');

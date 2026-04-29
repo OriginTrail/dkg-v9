@@ -642,20 +642,33 @@ export class DkgNodePlugin {
     if (this.chatTurnWriter) {
       // T18 — Already constructed. If a better stateDir is now
       // available, in-place migrate the writer to the new location.
-      // Only upgrade fallback → workspace-scoped; never the other
-      // direction. Same-path is a no-op.
-      if (this.chatTurnWriterStateDir === stateDir) return;
+      // Only upgrade fallback/setup-owned defaults to a better source;
+      // never migrate away from an explicit user-owned stateDir. Same-path
+      // is a no-op, with canonical comparison covering symlink aliases.
+      const currentStateDir = this.chatTurnWriterStateDir;
+      if (!currentStateDir) return;
+      const currentCanonicalStateDir = canonicalPathForCompare(currentStateDir);
+      const nextCanonicalStateDir = canonicalPathForCompare(stateDir);
+      if (currentCanonicalStateDir === nextCanonicalStateDir) return;
       // T24 — Suppress re-trigger when an async migration to this
       // exact stateDir is already in flight. Without this, two
       // concurrent register() calls before the migration settles
       // would launch two `setStateDir` promises racing on the same
       // writer state.
       if (this.chatTurnWriterMigrationTarget === stateDir) return;
-      const wasFallback = this.chatTurnWriterStateDir === homeDir;
-      const isUpgrade = wasFallback && stateDir !== homeDir;
+      const homeCanonicalStateDir = canonicalPathForCompare(homeDir);
+      const wasFallback = currentCanonicalStateDir === homeCanonicalStateDir;
+      const wasSetupDefault =
+        configuredIsSetupDefault &&
+        !!configuredStateDir &&
+        currentCanonicalStateDir === canonicalPathForCompare(configuredStateDir);
+      const isUpgrade =
+        (wasFallback || wasSetupDefault) &&
+        nextCanonicalStateDir !== homeCanonicalStateDir;
       if (!isUpgrade) return; // Don't downgrade or sidestep.
+      const sourceLabel = wasFallback ? `fallback '${homeDir}'` : `setup-owned '${currentStateDir}'`;
       api.logger.info?.(
-        `[dkg] Migrating ChatTurnWriter stateDir from fallback '${homeDir}' to workspace-scoped '${stateDir}'.`,
+        `[dkg] Migrating ChatTurnWriter stateDir from ${sourceLabel} to '${stateDir}'.`,
       );
       // T21/T22 — `setStateDir` is async: it `await flush()`s
       // in-flight persists/resets/chains BEFORE swapping paths

@@ -1,0 +1,35 @@
+# Legacy Cursor / generic agent rules — agent-scope
+
+This file is the legacy fallback rule format that older Cursor versions and
+several VS Code AI extensions (Continue, Cline, Roo) read. Modern Cursor
+uses `.cursor/rules/agent-scope.mdc` (auto-applied). Claude Code uses
+`CLAUDE.md`. Codex CLI uses `AGENTS.md`. Gemini CLI uses `GEMINI.md`.
+
+For the full rules see [`AGENTS.md`](./AGENTS.md).
+
+Quick summary:
+
+- This repo has a thin write-time guard called `agent-scope`. It is
+  **invisible by default** and only activates when (a) at least one
+  `tasks:Task` is `in_progress` and attributed to your agent in the
+  local DKG, or (b) you try to touch a hardcoded protected path.
+- You can READ anything. You can only WRITE files that fall under the
+  union of `tasks:scopedToPath` globs across your agent's `in_progress`
+  tasks. There is no separate manifest file — the DKG is the source of
+  truth.
+- To start a task: call `dkg_add_task({ taskUri, status: "in_progress",
+  scopedToPath: ["packages/foo/**", ...], assignee: "<agent uri>", ... })`.
+  The cache picks it up within ~5s.
+- To finish: `dkg_update_task_status({ taskUri, status: "done" })`. Its
+  globs drop out of the union.
+- Hardcoded protected paths (the agent-scope guard's own files,
+  across all agents):
+  - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
+  - `.claude/hooks/**`, `.claude/settings.json`
+  - `agent-scope/lib/**`, `agent-scope/.bootstrap-token`
+  - `AGENTS.md`, `GEMINI.md`, `.cursorrules`
+- If a write is denied, surface the menu in the denial JSON via
+  `AskQuestion` (one question, two options — `simpleOptions` verbatim).
+  Never invent options.
+- Hook-supporting agents (Cursor, Claude Code) physically block
+  out-of-scope writes. Agents without hooks self-enforce.

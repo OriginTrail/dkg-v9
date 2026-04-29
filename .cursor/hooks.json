@@ -1,8 +1,13 @@
 {
   "version": 1,
-  "_comment": "DKG chat-capture hooks. When you open dkg-v9 as a Cursor workspace, every conversation turn is auto-promoted to the chat sub-graph of the project pinned in .dkg/config.yaml. The underlying script lives at packages/mcp-dkg/hooks/capture-chat.mjs — this file is just the Cursor wiring. See packages/mcp-dkg/README.md for details on .dkg/config.yaml and claude-code mirror setup.",
+  "_comment": "Two purposes: (1) agent-scope hooks enforce DKG-derived scope on writes (sessionStart/preToolUse/beforeShellExecution/afterShellExecution). The active scope is the union of `tasks:scopedToPath` across in-progress `tasks:Task` entities attributed to this agent — see agent-scope/README.md. (2) DKG chat-capture hooks (sessionStart/sessionEnd/beforeSubmitPrompt/afterAgentResponse via packages/mcp-dkg/hooks/capture-chat.mjs) auto-promote each conversation turn to the chat sub-graph of the project pinned in .dkg/config.yaml.",
   "hooks": {
     "sessionStart": [
+      {
+        "command": ".cursor/hooks/session-start.mjs",
+        "failClosed": false,
+        "timeout": 5
+      },
       {
         "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionStart",
         "failClosed": false
@@ -24,6 +29,28 @@
       {
         "command": "node packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse",
         "failClosed": false
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/scope-guard.mjs",
+        "matcher": "Write|StrReplace|Delete|EditNotebook|MultiEdit|Edit",
+        "failClosed": true,
+        "timeout": 5
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/shell-precheck.mjs",
+        "failClosed": false,
+        "timeout": 5
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": ".cursor/hooks/shell-diff-check.mjs",
+        "failClosed": false,
+        "timeout": 10
       }
     ]
   }

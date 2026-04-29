@@ -31,15 +31,37 @@ The universal predicates apply to ANY project type. Reach for these first; they'
 | `chat:proposes` (URI) | An idea/decision/task put forward. Often points at a freshly-minted Decision or Task entity created in the same `dkg_annotate_turn` call. | 0..N |
 | `chat:concludes` (URI) | A `:Finding` entity the turn produced — a claim worth preserving as its own node. | 0..N |
 | `chat:asks` (URI) | A `:Question` entity the turn left open. Surfaces "what did we never resolve". | 0..N |
+| `chat:worksOn` (URI) | The `tasks:Task` this turn is working on. Emit on every substantive turn while a task is `in_progress`. Pure observability — NOT what the agent-scope guard reads (it derives scope from `tasks:scopedToPath` on the task itself). | 0..1 |
 
 ## 2. Coding-project-specific entities
 
 When the turn discusses architecture or work, also use the project-flavoured tools (which `dkg_annotate_turn` wraps for you):
 
 - **Decision** (`decisions:Decision`) — when the turn settled an architectural question. Required fields: `title`, `context`, `outcome`. Optional: `consequences`, `status` (default `proposed`).
-- **Task** (`tasks:Task`) — when the turn identified work to do. Required: `title`. Optional: `priority` (p0..p3), `status`, `assignee`, `relatedDecision`, `touches`.
+- **Task** (`tasks:Task`) — when the turn identified work to do, OR when the agent is about to start a piece of work and wants the **agent-scope write-time guard** to allow it. Required: `title`. Optional: `priority` (p0..p3), `status`, `assignee`, `relatedDecision`, `touches`, **`scopedToPath`**. See §2.1.
 - **Comment** (`schema:Comment`) — when the turn made a remark ABOUT an existing entity. Required: `about` (URI), `body`.
 - **VmPublishRequest** (`dkg:VmPublishRequest`) — when the turn surfaced something worth anchoring on-chain. Required: `entityUri`, `rationale`. The agent NEVER publishes to VM directly; this writes a marker that a human ratifies via the node-ui's VerifyOnDkgButton.
+
+### 2.1 Tasks ARE the agent-scope source of truth
+
+This repo's agent-scope guard (Cursor/Claude Code/Codex/Gemini) reads its allow-list of writable paths **straight from the DKG**. There is no `agent-scope/tasks/*.json`, no `pnpm task ...` CLI, no local "active task" file. The flow is:
+
+1. **Plan first.** When the user starts a new piece of work, propose the scope as a single short question ("I'd like to refactor X — scope to `packages/agent/**`, `packages/core/**`, inherit the standard build-artefact exemptions. Sound good?"). Use `AskQuestion` with two options: `go` (recommended) and `custom_instruction` (free text). Don't write any files yet.
+2. **On `go`, file the task in the DKG.** Call `dkg_add_task` with:
+   - `title` — imperative summary of the work
+   - `status: "in_progress"` — this flips the scope live immediately
+   - `scopedToPath: ["packages/agent/**", "packages/core/**", "!**/secrets.*"]` — the operational allow-list
+   - `touches: [<file or package URIs>]` — for human readability / cross-referencing (NOT what the guard evaluates; that's `scopedToPath`)
+3. **Label your turns.** On every substantive turn while the task is in progress, include `worksOn: <task-uri>` in `dkg_annotate_turn` (or emit `chat:worksOn` directly). This is pure observability — it's how a teammate later runs "what did Claude discuss while working on the peer-sync refactor" as a single SPARQL.
+4. **Flip status when you ship.** Call `dkg_update_task_status({ taskUri, status: "done" })`. The scope is retracted automatically — the guard now blocks writes to those globs again until a new task goes `in_progress`.
+
+The guard's SPARQL, for reference: it queries for every `tasks:Task` where the most recent `tasks:status` (by `dcterms:modified`) is `"in_progress"` AND `prov:wasAttributedTo = <my agent URI>`, then takes the **union** of their `tasks:scopedToPath` literals as the live allow-list. So:
+
+- One in-progress task → that task's globs are your scope.
+- Multiple in-progress tasks (e.g. you spun up two parallel work items) → union of all their globs. Both scopes apply simultaneously.
+- Zero in-progress tasks → nothing the agent writes is in scope (default-deny). The session-start hook will surface this and prompt you to create one.
+
+**Never improvise around a denial** — if the guard blocks a write you needed to make, the denial menu always offers a free-text "tell me what to do instead" option. Use it. Common resolutions: extend the existing task's `scopedToPath` (file a new in-progress task for the orthogonal scope), or ask the operator to enable bootstrap mode for the protected-path edge cases.
 
 ## 3. URI patterns (memorise these)
 
@@ -99,6 +121,47 @@ dkg_annotate_turn({
     priority: "p1",
     status: "todo"
   }]
+})
+```
+
+### Example A.1 — turn that STARTS a piece of work (and pins the scope)
+
+User said: *"yes, go ahead with that scope."* (after you proposed `packages/agent/**` + `packages/core/**` for a peer-sync refactor)
+
+```jsonc
+// First, file the task with status: "in_progress" and the scope.
+// This single tool call is what makes the agent-scope guard allow the
+// upcoming writes — there is no other "activate task" step.
+dkg_add_task({
+  title: "Refactor peer sync to use the new workspace auth",
+  status: "in_progress",
+  priority: "p1",
+  scopedToPath: [
+    "packages/agent/**",
+    "packages/core/**",
+    "!**/secrets.*"
+  ],
+  touches: [
+    "urn:dkg:code:package:%40origintrail-official%2Fdkg-agent",
+    "urn:dkg:code:package:%40origintrail-official%2Fdkg-core"
+  ]
+})
+
+// Then annotate this turn — and every subsequent turn while the task
+// is in_progress — with chat:worksOn so the chat trail is queryable.
+dkg_annotate_turn({
+  topics: ["peer sync", "workspace auth"],
+  worksOn: "urn:dkg:task:refactor-peer-sync-to-use-the-new-workspace-auth-<fp>"
+})
+```
+
+When the work ships:
+
+```jsonc
+dkg_update_task_status({
+  taskUri: "urn:dkg:task:refactor-peer-sync-to-use-the-new-workspace-auth-<fp>",
+  status: "done",
+  note: "Merged in PR #312."
 })
 ```
 

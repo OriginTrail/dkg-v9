@@ -130,6 +130,38 @@ export class DkgClient {
     return r.subGraphs ?? [];
   }
 
+  /**
+   * Create a context graph (a.k.a. paranet) on the daemon. The MCP server
+   * uses this at startup to auto-provision the workspace's configured
+   * `contextGraph` if it isn't there yet — see `ensureContextGraph` in
+   * `index.ts`. Mirrors the v10 `/api/context-graph/create` endpoint;
+   * legacy `/api/paranet/create` is tried as a fallback for daemons that
+   * still ship the older route.
+   */
+  async createContextGraph(
+    id: string,
+    name: string,
+    description?: string,
+  ): Promise<{ created?: string; uri?: string }> {
+    const body = { id, name, description };
+    try {
+      return await this.request<{ created?: string; uri?: string }>(
+        'POST',
+        '/api/context-graph/create',
+        body,
+      );
+    } catch (err) {
+      if (err instanceof DkgHttpError && err.status === 404) {
+        return await this.request<{ created?: string; uri?: string }>(
+          'POST',
+          '/api/paranet/create',
+          body,
+        );
+      }
+      throw err;
+    }
+  }
+
   // ── Query ──────────────────────────────────────────────────────
   /**
    * Memory-layer routing is controlled by `view` + `graphSuffix`:

@@ -1,0 +1,184 @@
+# agent-scope — task-scoped writes, sourced from the local DKG
+
+The repo ships a thin write-time guard, but it stays **invisible** unless
+something engages it. If no `tasks:Task` is currently `in_progress` for
+your agent and you don't try to touch a protected path, behave normally —
+agent-scope is a no-op.
+
+## Mental model
+
+The active scope is the **union of `tasks:scopedToPath` globs** across
+every `tasks:Task` whose `tasks:status` is `"in_progress"` AND whose
+`prov:wasAttributedTo` matches the current agent URI. A small SPARQL
+query (cached for ~5s) feeds every hook. There is no separate manifest
+file, no `pnpm task` CLI, no "active task" pointer — the DKG is the
+source of truth. Calling `dkg_update_task_status({ taskUri, status:
+"done" })` removes that task's globs from the union immediately.
+
+## Starting a task
+
+When the user gives you work and no covering `in_progress` task exists,
+file one with `dkg_add_task`:
+
+```ts
+dkg_add_task({
+  taskUri: 'urn:dkg:task:peer-sync-auth',
+  title: 'Peer sync uses workspace auth',
+  status: 'in_progress',
+  assignee: '<your agent URI>',
+  scopedToPath: ['packages/agent/**', 'packages/core/**'],
+  description: 'Refactor peer-sync to consume the new workspace auth.',
+})
+```
+
+The cache picks it up within ~5s; the next write to those paths
+succeeds. To extend scope mid-work, file an additional `in_progress`
+task or re-issue `dkg_add_task` for the same `taskUri` with the wider
+glob list.
+
+## Plan-mode denial protocol — MANDATORY once a denial fires
+
+Every denial message from agent-scope carries a structured menu. You must
+**stop**, parse it, and surface it via `AskQuestion` — one question, two
+options, short human prose. Do not retry, rewrite, or work around a denial
+— the defense-in-depth layers will revert or delete anything that slips
+through anyway.
+
+### Detecting a denial
+
+A denial always contains a fenced JSON block:
+
+```
+<!-- agent-scope-menu:begin -->
+{ JSON payload here }
+<!-- agent-scope-menu:end -->
+```
+
+Plus a one-line prose summary starting with `agent-scope:` that you can
+also key off:
+
+- `preToolUse` returns `{ permission: "deny" }` with an `agent_message`
+  containing the fence.
+- `beforeShellExecution` returns `{ permission: "deny" }` similarly.
+- `afterShellExecution` returns an `additional_context` containing the
+  fence. Files have already been reverted or deleted.
+
+### Parsing the menu
+
+The JSON shape (TypeScript for clarity):
+
+```ts
+{
+  version: 1,
+  hook: "preToolUse" | "beforeShellExecution" | "afterShellExecution",
+  reason: "out-of-scope" | "protected" | "daemon-unreachable"
+        | "configuration-error" | "unknown",
+  humanSummary: string,           // short, natural — QUOTE THIS in your prompt
+  deniedPath?: string,
+  command?: string,
+  activeTask: string | null,      // legacy field; usually null in DKG mode
+  activeTaskUris: string[],       // current `in_progress` task URIs (canonical)
+  simpleOptions: [                // exactly two entries — SURFACE THESE
+    { id: string, label: string, action: { kind: "..." /* + fields */ } },
+    { id: "custom_instruction", label: "Type what you want instead",
+      action: { kind: "custom" } }
+  ],
+  recommendedOptionId: string,    // matches simpleOptions[0].id
+  options: [ /* full verbose list — do NOT surface to the user */ ],
+}
+```
+
+### What you must do when you see a denial
+
+1. **Stop.** Do not retry the operation with another tool or command form.
+2. **Extract the JSON** from between `agent-scope-menu:begin` and `:end`.
+3. **Call `AskQuestion`** with ONE question and TWO options:
+   - `prompt`: quote `humanSummary` verbatim, then add **one short
+     sentence** of your own reasoning (why you wanted to do this), then
+     finish with a simple ask. Keep the whole prompt to 3 sentences max.
+     Example:
+
+     > I'd like to edit `packages/evm-module/contracts/S.sol`, but no
+     > in-progress task covers that file. I was trying to update the
+     > staking integration referenced in the PR. Want me to file a new
+     > in-progress task covering `packages/evm-module/contracts/**` and
+     > continue?
+
+   - `options`: pass `simpleOptions` from the JSON, verbatim. It always
+     has exactly two entries — the recommended action and a free-text
+     fallback. Do NOT surface the verbose `options` list. Do NOT add or
+     reword options.
+
+4. **Act on the user's choice** using the matching `action` object:
+   - `new_in_progress_task` → call `dkg_add_task` with `taskUri` of your
+     choice, `status: "in_progress"`, your agent URI as `assignee`, and
+     `scopedToPath: action.suggestedScopedToPath`. Wait ~5s for the
+     cache, then retry the original operation.
+   - `bootstrap` → print `action.instruction` verbatim. Wait for the
+     user to enable bootstrap. After the protected work is done, remind
+     them to `rm agent-scope/.bootstrap-token` to re-lock.
+   - `restart_daemon` / `configure_dkg` → print `action.instruction`
+     verbatim, wait, retry.
+   - `skip` → acknowledge; move on to other in-scope work.
+   - `cancel` → stop the turn; summarise what got done and what didn't.
+   - `custom` → ask the user in plain chat: "OK, what should I do instead?"
+     Wait for their free-text reply, then carry out whatever they say.
+
+5. **Never invent options.** If neither `simpleOptions` entry matches the
+   user's intent, the `custom_instruction` entry is always there — route
+   through it.
+
+### Phrasing rules
+
+- Write like you're texting a coworker, not filing a ticket.
+- One short question. One recommendation. One "type what you want" option.
+- Never use ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
+- Don't explain the internal architecture in the prompt — the user doesn't
+  need to know about hooks or SPARQL queries to answer. Keep it
+  action-focused: "I want to do X. Should I?"
+- If you need to say why something is restricted, one sentence is enough.
+- No emoji unless the user uses them first.
+
+## What counts as a write
+
+The guard blocks `Write`, `StrReplace`, `Delete`, `EditNotebook`, `MultiEdit`,
+and `Edit`. Shell commands are inspected **before** they run — destructive
+verbs (`rm`, `mv`, `cp`, `chmod`, `chown`, `truncate`, `ln -sf`, `sed -i`,
+`>`, `>>`, `tee`, `find -delete`, `find -exec rm`, `xargs rm`), nested shells
+(`bash -c "..."`), and opaque evaluators (`node -e`, `python -c`, `perl -e`)
+that touch protected or out-of-scope paths are denied. Anything that still
+slips through is reverted after the command runs, and untracked files in
+denied paths are deleted.
+
+## Hardcoded protected paths
+
+Always denied regardless of task, unless a human has enabled bootstrap
+(`touch agent-scope/.bootstrap-token` or `AGENT_SCOPE_BOOTSTRAP=1`):
+
+- `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
+- `.claude/hooks/**`, `.claude/settings.json`
+- `agent-scope/lib/**`
+- `agent-scope/.bootstrap-token`
+- `AGENTS.md`, `GEMINI.md`, `.cursorrules`
+
+If one of these needs to change, use the `bootstrap` option from the
+denial menu — do not try to bypass (no shell redirection, no `node -e`,
+no alternate tooling). The `afterShell` hook will delete any untracked
+files in these paths even if the bypass succeeded, so retry attempts are
+wasted.
+
+Note: the guard operates **only on agent actions**. Humans committing or
+pushing manually through their terminal/IDE are not restricted — there
+are no git hooks and no CI enforcement. If a human edits a protected
+file by hand, they can commit and push normally.
+
+## Don't
+
+- Don't try to widen scope by editing local files — there are none.
+  Scope lives in the DKG.
+- Don't add a fake `in_progress` task to "self-grant" coverage. Surface
+  the denial menu, let the human approve scope changes via the
+  `new_in_progress_task` option.
+- Don't surface the verbose `options` list in `AskQuestion` — always use
+  `simpleOptions` (two entries: recommendation + "something else").
+- Don't retry a blocked operation with a different tool or command form.

@@ -20,6 +20,7 @@ import {
   type GetView,
   loadAgentAuthTokenSync,
   MultipleAgentsError,
+  resolveDkgHome,
   toEip55Checksum,
 } from '@origintrail-official/dkg-core';
 import {
@@ -112,6 +113,15 @@ const AUTO_RECALL_QUERY_MAX_CHARS = 500;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
+
+  // T70 — Resolved DKG home directory. Computed once at register() time via
+  // `resolveDkgHome` (env > live daemon.pid > daemonUrl-port-tiebreak >
+  // mtime > ~/.dkg). Used to read `auth.token` (passed to DkgDaemonClient)
+  // and `agent-keystore.json` (in probeNodeAgentAddressOnce). Solves the
+  // "monorepo daemon writes to ~/.dkg-dev but adapter reads ~/.dkg" gap
+  // without persisting the path to openclaw.json (which would go stale on
+  // npm↔monorepo switch on the same machine).
+  private dkgHome!: string;
 
   // HTTP client to daemon — used by all tools and integration modules
   private client!: DkgDaemonClient;
@@ -496,7 +506,27 @@ export class DkgNodePlugin {
 
     // Create daemon client — used by all tools and integration modules
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
-    this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
+
+    // T70 — Resolve the DKG home directory once for this plugin's lifetime.
+    // Honors `config.dkgHome` first as an explicit operator escape-hatch
+    // (e.g., openclaw.json setting for genuinely unusual deployments where
+    // neither daemon.pid liveness nor api.port mtime gives the right
+    // answer). Otherwise auto-resolves via the daemon's own signals:
+    // env > live daemon.pid > daemonUrl-port-tiebreak > most-recent
+    // api.port mtime > ~/.dkg. This is what makes the adapter switch
+    // automatically between ~/.dkg (npm) and ~/.dkg-dev (monorepo) without
+    // any config writes.
+    this.dkgHome = this.config.dkgHome ?? resolveDkgHome({ daemonUrl });
+
+    // Pass the resolved home to the client so its `auth.token` fallback
+    // reads from the right dir. Pre-loading `apiToken` here would not be
+    // sufficient: an absent `auth.token` in the resolved home would yield
+    // `apiToken: undefined`, and the constructor's `?? loadTokenFromFile()`
+    // default would silently fall back to `~/.dkg/auth.token` — picking
+    // up a stale npm-side token while the live daemon is at `~/.dkg-dev`
+    // (the very bug T70 set out to fix). Threading `dkgHome` through
+    // `DkgClientOptions` plugs that hole.
+    this.client = new DkgDaemonClient({ baseUrl: daemonUrl, dkgHome: this.dkgHome });
     this.initialized = true;
     // R17.2 — Defer `ChatTurnWriter` construction to runtime-enabled
     // modes. The constructor calls `mkdirSync` + reads the watermark
@@ -1723,16 +1753,17 @@ export class DkgNodePlugin {
     // probe re-derives the flag from current state.
     this.localKeystoreCheckedAndAbsent = false;
 
-    // Localhost: T42 — explicit `config.dkgHome` lets operators point at
-    // the daemon's home dir when it differs from the gateway process's
-    // own `DKG_HOME` (e.g., `dkg start --home /custom/path`).
-    const dkgHomeOverride = this.config.dkgHome;
+    // T70 — Use the dkgHome resolved once at register() time. Picks up
+    // ~/.dkg-dev when the running daemon is the monorepo one, ~/.dkg when
+    // it's the npm one — regardless of which the gateway process started
+    // with in `DKG_HOME`.
+    const resolvedDkgHome = this.dkgHome;
 
     // T63 — Read the agent's auth token from the keystore (no longer the
     // eth address — that comes from the HTTP probe response).
     let result: ReturnType<typeof loadAgentAuthTokenSync>;
     try {
-      result = loadAgentAuthTokenSync(dkgHomeOverride, { explicitAddress });
+      result = loadAgentAuthTokenSync(resolvedDkgHome, { explicitAddress });
     } catch (err: any) {
       if (err instanceof MultipleAgentsError) {
         // T31 — multi-agent guardrail. Logger surface has only info/warn/
@@ -1771,9 +1802,7 @@ export class DkgNodePlugin {
       // path; transient-unusable cases below leave it false so the next
       // probe retries cleanly.
       this.localKeystoreCheckedAndAbsent = true;
-      const homeLabel = dkgHomeOverride
-        ? `\`${dkgHomeOverride}/agent-keystore.json\``
-        : '`<DKG_HOME>/agent-keystore.json`';
+      const homeLabel = `\`${resolvedDkgHome}/agent-keystore.json\``;
       api.logger.warn?.(
         `[dkg-memory] Agent keystore not found — ${homeLabel} is missing or has no eth-shaped keys. ` +
         'Working-memory reads will use the daemon\'s peer-ID fallback until an agent is provisioned. ' +
@@ -1792,9 +1821,7 @@ export class DkgNodePlugin {
       // to peerId would silently scope reads to the wrong namespace.
       // Leave the flag at false so the resolver surfaces "not ready"
       // and the next probe retries.
-      const homeLabel = dkgHomeOverride
-        ? `\`${dkgHomeOverride}/agent-keystore.json\``
-        : '`<DKG_HOME>/agent-keystore.json`';
+      const homeLabel = `\`${resolvedDkgHome}/agent-keystore.json\``;
       api.logger.warn?.(
         `[dkg-memory] Agent keystore present but unusable — ${homeLabel} is unreadable, malformed JSON, or has eth entries with no usable authToken. ` +
         'Working-memory reads and writes will return needs_clarification until the keystore is fixed. ' +

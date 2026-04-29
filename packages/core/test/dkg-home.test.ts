@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
-import { dkgHomeDir, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentAuthTokenSync, loadAgentAuthToken, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
+import { dkgHomeDir, resolveDkgHome, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentAuthTokenSync, loadAgentAuthToken, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
 
 describe('dkgHomeDir', () => {
   const originalEnv = process.env.DKG_HOME;
@@ -21,6 +21,142 @@ describe('dkgHomeDir', () => {
   it('defaults to ~/.dkg', () => {
     delete process.env.DKG_HOME;
     expect(dkgHomeDir()).toBe(join(homedir(), '.dkg'));
+  });
+});
+
+describe('resolveDkgHome', () => {
+  // Redirects `homedir()` into a tmp dir by overriding HOME / USERPROFILE so
+  // we can populate `.dkg/` and `.dkg-dev/` under our control. The "alive"
+  // pid is the test runner's own pid (always alive); the "dead" pid is a
+  // very-large integer extremely unlikely to map to a real process.
+  const ALIVE = process.pid;
+  const DEAD = 999_999_999;
+
+  let tempHome: string;
+  let dkg: string;
+  let dkgDev: string;
+  const original = {
+    DKG_HOME: process.env.DKG_HOME,
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+  };
+
+  beforeEach(async () => {
+    tempHome = join(tmpdir(), `dkg-resolve-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    dkg = join(tempHome, '.dkg');
+    dkgDev = join(tempHome, '.dkg-dev');
+    await mkdir(dkg, { recursive: true });
+    await mkdir(dkgDev, { recursive: true });
+
+    delete process.env.DKG_HOME;
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome; // Windows
+  });
+
+  afterEach(async () => {
+    if (original.DKG_HOME === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = original.DKG_HOME;
+    if (original.HOME === undefined) delete process.env.HOME;
+    else process.env.HOME = original.HOME;
+    if (original.USERPROFILE === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = original.USERPROFILE;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writePid(home: string, pid: number) {
+    await writeFile(join(home, 'daemon.pid'), String(pid));
+  }
+  async function writePort(home: string, port: number, mtimeOverride?: Date) {
+    const path = join(home, 'api.port');
+    await writeFile(path, String(port));
+    if (mtimeOverride) await utimes(path, mtimeOverride, mtimeOverride);
+  }
+
+  it('1) DKG_HOME env wins, regardless of pid/port files', async () => {
+    process.env.DKG_HOME = '/explicit/override';
+    await writePid(dkg, ALIVE);
+    await writePid(dkgDev, ALIVE);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe('/explicit/override');
+  });
+
+  it('2) ~/.dkg pid alive and ~/.dkg-dev pid dead → returns ~/.dkg', async () => {
+    await writePid(dkg, ALIVE);
+    await writePid(dkgDev, DEAD);
+    expect(resolveDkgHome()).toBe(dkg);
+  });
+
+  it('3) ~/.dkg-dev pid alive and ~/.dkg pid dead → returns ~/.dkg-dev', async () => {
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, ALIVE);
+    expect(resolveDkgHome()).toBe(dkgDev);
+  });
+
+  it("4) both folders on disk with stale state; only one daemon currently alive → resolves to the live one (user's monorepo↔npm switch scenario)", async () => {
+    // Simulates: developer ran the npm daemon previously (left ~/.dkg with
+    // stale pid + stale api.port), then switched to monorepo; now only the
+    // monorepo daemon is running.
+    await writePid(dkg, DEAD);              // stale npm-side pid
+    await writePort(dkg, 9200);             // stale npm-side port
+    await writePid(dkgDev, ALIVE);          // currently-running monorepo daemon
+    await writePort(dkgDev, 9200);          // monorepo daemon also bound 9200
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkgDev);
+  });
+
+  it('5) both pids alive, daemonUrl port matches ~/.dkg-dev/api.port → returns ~/.dkg-dev', async () => {
+    await writePid(dkg, ALIVE);
+    await writePid(dkgDev, ALIVE);
+    await writePort(dkg, 9200);
+    await writePort(dkgDev, 9201);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9201' })).toBe(dkgDev);
+  });
+
+  it('6) both pids alive, daemonUrl port matches ~/.dkg/api.port → returns ~/.dkg', async () => {
+    await writePid(dkg, ALIVE);
+    await writePid(dkgDev, ALIVE);
+    await writePort(dkg, 9200);
+    await writePort(dkgDev, 9201);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
+  });
+
+  it('7) both pids dead, ~/.dkg-dev/api.port is more recent → returns ~/.dkg-dev (cold-start mtime tiebreak)', async () => {
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, DEAD);
+    const old = new Date(Date.now() - 60_000); // 1 minute ago
+    const fresh = new Date();                  // now
+    await writePort(dkg, 9200, old);
+    await writePort(dkgDev, 9200, fresh);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkgDev);
+  });
+
+  it('8) both pids dead, ~/.dkg/api.port is more recent → returns ~/.dkg', async () => {
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, DEAD);
+    const old = new Date(Date.now() - 60_000);
+    const fresh = new Date();
+    await writePort(dkg, 9200, fresh);
+    await writePort(dkgDev, 9200, old);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
+  });
+
+  it('9) nothing exists at all (fresh install) → returns ~/.dkg', async () => {
+    // Both dirs are present (created in beforeEach) but contain no pid/port files.
+    expect(resolveDkgHome()).toBe(dkg);
+  });
+
+  it('9b) neither ~/.dkg nor ~/.dkg-dev exist on disk at all → returns ~/.dkg without crashing', async () => {
+    // Cheap defensive coverage (per QA T70 review): a brand-new account
+    // where neither directory has been created yet. All sync fs reads
+    // must return null cleanly (no ENOENT throw escaping). Resolver
+    // falls through every step and returns the default ~/.dkg.
+    await rm(dkg, { recursive: true, force: true });
+    await rm(dkgDev, { recursive: true, force: true });
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
+  });
+
+  it('10) liveness-only signal: no daemonUrl provided, only one pid alive → returns the live dir', async () => {
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, ALIVE);
+    expect(resolveDkgHome()).toBe(dkgDev);
   });
 });
 

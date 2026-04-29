@@ -6,7 +6,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { keccak_256 } from '@noble/hashes/sha3.js';
@@ -14,6 +14,119 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 /** Resolve the DKG home directory ($DKG_HOME or ~/.dkg). */
 export function dkgHomeDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+}
+
+/**
+ * Auto-resolve the active DKG home directory by observing what the running
+ * daemon already wrote.
+ *
+ * Two install modes coexist on the same host: npm-installed daemons use
+ * `~/.dkg`, monorepo-dev daemons use `~/.dkg-dev`. The CLI's `dkgDir()`
+ * decides between them via `isDkgMonorepo()` markers, but those markers are
+ * scoped to the caller's CWD — they're not visible to a separate process
+ * (e.g. the OpenClaw gateway) that loads this adapter from somewhere else
+ * on disk. Rather than duplicating the CLI's heuristic and re-deriving the
+ * decision (issue #318 is exactly that bug), this resolver observes the
+ * daemon's *effect*: at startup the daemon writes `daemon.pid` and
+ * `api.port` into its chosen home dir.
+ *
+ * Resolution priority:
+ *   1. `process.env.DKG_HOME` — explicit operator/user override wins.
+ *   2. Live `daemon.pid` — `process.kill(pid, 0)` confirms the dir whose
+ *      daemon is actually running. The dir whose pid is dead is rejected
+ *      (handles the both-folders-on-disk-with-stale-state case where a
+ *      developer alternates monorepo and npm daemons on the same machine).
+ *   3. Two-daemon tiebreak — when both pids are alive (rare; e.g. two
+ *      daemons bound to different ports), match `api.port` to the caller's
+ *      `daemonUrl` port to identify which daemon we're talking to.
+ *   4. Cold-start fallback — when no daemon is running yet, pick the dir
+ *      whose `api.port` was most recently modified. This is overwhelmingly
+ *      the dir the user is about to start the daemon in again.
+ *   5. `~/.dkg` (npm default) — final fallback for fresh installs.
+ *
+ * Cost: a handful of sync filesystem reads plus 1–2 `process.kill(_, 0)`
+ * calls. Sub-millisecond. Called once at adapter `register()` time.
+ */
+export function resolveDkgHome(opts?: { daemonUrl?: string }): string {
+  if (process.env.DKG_HOME) return process.env.DKG_HOME;
+
+  const home = homedir();
+  const dkg = join(home, '.dkg');
+  const dkgDev = join(home, '.dkg-dev');
+
+  const dkgPid = readDaemonPidSync(dkg);
+  const dkgDevPid = readDaemonPidSync(dkgDev);
+  const dkgAlive = dkgPid != null && isProcessAlive(dkgPid);
+  const dkgDevAlive = dkgDevPid != null && isProcessAlive(dkgDevPid);
+
+  // (1) Liveness — the active daemon's home is the right answer.
+  if (dkgAlive && !dkgDevAlive) return dkg;
+  if (dkgDevAlive && !dkgAlive) return dkgDev;
+
+  // (2) Both alive (rare): use daemonUrl port to disambiguate.
+  if (dkgAlive && dkgDevAlive && opts?.daemonUrl) {
+    const target = extractPort(opts.daemonUrl);
+    if (target != null) {
+      if (readDkgApiPortSync(dkgDev) === target) return dkgDev;
+      if (readDkgApiPortSync(dkg) === target) return dkg;
+    }
+  }
+
+  // (3) Neither alive (cold start): pick freshest by api.port mtime.
+  const dkgMtime = mtimeOfMs(join(dkg, 'api.port'));
+  const dkgDevMtime = mtimeOfMs(join(dkgDev, 'api.port'));
+  if (dkgDevMtime != null && (dkgMtime == null || dkgDevMtime > dkgMtime)) return dkgDev;
+  if (dkgMtime != null) return dkg;
+
+  // (4) Brand-new install: npm default.
+  return dkg;
+}
+
+/** Sync variant of `readDaemonPid` for use in `resolveDkgHome` (called from sync constructors). */
+function readDaemonPidSync(dkgHome: string): number | null {
+  try {
+    const raw = readFileSync(join(dkgHome, 'daemon.pid'), 'utf-8');
+    return parseStrictPosInt(raw.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sync read of `<dkgHome>/api.port`. Used by `resolveDkgHome` for the
+ * two-daemon tiebreak. Does NOT honor `DKG_API_PORT` env (unlike the async
+ * `readDkgApiPort`) because this is per-home-dir disambiguation, not a
+ * global override.
+ */
+function readDkgApiPortSync(dkgHome: string): number | null {
+  try {
+    const raw = readFileSync(join(dkgHome, 'api.port'), 'utf-8');
+    return parsePort(raw.trim());
+  } catch {
+    return null;
+  }
+}
+
+/** Extract the numeric port from a URL string. Returns null if absent or invalid. */
+function extractPort(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.port) return parsePort(parsed.port);
+    if (parsed.protocol === 'http:') return 80;
+    if (parsed.protocol === 'https:') return 443;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Modification time of a file in ms since epoch, or null if unreadable / missing. */
+function mtimeOfMs(filePath: string): number | null {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /** Read the daemon PID from $DKG_HOME/daemon.pid. Returns null if missing or invalid. */

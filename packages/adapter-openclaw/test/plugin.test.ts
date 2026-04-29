@@ -4519,6 +4519,157 @@ describe('DkgNodePlugin', () => {
         await plugin.stop();
       }
     });
+
+    it('T70 — when resolved <dkgHome>/auth.token is briefly missing, client does NOT silently fall back to ~/.dkg/auth.token', async () => {
+      // T70 corner case (caught in QA review): the resolver picks the live
+      // daemon's home (~/.dkg-dev), but its auth.token is briefly absent
+      // (operator deleted it during a token rotation, mid-write, fresh
+      // checkout where the daemon hasn't yet written the token, etc.).
+      // The OTHER home (~/.dkg) has a stale auth.token from a previous
+      // npm-side install. Without `dkgHome` plumbed through DkgClientOptions,
+      // the constructor's `?? loadTokenFromFile()` no-arg fallback would
+      // read the default ~/.dkg/auth.token and silently authenticate with
+      // the wrong identity → 401 on every authenticated daemon call.
+      delete process.env.DKG_HOME;
+
+      const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const dkg = path.join(isolatedHome, '.dkg');
+      const dkgDev = path.join(isolatedHome, '.dkg-dev');
+      fs.mkdirSync(dkg, { recursive: true });
+      fs.mkdirSync(dkgDev, { recursive: true });
+
+      const prevHome = process.env.HOME;
+      const prevUserProfile = process.env.USERPROFILE;
+      process.env.HOME = isolatedHome;
+      process.env.USERPROFILE = isolatedHome;
+
+      try {
+        // Stale npm-side token that MUST NOT bleed into the client.
+        fs.writeFileSync(path.join(dkg, 'auth.token'), 'STALE-NPM-TOKEN');
+        // Live monorepo daemon with no auth.token (briefly missing).
+        fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
+        // (no auth.token in dkgDev — that's the corner case)
+
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://127.0.0.1:9200',
+          memory: { enabled: true },
+          channel: { enabled: false },
+        });
+        try {
+          plugin.register(makeMockApi());
+          // Resolver correctly picks the live monorepo dir.
+          expect((plugin as any).dkgHome).toBe(dkgDev);
+          // CRITICAL invariant — apiToken must be undefined (the resolved
+          // home's auth.token is absent). It must NOT silently pick up
+          // 'STALE-NPM-TOKEN' from the other home.
+          expect((plugin as any).client.apiToken).toBeUndefined();
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevUserProfile;
+        try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+
+    it('T70 — auto-resolves dkgHome to the live daemon dir when both ~/.dkg and ~/.dkg-dev exist (no env override)', async () => {
+      // T70 — User's monorepo↔npm switch scenario: both home dirs exist on
+      // disk, but only the monorepo daemon is currently alive. Adapter
+      // should pick ~/.dkg-dev automatically, with no openclaw.json edit
+      // and no DKG_HOME env override.
+      //
+      // Test redirects `homedir()` by overriding HOME / USERPROFILE to a
+      // tmp dir, then writes:
+      //   <tmp>/.dkg/daemon.pid       = 999999999      (stale, dead)
+      //   <tmp>/.dkg/api.port         = 9200           (stale)
+      //   <tmp>/.dkg/auth.token       = "wrong-token"  (npm-side stale)
+      //   <tmp>/.dkg-dev/daemon.pid   = process.pid    (alive)
+      //   <tmp>/.dkg-dev/api.port     = 9200           (live)
+      //   <tmp>/.dkg-dev/auth.token   = "right-token"  (monorepo-side live)
+      //   <tmp>/.dkg-dev/agent-keystore.json = { ETH_PRIMARY_LC: { authToken: 'tok-…' } }
+      //
+      // Expected: plugin's resolved dkgHome === <tmp>/.dkg-dev,
+      // its DkgDaemonClient.apiToken === "right-token", and the keystore
+      // probe forwards the dkg-dev keystore's authToken (not dkg's).
+
+      // Force resolveDkgHome out of the env-wins shortcut so it actually
+      // exercises the liveness signal path.
+      delete process.env.DKG_HOME;
+
+      // Redirect `homedir()` to a fresh tmp dir.
+      const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const dkg = path.join(isolatedHome, '.dkg');
+      const dkgDev = path.join(isolatedHome, '.dkg-dev');
+      fs.mkdirSync(dkg, { recursive: true });
+      fs.mkdirSync(dkgDev, { recursive: true });
+
+      const prevHome = process.env.HOME;
+      const prevUserProfile = process.env.USERPROFILE;
+      process.env.HOME = isolatedHome;
+      process.env.USERPROFILE = isolatedHome; // Windows
+
+      try {
+        // Stale npm-side state.
+        fs.writeFileSync(path.join(dkg, 'daemon.pid'), '999999999');
+        fs.writeFileSync(path.join(dkg, 'api.port'), '9200');
+        fs.writeFileSync(path.join(dkg, 'auth.token'), 'wrong-token-from-npm-side');
+
+        // Live monorepo-side state — same port (the user's exact scenario).
+        fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
+        fs.writeFileSync(path.join(dkgDev, 'api.port'), '9200');
+        fs.writeFileSync(path.join(dkgDev, 'auth.token'), 'right-token-from-monorepo-side');
+        fs.writeFileSync(
+          path.join(dkgDev, 'agent-keystore.json'),
+          JSON.stringify({ [ETH_PRIMARY_LC]: { authToken: `tok-${ETH_PRIMARY_LC}` } }),
+        );
+
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://127.0.0.1:9200',
+          memory: { enabled: true },
+          channel: { enabled: false },
+          // No `dkgHome` override — we want the auto-resolver to fire.
+        });
+        try {
+          plugin.register(makeMockApi());
+
+          // (a) Plugin resolved to the live monorepo dir, not the stale npm one.
+          expect((plugin as any).dkgHome).toBe(dkgDev);
+
+          // (b) DkgDaemonClient picked up the live dir's auth.token (not the
+          //     stale wrong-token from ~/.dkg/auth.token).
+          expect((plugin as any).client.apiToken).toBe('right-token-from-monorepo-side');
+
+          // (c) HTTP probe forwards the keystore's agent token (the keystore
+          //     was only written into ~/.dkg-dev — if the resolver had picked
+          //     ~/.dkg, this would fail with 'absent').
+          const spy = vi.fn().mockResolvedValue({
+            ok: true,
+            identity: {
+              agentAddress: ETH_PRIMARY,
+              agentDid: `did:dkg:agent:${ETH_PRIMARY}`,
+              name: 'test-agent',
+              peerId: '12D3KooWDaemonPeerFromIdentity',
+              nodeIdentityId: '0',
+            },
+          });
+          (plugin as any).client.getAgentIdentity = spy;
+          await (plugin as any).ensureNodeAgentAddress();
+          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+          expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevUserProfile;
+        try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
   });
 
   describe('context-graph cache filter on synced + non-system (Codex B51 + B54)', () => {

@@ -11,8 +11,19 @@ import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
 export interface DkgClientOptions {
   /** Base URL of the DKG daemon (default: "http://127.0.0.1:9200"). */
   baseUrl?: string;
-  /** Bearer token for daemon API auth. If omitted, tries ~/.dkg/auth.token. */
+  /** Bearer token for daemon API auth. If omitted, tries `<dkgHome>/auth.token`. */
   apiToken?: string;
+  /**
+   * T70 — DKG home directory used to read `auth.token` when `apiToken` is
+   * not supplied. Caller (typically `DkgNodePlugin.register`) passes the
+   * runtime-resolved home (`resolveDkgHome({daemonUrl})`) so the constructor
+   * fallback reads from the right place when the active daemon is in
+   * `~/.dkg-dev` (monorepo) vs `~/.dkg` (npm). Without this, an absent
+   * `auth.token` in the resolved home would silently fall through to the
+   * default `~/.dkg/auth.token`, picking up a stale npm-side token while
+   * the live daemon is at `~/.dkg-dev` (the very bug T70 set out to fix).
+   */
+  dkgHome?: string;
   /** Request timeout in ms (default: 30 000). */
   timeoutMs?: number;
 }
@@ -102,11 +113,11 @@ export class DkgDaemonClient {
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
-    this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile();
+    this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile(opts?.dkgHome);
   }
 
-  private static loadTokenFromFile(): string | undefined {
-    return loadAuthTokenSync();
+  private static loadTokenFromFile(dkgHome?: string): string | undefined {
+    return loadAuthTokenSync(dkgHome);
   }
 
   private authHeaders(): Record<string, string> {

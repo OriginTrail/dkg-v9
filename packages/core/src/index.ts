@@ -39,6 +39,7 @@ export {
 } from './errors.js';
 export {
   dkgHomeDir,
+  resolveDkgHome,
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,

@@ -324,8 +324,18 @@ describe('writeDkgConfig', () => {
       process.env.DKG_HOME = original;
     }
 
-    // (3) Existing config with an operator-pinned autoUpdate must round-trip
-    //     unchanged — only the default-write path changes here.
+    // (3) Existing config with an operator-pinned autoUpdate. The heal-legacy
+    //     pass (`pruneNetworkPinnedDefaults`) operates per-field: any field
+    //     whose value equals the current network default is treated as a
+    //     stale auto-copy from a pre-PR-322 setup run and dropped, while
+    //     fields that differ from the network default are preserved as
+    //     genuine operator overrides. Here `repo` matches the network value
+    //     so it gets dropped (the resolver will re-derive it at runtime),
+    //     `branch` differs ('release/v10' vs 'main') so it's preserved as a
+    //     real override, and `enabled` is kept regardless. This matches the
+    //     companion expectation in the "heals legacy auto-pinned" test
+    //     below — see case (2) at line ~432 which asserts the same
+    //     per-field semantics directly.
     const persisted = join(testDir, '.dkg-persisted');
     mkdirSync(persisted, { recursive: true });
     writeFileSync(join(persisted, 'config.json'), JSON.stringify({
@@ -342,7 +352,6 @@ describe('writeDkgConfig', () => {
       const cfg = JSON.parse(readFileSync(join(persisted, 'config.json'), 'utf-8'));
       expect(cfg.autoUpdate).toEqual({
         enabled: true,
-        repo: 'OriginTrail/dkg',
         branch: 'release/v10',
       });
     } finally {

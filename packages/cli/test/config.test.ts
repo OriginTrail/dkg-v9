@@ -240,15 +240,43 @@ describe('resolveChainConfig (field-level merge)', () => {
     // hubAddress before passing to the agent.
   });
 
-  it('preserves explicit `type: "mock"` and `mockIdentityId` override (test-only path)', () => {
+  it('does NOT inherit EVM fields from network when config opts into mock mode', () => {
+    // Critical: a hybrid `{ type: 'mock' }` config that inherits the
+    // network's rpcUrl/hubAddress/chainId would have lifecycle.ts wire up
+    // a MockChainAdapter (correct), but publisher-runner, the wallet/
+    // balance/rpc-health routes, and `dkg set-ask` would see "chain
+    // configured" via the inherited fields and start hitting the real
+    // network. Mock mode must short-circuit the merge.
     const merged = resolveChainConfig(
       { chain: { type: 'mock', mockIdentityId: '42' } },
       { chain: fullNetworkChain },
     );
     expect(merged?.type).toBe('mock');
     expect(merged?.mockIdentityId).toBe('42');
-    // Hub/RPC inherit, but the daemon's mock branch ignores them.
-    expect(merged?.hubAddress).toBe(fullNetworkChain.hubAddress);
+    expect(merged?.rpcUrl).toBeUndefined();
+    expect(merged?.hubAddress).toBeUndefined();
+    expect(merged?.chainId).toBeUndefined();
+  });
+
+  it('keeps the operator\'s own fields under mock mode (no merge in either direction)', () => {
+    // A test fixture that pins a mock chainId (e.g. to exercise a specific
+    // chain identifier inside MockChainAdapter) must round-trip without
+    // network inheritance.
+    const merged = resolveChainConfig(
+      {
+        chain: {
+          type: 'mock',
+          chainId: 'mock:31337',
+          mockIdentityId: '7',
+        },
+      },
+      { chain: fullNetworkChain },
+    );
+    expect(merged).toEqual({
+      type: 'mock',
+      chainId: 'mock:31337',
+      mockIdentityId: '7',
+    });
   });
 
   it('does not return undefined fields as own keys (clean shape for downstream spread)', () => {

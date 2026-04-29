@@ -47,6 +47,7 @@ export {
   loadAgentEthAddressSync,
   loadAgentEthAddress,
   MultipleAgentsError,
+  toEip55Checksum,
 } from './dkg-home.js';
 export {
   type Quad as ExtractionQuad,

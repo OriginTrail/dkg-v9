@@ -9,6 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 
 /** Resolve the DKG home directory ($DKG_HOME or ~/.dkg). */
 export function dkgHomeDir(): string {
@@ -106,6 +107,45 @@ export async function loadAuthToken(dkgHome?: string): Promise<string | undefine
 const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 /**
+ * T62 — EIP-55 mixed-case checksum for an eth address.
+ *
+ * Live-test against the daemon revealed chat-turn assertions are stored at
+ * graph URIs that use the agent address in CHECKSUM case (the daemon's
+ * `defaultAgentAddress` is set from `verifyWallet.address`, which ethers
+ * returns in EIP-55 form), but the adapter was reading the keystore JSON
+ * KEY (lowercase) and querying with the lowercase form. SPARQL graph URIs
+ * are case-sensitive, so reads silently missed every triple. Apply EIP-55
+ * to the keystore read so the adapter's outbound `agentAddress` matches
+ * the daemon's storage form.
+ *
+ * @param address - hex-encoded eth address, with or without `0x` prefix.
+ *                  Case-insensitive on input.
+ * @returns The address in EIP-55 mixed-case form, with `0x` prefix.
+ */
+export function toEip55Checksum(address: string): string {
+  const lower = address.replace(/^0x/i, '').toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(lower)) {
+    throw new Error(`toEip55Checksum: not a 40-hex-digit eth address: ${address}`);
+  }
+  // EIP-55 hashes the lowercase HEX STRING (ASCII bytes), then uppercases each
+  // alpha character in the address whose corresponding hash nibble is >= 8.
+  const hashBytes = keccak_256(new TextEncoder().encode(lower));
+  let out = '0x';
+  for (let i = 0; i < lower.length; i++) {
+    const ch = lower[i];
+    if (ch >= 'a' && ch <= 'f') {
+      // Each byte yields two hex nibbles. Even index → high nibble.
+      const byte = hashBytes[i >> 1];
+      const nibble = i % 2 === 0 ? byte >> 4 : byte & 0x0f;
+      out += nibble >= 8 ? ch.toUpperCase() : ch;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/**
  * Thrown by `loadAgentEthAddress*` when the keystore contains more than one
  * eth-address top-level key and no `explicitAddress` override was provided.
  *
@@ -142,7 +182,11 @@ function extractEthAddressKeys(parsed: unknown): string[] {
   const lc = Object.keys(parsed as Record<string, unknown>)
     .map((k) => k.toLowerCase())
     .filter((k) => ETH_ADDR_RE.test(k));
-  return Array.from(new Set(lc));
+  // T46 — Dedupe lowercased keys (covers checksum + lowercase both being
+  // present for the same identity).
+  // T62 — Return EIP-55 checksum form so the adapter's outbound queries
+  // match the daemon's checksum-case graph URIs.
+  return Array.from(new Set(lc)).map((addr) => toEip55Checksum(addr));
 }
 
 /**
@@ -158,7 +202,10 @@ function resolveExplicitAddress(explicit: string | undefined): string | undefine
   if (typeof explicit !== 'string') return undefined;
   const t = explicit.trim().toLowerCase();
   if (!ETH_ADDR_RE.test(t)) return undefined;
-  return t;
+  // T62 — Normalize env override to EIP-55 checksum form to match the
+  // daemon's storage URI case. Operators can supply lowercase, checksum,
+  // or all-uppercase; output is always canonical EIP-55.
+  return toEip55Checksum(t);
 }
 
 /**

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { homedir } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
@@ -4001,8 +4002,14 @@ describe('DkgNodePlugin', () => {
     // by setting DKG_HOME to a tmpdir and writing/mutating the keystore
     // file mid-test. Mirrors the previous B9 lazy re-probe semantics for
     // the keystore source.
-    const ETH_PRIMARY = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
-    const ETH_SECONDARY = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
+    // T62 — Adapter's `loadAgentEthAddressSync` returns EIP-55 checksum
+    // form so SPARQL graph URIs match the daemon's checksum-case storage.
+    // Derive the checksummed expected value at runtime so any future
+    // change to the helper / spec is automatically reflected here.
+    const ETH_PRIMARY_LC = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+    const ETH_SECONDARY_LC = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
+    const ETH_PRIMARY = toEip55Checksum(ETH_PRIMARY_LC);
+    const ETH_SECONDARY = toEip55Checksum(ETH_SECONDARY_LC);
 
     function makeMockApi(): OpenClawPluginApi {
       return {
@@ -4075,16 +4082,22 @@ describe('DkgNodePlugin', () => {
       });
       try {
         plugin.register(makeMockApi());
-        await new Promise((r) => setImmediate(r));
+        // Drive the register-time probe to completion explicitly.
+        await (plugin as any).ensureNodeAgentAddress();
         expect((plugin as any).nodeAgentAddress).toBeUndefined();
         const resolver = (plugin as any).memorySessionResolver;
         expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        // Drain the .finally microtask from the resolver-fired probe so
+        // `agentAddressProbeInFlight` is cleared before we write the
+        // keystore. Otherwise the next ensureNodeAgentAddress() would
+        // return the IN-FLIGHT empty-keystore probe instead of starting
+        // a new one.
+        await new Promise((r) => setImmediate(r));
 
         // Keystore appears.
-        writeKeystore([ETH_PRIMARY]);
-        // Lazy re-read — fired implicitly by the resolver on next call.
-        resolver.getDefaultAgentAddress();
-        await new Promise((r) => setImmediate(r));
+        writeKeystore([ETH_PRIMARY_LC]);
+        // Lazy re-read — fires a fresh probe now that the previous one is settled.
+        await (plugin as any).ensureNodeAgentAddress();
         expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
       } finally {
         await plugin.stop();

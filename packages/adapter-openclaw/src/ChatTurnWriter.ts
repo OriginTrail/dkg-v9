@@ -1601,11 +1601,11 @@ export class ChatTurnWriter {
         // T71 — Info-level persist log so Telegram / W4b chat turns are as
         // visible in the gateway log as Node-UI / W4a turns (which log via
         // DkgChannelPlugin's `[dkg-channel] Turn persisted to DKG graph: …`
-        // info line). Asymmetric verbosity across channels was a real
-        // observability gap: with debug-only logging, operators couldn't
-        // confirm Telegram persistence without enabling debug logs or
-        // SPARQL-counting graph triples.
-        this.logger.info?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
+        // info line). Inline the sessionId/turnId into the message string;
+        // the gateway logger drops the second context-object arg at info
+        // level (only renders the first string arg), so a two-arg shape
+        // would log "Persisted turn" with no detail.
+        this.logger.info?.(`[ChatTurnWriter] Persisted turn (sessionId=${sessionId}, turnId=${turnId})`);
         return;
       } catch (err) {
         attempt++;

@@ -3658,6 +3658,7 @@ describe('DkgNodePlugin', () => {
         daemonUrl: 'http://localhost:9200',
         installedWorkspace: staleInstalledWorkspace,
         stateDir: staleConfigStateDir,
+        stateDirSource: 'setup-default',
         channel: { enabled: false },
         memory: { enabled: false },
       } as any);
@@ -3685,6 +3686,43 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - config stateDir matching installedWorkspace default is explicit without setup marker', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-current-explicit-default-${Date.now()}`);
+    const configuredWorkspace = path.join(require('os').tmpdir(), `dkg-t75-explicit-default-${Date.now()}`);
+    const configuredStateDir = path.join(configuredWorkspace, '.openclaw');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace: configuredWorkspace,
+        stateDir: configuredStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toContain(
+        configuredStateDir.replace(/\\/g, '/') + '/dkg-adapter/chat-turn-watermarks.json',
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(configuredWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - setup-owned configured stateDir migrates when api.workspaceDir appears later', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
@@ -3696,6 +3734,7 @@ describe('DkgNodePlugin', () => {
         daemonUrl: 'http://localhost:9200',
         installedWorkspace: staleInstalledWorkspace,
         stateDir: staleConfigStateDir,
+        stateDirSource: 'setup-default',
         channel: { enabled: false },
         memory: { enabled: false },
       } as any);
@@ -3741,6 +3780,73 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - in-flight stateDir migration guard canonicalizes target aliases', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const realWorkspace = path.join(require('os').tmpdir(), `dkg-t75-real-migration-${Date.now()}`);
+    const aliasWorkspace = path.join(require('os').tmpdir(), `dkg-t75-alias-migration-${Date.now()}`);
+    fs.mkdirSync(realWorkspace, { recursive: true });
+    try {
+      fs.symlinkSync(realWorkspace, aliasWorkspace, 'dir');
+    } catch {
+      return;
+    }
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiFallback: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiFallback);
+      const writer = (plugin as any).chatTurnWriter;
+      let resolveMigration: (() => void) | undefined;
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir').mockImplementation(
+        () => new Promise<void>((resolve) => { resolveMigration = resolve; }),
+      );
+
+      const apiWorkspace: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: realWorkspace,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWorkspace);
+      expect(setStateDirSpy).toHaveBeenCalledTimes(1);
+
+      const apiRuntimeAlias: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => path.join(aliasWorkspace, '.openclaw') } },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiRuntimeAlias);
+      expect(setStateDirSpy).toHaveBeenCalledTimes(1);
+
+      resolveMigration?.();
+      await new Promise((r) => setTimeout(r, 50));
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(aliasWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(realWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - setup-owned stateDir detection handles symlink aliases at runtime', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
@@ -3759,6 +3865,7 @@ describe('DkgNodePlugin', () => {
         daemonUrl: 'http://localhost:9200',
         installedWorkspace: realWorkspace,
         stateDir: path.join(aliasWorkspace, '.openclaw'),
+        stateDirSource: 'setup-default',
         channel: { enabled: false },
         memory: { enabled: false },
       } as any);

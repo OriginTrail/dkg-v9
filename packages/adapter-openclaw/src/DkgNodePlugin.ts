@@ -624,9 +624,11 @@ export class DkgNodePlugin {
     };
     const trimmedWorkspaceDir = trimmedNonEmpty(workspaceDir);
     const configuredStateDir = trimmedNonEmpty(this.config.stateDir);
+    const configuredStateDirSource = trimmedNonEmpty(this.config.stateDirSource);
     const setupWorkspaceDir = trimmedNonEmpty(this.config.installedWorkspace);
     const setupDefaultStateDir = setupWorkspaceDir ? join(setupWorkspaceDir, '.openclaw') : undefined;
     const configuredIsSetupDefault =
+      configuredStateDirSource === 'setup-default' &&
       !!configuredStateDir &&
       !!setupDefaultStateDir &&
       canonicalPathForCompare(configuredStateDir) === canonicalPathForCompare(setupDefaultStateDir);
@@ -655,7 +657,10 @@ export class DkgNodePlugin {
       // concurrent register() calls before the migration settles
       // would launch two `setStateDir` promises racing on the same
       // writer state.
-      if (this.chatTurnWriterMigrationTarget === stateDir) return;
+      if (
+        this.chatTurnWriterMigrationTarget &&
+        canonicalPathForCompare(this.chatTurnWriterMigrationTarget) === nextCanonicalStateDir
+      ) return;
       const homeCanonicalStateDir = canonicalPathForCompare(homeDir);
       const wasFallback = currentCanonicalStateDir === homeCanonicalStateDir;
       const wasSetupDefault =

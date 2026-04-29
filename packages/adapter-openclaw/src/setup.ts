@@ -817,7 +817,10 @@ function isAdapterLoadPath(value: string): boolean {
  * can pass any of the same sub-fields the adapter reads at load time,
  * including `channel.port` for advanced bridge-port overrides.
  */
-export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'stateDir' | 'memory' | 'channel'>;
+export type AdapterEntryConfig = Pick<
+  DkgOpenClawConfig,
+  'daemonUrl' | 'stateDir' | 'stateDirSource' | 'memory' | 'channel'
+>;
 
 function defaultStateDirForWorkspace(workspaceDir: string): string {
   return join(workspaceDir, '.openclaw');
@@ -953,18 +956,34 @@ export function mergeOpenClawConfig(
 
   const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
   const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
+  const incomingStateDirIsSetupDefault =
+    !!incomingStateDir &&
+    sameResolvedPath(incomingStateDir, defaultStateDirForWorkspace(installedWorkspace));
+  const existingStateDirIsSetupOwned =
+    existingEntryConfig.stateDirSource === 'setup-default' &&
+    !!existingStateDir &&
+    !!priorInstalledWorkspace &&
+    sameResolvedPath(existingStateDir, defaultStateDirForWorkspace(priorInstalledWorkspace));
+  let preservedExistingStateDir = false;
   if (typeof existingEntryConfig.stateDir === 'string' && !existingEntryConfig.stateDir.trim()) {
     delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
   } else if (
     existingStateDir &&
     incomingStateDir &&
-    priorInstalledWorkspace &&
-    sameResolvedPath(existingStateDir, defaultStateDirForWorkspace(priorInstalledWorkspace))
+    existingStateDirIsSetupOwned
   ) {
     // The existing value is the setup-owned default from the previous
     // workspace, so a workspace migration should move it alongside
     // installedWorkspace. Any custom value remains first-wins.
     delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
+  } else if (existingStateDir) {
+    preservedExistingStateDir = true;
+    // A preserved stateDir is user-owned, even when it happens to equal an
+    // old default path. Do not let the incoming setup marker survive the
+    // spread below.
+    delete existingEntryConfig.stateDirSource;
   }
 
   entryForConfig.config = {
@@ -976,6 +995,15 @@ export function mergeOpenClawConfig(
     // for the adapter-owned pointer so a re-install updates it cleanly.
     installedWorkspace,
   };
+  if (
+    incomingStateDirIsSetupDefault &&
+    !preservedExistingStateDir &&
+    trimmedNonEmpty(entryForConfig.config.stateDir) === incomingStateDir
+  ) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else {
+    delete entryForConfig.config.stateDirSource;
+  }
   if (!hadConfig) {
     log(`Populated plugins.entries.${pluginId}.config`);
   }
@@ -1826,6 +1854,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const entryConfig: AdapterEntryConfig = {
     daemonUrl: `http://127.0.0.1:${effectivePort}`,
     stateDir: defaultStateDirForWorkspace(workspaceDir),
+    stateDirSource: 'setup-default',
     memory: { enabled: true },
     channel: { enabled: true },
   };

@@ -578,6 +578,7 @@ describe('mergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(stateDir);
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
   });
 
   it('preserves existing entry.config values on re-merge (first-wins semantics)', () => {
@@ -638,6 +639,40 @@ describe('mergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe('/user/custom/openclaw-state');
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBeUndefined();
+  });
+
+  it('preserves a user-owned stateDir that happens to equal the prior workspace default', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const firstWs = join(testDir, 'workspace-user-default-a');
+    const secondWs = join(testDir, 'workspace-user-default-b');
+    const userPinnedStateDir = join(firstWs, '.openclaw');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              installedWorkspace: firstWs,
+              stateDir: userPinnedStateDir,
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: join(secondWs, '.openclaw'),
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, secondWs);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const entryConfig = config.plugins.entries['adapter-openclaw'].config;
+    expect(entryConfig.stateDir).toBe(userPinnedStateDir);
+    expect(entryConfig.stateDirSource).toBeUndefined();
+    expect(entryConfig.installedWorkspace).toBe(secondWs);
   });
 
   it('updates setup-owned stateDir when installedWorkspace changes', () => {
@@ -662,6 +697,7 @@ describe('mergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 
@@ -677,6 +713,7 @@ describe('mergeOpenClawConfig', () => {
             config: {
               installedWorkspace: `  ${firstWs}  `,
               stateDir: `  ${join(firstWs, '.openclaw')}  `,
+              stateDirSource: 'setup-default',
             },
           },
         },
@@ -715,6 +752,7 @@ describe('mergeOpenClawConfig', () => {
             config: {
               installedWorkspace: realWs,
               stateDir: join(aliasWs, '.openclaw'),
+              stateDirSource: 'setup-default',
             },
           },
         },
@@ -730,6 +768,7 @@ describe('mergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 

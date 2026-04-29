@@ -4,6 +4,24 @@ import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * Per-step build timeouts (milliseconds) used by the git-based auto-update
+ * path. Slow hosts (notably ARM64 nodes compiling Solidity contracts via the
+ * WASM solc fallback) can exceed the defaults; operators set overrides via
+ * `~/.dkg/config.json` -> `autoUpdate.buildTimeoutMs`. All keys are optional;
+ * unset keys fall back through network/<env>.json -> built-in defaults.
+ */
+export interface AutoUpdateBuildTimeouts {
+  /** `pnpm install --frozen-lockfile` (default 180_000). */
+  install?: number;
+  /** `pnpm build:runtime` / `pnpm build` (default 180_000). */
+  build?: number;
+  /** `pnpm --filter dkg-evm-module build` (default 300_000; bump to 900_000 on ARM64). */
+  contracts?: number;
+  /** MarkItDown bundling step (default 900_000). */
+  markitdown?: number;
+}
+
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
@@ -16,7 +34,13 @@ export interface AutoUpdateConfig {
   sshKeyPath?: string;
   /** Optional raw GIT_SSH_COMMAND override for git-based update fetches/clones. */
   sshCommand?: string;
-  checkIntervalMinutes: number;
+  /**
+   * Optional in ~/.dkg/config.json: omit to inherit from network/project config.
+   * `resolveAutoUpdateConfig()` falls back to network -> 30 (minutes).
+   */
+  checkIntervalMinutes?: number;
+  /** Optional per-step build timeout overrides for the git-based update path. */
+  buildTimeoutMs?: AutoUpdateBuildTimeouts;
 }
 
 /**
@@ -29,6 +53,7 @@ export interface AutoUpdateConfig {
 export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
   repo: string;
   branch: string;
+  checkIntervalMinutes: number;
 };
 
 export interface NetworkConfig {
@@ -48,6 +73,7 @@ export interface NetworkConfig {
     sshKeyPath?: string;
     sshCommand?: string;
     checkIntervalMinutes: number;
+    buildTimeoutMs?: AutoUpdateBuildTimeouts;
   };
   chain?: {
     type: 'evm';
@@ -403,6 +429,20 @@ export function resolveAutoUpdateConfig(
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
 
+  // Merge build timeouts per-key so operators can override one step (e.g.
+  // `contracts` on slow ARM hosts) without re-specifying the rest.
+  const buildTimeoutMs: AutoUpdateBuildTimeouts | undefined = (() => {
+    const c = cfg?.buildTimeoutMs;
+    const n = net?.buildTimeoutMs;
+    if (!c && !n) return undefined;
+    return {
+      ...(c?.install ?? n?.install ? { install: c?.install ?? n?.install } : {}),
+      ...(c?.build ?? n?.build ? { build: c?.build ?? n?.build } : {}),
+      ...(c?.contracts ?? n?.contracts ? { contracts: c?.contracts ?? n?.contracts } : {}),
+      ...(c?.markitdown ?? n?.markitdown ? { markitdown: c?.markitdown ?? n?.markitdown } : {}),
+    };
+  })();
+
   return {
     enabled: true,
     repo,
@@ -411,6 +451,7 @@ export function resolveAutoUpdateConfig(
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
+    ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
   };
 }
 

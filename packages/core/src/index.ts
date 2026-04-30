@@ -39,11 +39,21 @@ export {
 } from './errors.js';
 export {
   dkgHomeDir,
+  resolveDkgConfigHome,
+  dkgAuthTokenPath,
+  isDkgMonorepoRoot,
+  findDkgMonorepoRoot,
+  resolveDkgHome,
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
   loadAuthTokenSync,
   loadAuthToken,
+  loadAgentAuthTokenSync,
+  loadAgentAuthToken,
+  type KeystoreAuthTokenResult,
+  MultipleAgentsError,
+  toEip55Checksum,
 } from './dkg-home.js';
 export {
   type Quad as ExtractionQuad,

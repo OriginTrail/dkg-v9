@@ -332,7 +332,7 @@ export class EVMChainAdapter implements ChainAdapter {
     return id;
   }
 
-  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     await this.init();
 
     let identityId = await this.getIdentityId();
@@ -370,21 +370,40 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    // Step 2: Stake if token is available (separate try/catch so profile isn't lost)
+    // Step 2: Stake via V10 path (separate try/catch so profile isn't lost).
+    //
+    // V10 consolidation (v4.0.0): stake routes through
+    // `DKGStakingConvictionNFT.createConviction(identityId, amount, lockTier)`,
+    // which mints a V10 NFT position, writes `nodeStakeV10` in
+    // `ConvictionStakingStorage`, and pulls TRAC into the V10 vault (CSS) via
+    // `StakingV10`. The legacy V8 `Staking.stake` path updates only V8
+    // `StakingStorage` and leaves `nodeStakeV10 = 0`, so
+    // `RandomSampling.calculateNodeScore` (which reads `getNodeStakeV10`
+    // exclusively) computes zero and node scores never grow — exactly the
+    // bug we just chased on devnet. This path mirrors `scripts/devnet.sh`.
+    //
+    // TRAC allowance must go to `StakingV10` (the actual `transferFrom`
+    // caller), NOT to the NFT — the NFT is only the entry point and never
+    // custodies TRAC.
     const stakeAmount = options?.stakeAmount ?? ethers.parseEther('50000');
+    const lockTier = options?.lockTier ?? 1; // tier 1 = 1-month, cheapest non-zero multiplier
     if (stakeAmount > 0n && this.contracts.token) {
       try {
-        const stakingAddr = await this.contracts.staking!.getAddress();
-        const approveTx = await this.contracts.token.approve(stakingAddr, stakeAmount);
+        const stakingNFT = await this.resolveContract('DKGStakingConvictionNFT');
+        const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+        if (stakingV10Addr === ethers.ZeroAddress) {
+          throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+        }
+        const approveTx = await this.contracts.token.approve(stakingV10Addr, stakeAmount);
         await approveTx.wait();
         // Wait an extra block for state propagation on public RPCs
         await new Promise(r => setTimeout(r, 2000));
 
-        const stakeTx = await this.contracts.staking!.stake(identityId, stakeAmount);
+        const stakeTx = await stakingNFT.createConviction(identityId, stakeAmount, lockTier);
         await stakeTx.wait();
       } catch (err) {
         console.warn(
-          `[ensureProfile] Staking failed for identity ${identityId} (profile exists, stake manually): ` +
+          `[ensureProfile] V10 staking failed for identity ${identityId} (profile exists, stake manually via DKGStakingConvictionNFT.createConviction): ` +
           (err instanceof Error ? err.message : String(err)),
         );
       }

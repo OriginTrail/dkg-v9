@@ -82,7 +82,7 @@ export class MockChainAdapter implements ChainAdapter {
     return existing ?? 0n;
   }
 
-  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     const existing = await this.getIdentityId();
     if (existing > 0n) return existing;
     const id = this.nextIdentityId++;

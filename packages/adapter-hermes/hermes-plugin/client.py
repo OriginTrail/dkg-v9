@@ -93,6 +93,11 @@ def _is_bearer_token_char(char: str) -> bool:
     return char.isascii() and (char.isalnum() or char in "._~+/=-")
 
 
+def _looks_already_exists(message: Any) -> bool:
+    lower = str(message or "").lower()
+    return "already exists" in lower or "already exist" in lower or "already registered" in lower
+
+
 def _is_blocked_import_path(path: Path) -> bool:
     name = path.name.lower()
     if name in _BLOCKED_IMPORT_NAMES:
@@ -137,6 +142,7 @@ class DKGClient:
         self._token = _load_auth_token()
         self._session = None  # lazy
         self._agent_address: Optional[str] = None
+        self._peer_id: Optional[str] = None
         self._agent_identity_loaded = False
 
     def _get_session(self):
@@ -166,6 +172,23 @@ class DKGClient:
             r.raise_for_status()
             return r.json()
         except Exception as e:
+            response = getattr(e, "response", None)
+            if response is not None:
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        body = dict(body)
+                        body.setdefault("success", False)
+                        if body.get("error") is not None:
+                            body["error"] = redact_text(str(body.get("error")), self._token)
+                        elif body.get("message") is not None:
+                            body["error"] = redact_text(str(body.get("message")), self._token)
+                        return body
+                except Exception:
+                    pass
+                response_text = getattr(response, "text", "")
+                if response_text:
+                    return {"success": False, "error": redact_text(str(response_text), self._token)}
             return {"success": False, "error": redact_text(str(e), self._token)}
 
     # -- Health ----------------------------------------------------------------
@@ -194,6 +217,16 @@ class DKGClient:
             agent_address = identity.get("agentAddress") if isinstance(identity, dict) else None
             if isinstance(agent_address, str) and agent_address:
                 self._agent_address = agent_address
+            peer_id = identity.get("peerId") if isinstance(identity, dict) else None
+            if isinstance(peer_id, str) and peer_id:
+                self._peer_id = peer_id
+            if not self._agent_address and not self._peer_id:
+                status = self.status()
+                status_peer_id = status.get("peerId") if isinstance(status, dict) else None
+                if isinstance(status_peer_id, str) and status_peer_id:
+                    self._peer_id = status_peer_id
+        if not self._agent_address and self._peer_id:
+            return self._peer_id
         return self._agent_address
 
     # -- SPARQL query ----------------------------------------------------------
@@ -241,7 +274,15 @@ class DKGClient:
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
-        return self._post("/api/assertion/create", payload)
+        result = self._post("/api/assertion/create", payload)
+        if isinstance(result, dict) and result.get("success") is False and _looks_already_exists(result.get("error")):
+            return {
+                "success": True,
+                "alreadyExists": True,
+                "contextGraphId": context_graph_id,
+                "name": name,
+            }
+        return result
 
     def write_assertion(self, assertion_name: str, context_graph_id: str, quads: List[Dict[str, str]],
                         sub_graph_name: Optional[str] = None) -> Dict[str, Any]:

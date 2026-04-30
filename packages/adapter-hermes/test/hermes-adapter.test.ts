@@ -355,6 +355,71 @@ describe('Hermes profile setup helpers', () => {
     expect(config.require_wallet_check).toBe(false);
   });
 
+  it('loads provider guard aliases from dkg.json', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-provider-config-'));
+    writeFileSync(join(hermesHome, 'dkg.json'), JSON.stringify({
+      publish_guard: {
+        defaultToolExposure: 'direct',
+        allowDirectPublish: true,
+      },
+      allowContextGraphAdminTools: true,
+    }));
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+home = Path(r"${hermesHome.replace(/\\/g, '\\\\')}")
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+registry.tool_error = lambda message: json.dumps({"error": message})
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+config = module._load_config()
+assert config["publish_tool"] == "direct", config
+assert config["allow_direct_publish"] is True, config
+assert config["allow_context_graph_admin_tools"] is True, config
+(home / "dkg.json").write_text(json.dumps({"allow_context_graph_admin_tools": True}), encoding="utf-8")
+config = module._load_config()
+assert config["allow_context_graph_admin_tools"] is True, config
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('rejects non-loopback bridge URLs during setup', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
 
@@ -1210,6 +1275,8 @@ missing = [name for name in expected_default if name not in names]
 assert missing == [], missing
 assert "dkg_publish" not in names, names
 assert "dkg_shared_memory_publish" not in names, names
+subscribe_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_subscribe")
+assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], subscribe_schema
 
 guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
 assert "disabled by the adapter publish guard" in guarded, guarded
@@ -1295,6 +1362,7 @@ client._get = lambda path: calls.append(("GET", path, {})) or {"ok": True}
 bad_cg = client.create_context_graph("Bad", cg_id="Bad:Id")
 assert bad_cg["success"] is False, bad_cg
 client.create_context_graph("My Project", "desc")
+client.subscribe("cg:test", include_shared_memory=True)
 client.write_assertion("a b", "cg:test", [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "sub")
 client.discard_assertion("a b", "cg:test")
 client.assertion_history("a b", "cg:test", agent_address="agent", sub_graph_name="sub")
@@ -1307,6 +1375,7 @@ client.publish("cg:test", selection=["urn:root"], clear_after=False, sub_graph_n
 
 assert calls == [
     ("POST", "/api/context-graph/create", {"id": "my-project", "name": "My Project", "description": "desc"}),
+    ("POST", "/api/context-graph/subscribe", {"contextGraphId": "cg:test", "includeSharedMemory": True}),
     ("POST", "/api/assertion/a%20b/write", {"contextGraphId": "cg:test", "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "subGraphName": "sub"}),
     ("POST", "/api/assertion/a%20b/discard", {"contextGraphId": "cg:test"}),
     ("GET", "/api/assertion/a%20b/history?contextGraphId=cg%3Atest&agentAddress=agent&subGraphName=sub", {}),
@@ -1317,6 +1386,333 @@ assert calls == [
     ("GET", "/api/context-graph/cg%3Atest/join-requests", {}),
     ("POST", "/api/shared-memory/publish", {"contextGraphId": "cg:test", "selection": ["urn:root"], "clearAfter": False, "subGraphName": "sub"}),
 ], calls
+
+client_identity = client_module.DKGClient("http://127.0.0.1:9200")
+def fake_get(path):
+    if path == "/api/agent/identity":
+        return {"peerId": "peer-from-identity"}
+    raise AssertionError(path)
+client_identity._get = fake_get
+assert client_identity._resolve_agent_address() == "peer-from-identity"
+
+client_status = client_module.DKGClient("http://127.0.0.1:9200")
+def fake_status_get(path):
+    if path == "/api/agent/identity":
+        return {"success": False}
+    if path == "/api/status":
+        return {"peerId": "peer-from-status"}
+    raise AssertionError(path)
+client_status._get = fake_status_get
+assert client_status._resolve_agent_address() == "peer-from-status"
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('enforces OpenClaw-parity Hermes tool contracts', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-contracts-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+registry.tool_error = lambda message: json.dumps({"error": message})
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+client_spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg.client",
+    plugin_dir / "client.py",
+)
+client_module = importlib.util.module_from_spec(client_spec)
+sys.modules["plugins.memory.dkg.client"] = client_module
+client_spec.loader.exec_module(client_module)
+
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+client = client_module.DKGClient("http://127.0.0.1:9200")
+client._post = lambda path, data=None: {"success": False, "error": "Assertion already exists"}
+exists = client.create_assertion("cg:test", "Hermes")
+assert exists["success"] is True and exists["alreadyExists"] is True, exists
+
+class FakeError(Exception):
+    pass
+
+class FakeResponse:
+    text = '{"error":"Assertion already exists"}'
+
+    def json(self):
+        return {"error": "Assertion already exists"}
+
+    def raise_for_status(self):
+        err = FakeError("400 Client Error")
+        err.response = self
+        raise err
+
+class FakeSession:
+    def post(self, *args, **kwargs):
+        return FakeResponse()
+
+client_http = client_module.DKGClient("http://127.0.0.1:9200")
+client_http._session = FakeSession()
+exists_http = client_http.create_assertion("cg:test", "Hermes")
+assert exists_http["success"] is True and exists_http["alreadyExists"] is True, exists_http
+
+class ExistingAssertionClient:
+    def __init__(self, base_url):
+        self.base_url = base_url
+
+    def health_check(self):
+        return True
+
+    def create_assertion(self, context_graph_id, name):
+        return {"success": True, "alreadyExists": True}
+
+provider_existing = module.DKGMemoryProvider()
+module._load_config = lambda: {
+    "daemon_url": "http://127.0.0.1:9200",
+    "context_graph": "cg:test",
+    "agent_name": "HermesAgent",
+}
+module._load_cache = lambda agent_name: {"memory": [], "user": [], "queued_writes": []}
+client_module.DKGClient = ExistingAssertionClient
+provider_existing._backlog_import_if_needed = lambda hermes_home: None
+provider_existing.initialize("session-1")
+assert provider_existing._assertion_id == "HermesAgent", provider_existing._assertion_id
+
+class QueryClient:
+    def __init__(self):
+        self.queries = []
+
+    def _resolve_agent_address(self):
+        return "peer-default"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.queries.append((sparql, context_graph_id, kwargs))
+        return {"ok": True}
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._context_graph = "default-cg"
+provider._client = QueryClient()
+
+for args, needle in [
+    ({"sparql": "ASK {}", "paranet_id": "old"}, "paranet_id"),
+    ({"sparql": "ASK {}", "include_shared_memory": True}, "include_shared_memory"),
+    ({"sparql": "ASK {}", "context_graph": "old"}, "context_graph"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "bad"}, "view"),
+    ({"sparql": "ASK {}", "view": "working-memory"}, "context_graph_id"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "agent_address": "   "}, "agent_address"),
+]:
+    result = json.loads(provider.handle_tool_call("dkg_query", args))
+    assert needle in result["error"], (args, result)
+
+result = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "context_graph_id": "cg:test",
+    "view": "working-memory",
+    "agent_address": "did:dkg:agent:peer-explicit",
+}))
+assert result["ok"] is True, result
+assert provider._client.queries[-1][2]["agent_address"] == "peer-explicit", provider._client.queries
+
+result = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "context_graph_id": "cg:test",
+    "view": "working-memory",
+}))
+assert result["ok"] is True, result
+assert provider._client.queries[-1][2]["agent_address"] == "peer-default", provider._client.queries
+
+class MessageClient:
+    def __init__(self):
+        self.paths = []
+
+    def _get(self, path):
+        self.paths.append(path)
+        return {"ok": True}
+
+provider._client = MessageClient()
+result = json.loads(provider.handle_tool_call("dkg_read_messages", {
+    "peer": "peer one",
+    "limit": 10,
+    "since": "123",
+}))
+assert result["ok"] is True, result
+assert provider._client.paths == ["/api/messages?peer=peer+one&limit=10&since=123"], provider._client.paths
+
+class RegisterFailClient:
+    def __init__(self):
+        self.published = False
+
+    def register_context_graph(self, context_graph_id, access_policy=None):
+        return {"success": False, "error": "wallet missing"}
+
+    def publish(self, *args, **kwargs):
+        self.published = True
+        raise AssertionError("publish should not run")
+
+provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
+provider._client = RegisterFailClient()
+result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
+    "context_graph_id": "cg:test",
+    "register_if_needed": True,
+}))
+assert result["success"] is False and "wallet missing" in result["error"], result
+assert provider._client.published is False
+
+class AlreadyRegisteredClient(RegisterFailClient):
+    def register_context_graph(self, context_graph_id, access_policy=None):
+        return {"success": False, "error": "context graph already registered"}
+
+    def publish(self, *args, **kwargs):
+        self.published = True
+        return {"success": True}
+
+provider._client = AlreadyRegisteredClient()
+result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
+    "context_graph_id": "cg:test",
+    "register_if_needed": True,
+}))
+assert result["success"] is True and provider._client.published is True, result
+assert "registration" in result, result
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('returns SKILL-shaped Hermes memory_search hits across agent and project layers', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-memory-search-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        return {
+            "result": {
+                "bindings": [{
+                    "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
+                    "pred": {"value": "schema:description"},
+                    "text": {"value": f"alpha beta from {context_graph_id} {kwargs['view']}"},
+                }],
+            },
+        }
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._context_graph = "project-cg"
+provider._cache = {}
+
+result = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha beta", "limit": 10}))
+assert result["query"] == "alpha beta", result
+assert result["scope"] == "project-cg", result
+assert result["count"] == 6, result
+layers = [hit["layer"] for hit in result["hits"]]
+assert set(layers) == {
+    "agent-context-wm",
+    "agent-context-swm",
+    "agent-context-vm",
+    "project-wm",
+    "project-swm",
+    "project-vm",
+}, layers
+assert layers[:2] == ["agent-context-vm", "project-vm"], layers
+assert {hit["source"] for hit in result["hits"] if hit["layer"].startswith("agent-context")} == {"sessions"}, result
+assert {hit["source"] for hit in result["hits"] if hit["layer"].startswith("project")} == {"memory"}, result
+assert all(hit["score"] == 1.0 for hit in result["hits"]), result
+assert all("_rank" not in hit for hit in result["hits"]), result
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

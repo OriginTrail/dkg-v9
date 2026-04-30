@@ -67,10 +67,11 @@ Tools-only mode preserves `memory.provider` in `config.yaml`. It still writes
 adapter state and installs the provider package files so `status`, `doctor`,
 `disconnect`, `reconnect`, and `uninstall` can inspect and repair the
 DKG/Hermes profile relationship. Hermes-provider DKG tools such as
-`dkg_memory`, `dkg_query`, `dkg_share`, and status/wallet/network helpers
-require provider mode in this release. The OpenClaw `memory_search` tool and
-`<recalled-memory>` auto-recall block documented in the node `SKILL.md` are
-OpenClaw runtime surfaces, not the Hermes tools-only surface.
+`dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`,
+assertion/sub-graph helpers, and status/wallet/network helpers require
+provider mode in this release. The `<recalled-memory>` auto-recall block
+documented in the node `SKILL.md` remains an OpenClaw runtime surface, not the
+Hermes tools-only surface.
 
 `--memory-mode ask` is reserved for a future interactive setup flow and is not
 supported in this release.

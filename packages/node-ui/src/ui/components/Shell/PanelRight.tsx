@@ -24,7 +24,7 @@ import {
 } from '../../api.js';
 import { api } from '../../api-wrapper.js';
 
-interface LocalAgentMessage {
+export interface LocalAgentMessage {
   id: string;
   uri?: string;
   turnId?: string;
@@ -212,6 +212,17 @@ function mergeLocalAgentMessages(existing: LocalAgentMessage[], incoming: LocalA
     merged.push(message);
   }
   return merged;
+}
+
+export function adoptLocalAgentTurnId(
+  messages: LocalAgentMessage[],
+  correlationId: string,
+  turnId?: string,
+): LocalAgentMessage[] {
+  const stableTurnId = typeof turnId === 'string' && turnId.trim() ? turnId.trim() : correlationId;
+  if (!stableTurnId || stableTurnId === correlationId) return messages;
+  return messages.map((message) =>
+    message.turnId === correlationId ? { ...message, turnId: stableTurnId } : message);
 }
 
 function normalizeMessageContent(content: string): string {
@@ -1559,11 +1570,12 @@ export function PanelRight() {
       });
 
       updateLocalMessages(conversationKey, (prev) =>
-        prev.map((message) =>
+        adoptLocalAgentTurnId(prev, correlationId, result.turnId).map((message) =>
           message.id === assistantId
             ? {
                 ...message,
                 content: result.text || message.content,
+                turnId: result.turnId?.trim() || message.turnId,
                 streaming: false,
                 ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               }

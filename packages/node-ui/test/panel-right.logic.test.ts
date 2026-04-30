@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 let ConnectedAgentsTab: any;
+let adoptLocalAgentTurnId: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
@@ -36,6 +37,7 @@ beforeAll(async () => {
 
   const panelRight = await import('../src/ui/components/Shell/PanelRight.js');
   ConnectedAgentsTab = panelRight.ConnectedAgentsTab;
+  adoptLocalAgentTurnId = panelRight.adoptLocalAgentTurnId;
   getLocalAgentConversationStateKey = panelRight.getLocalAgentConversationStateKey;
   markLocalAgentIntegrationDisconnected = panelRight.markLocalAgentIntegrationDisconnected;
   networkPeerCardStatusClass = panelRight.networkPeerCardStatusClass;
@@ -111,6 +113,19 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
 }
 
 describe('PanelRight logic helpers', () => {
+  it('adopts stable local-agent turn ids after a streamed final response', () => {
+    const messages = [
+      { id: 'user', role: 'user', content: 'hello', turnId: 'corr-1' },
+      { id: 'assistant', role: 'assistant', content: 'hi', turnId: 'corr-1', streaming: true },
+      { id: 'other', role: 'assistant', content: 'older', turnId: 'stable-0' },
+    ];
+
+    const updated = adoptLocalAgentTurnId(messages, 'corr-1', 'stable-1');
+
+    expect(updated.map((message: any) => message.turnId)).toEqual(['stable-1', 'stable-1', 'stable-0']);
+    expect(adoptLocalAgentTurnId(messages, 'corr-1')).toBe(messages);
+  });
+
   it('resolves conversation state keys and session preservation correctly', () => {
     const integrations = [integration(), integration({ id: 'hermes', name: 'Hermes', persistentChat: false })];
     expect(getLocalAgentConversationStateKey('openclaw', null)).toBe('integration:openclaw');

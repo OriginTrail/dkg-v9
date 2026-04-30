@@ -88,11 +88,9 @@ export interface HermesChannelAttachmentRef {
 }
 
 export interface HermesChannelContextEntry {
-  uri?: string;
-  title?: string;
-  text: string;
-  source?: string;
-  trust?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+  key: string;
+  label: string;
+  value: string;
 }
 
 export interface HermesChannelSendPayload {
@@ -101,6 +99,8 @@ export interface HermesChannelSendPayload {
   sessionId?: string;
   profile?: string;
   contextGraphId?: string;
+  currentAgentAddress?: string;
+  identity?: string;
   contextEntries?: HermesChannelContextEntry[];
   attachmentRefs?: HermesChannelAttachmentRef[];
   metadata?: Record<string, unknown>;
@@ -120,17 +120,19 @@ export type HermesChannelStreamEvent =
 
 export interface HermesChannelPersistTurnPayload {
   sessionId: string;
-  turnId: string;
+  turnId?: string;
   correlationId?: string;
   userMessage: string;
   assistantReply: string;
   profile?: string;
   contextGraphId?: string;
   attachmentRefs?: HermesChannelAttachmentRef[];
-  idempotencyKey: string;
+  idempotencyKey?: string;
+  currentAgentAddress?: string;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+  metadata?: Record<string, unknown>;
   persistenceState?: 'stored' | 'failed' | 'pending';
-  failureReason?: string | null;
-  source?: 'hermes-provider' | 'hermes-channel';
+  failureReason?: string;
 }
 
 export interface HermesLocalAgentIntegrationPayload {

@@ -19,9 +19,11 @@ import json
 import logging
 import os
 import hashlib
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
@@ -64,10 +66,10 @@ def _load_config() -> dict:
                     config["allow_direct_publish"] = publish_guard.get("allowDirectPublish")
                 elif publish_guard.get("allow_direct_publish") is not None:
                     config["allow_direct_publish"] = publish_guard.get("allow_direct_publish")
-            if data.get("allowContextGraphAdminTools") is not None:
-                config["allow_context_graph_admin_tools"] = data.get("allowContextGraphAdminTools")
-            elif data.get("allow_context_graph_admin_tools") is not None:
-                config["allow_context_graph_admin_tools"] = data.get("allow_context_graph_admin_tools")
+            if file_cfg.get("allowContextGraphAdminTools") is not None:
+                config["allow_context_graph_admin_tools"] = file_cfg.get("allowContextGraphAdminTools")
+            elif file_cfg.get("allow_context_graph_admin_tools") is not None:
+                config["allow_context_graph_admin_tools"] = file_cfg.get("allow_context_graph_admin_tools")
         except Exception:
             pass
 
@@ -207,7 +209,10 @@ DKG_QUERY_SCHEMA = {
             },
             "view": {
                 "type": "string",
-                "description": "Optional layer: working-memory, shared-working-memory, or verified-memory.",
+                "description": (
+                    "Optional layer: working-memory, shared-working-memory, or verified-memory. "
+                    "When supplied, context_graph_id is required."
+                ),
             },
             "agent_address": {
                 "type": "string",
@@ -363,6 +368,10 @@ DKG_READ_MESSAGES_SCHEMA = {
                 "type": "integer",
                 "description": "Max messages to return (default: 50).",
             },
+            "since": {
+                "type": "string",
+                "description": "Only messages after this Unix-ms timestamp.",
+            },
         },
         "required": [],
     },
@@ -408,6 +417,10 @@ DKG_SUBSCRIBE_SCHEMA = {
             "context_graph_id": {
                 "type": "string",
                 "description": "Context Graph ID to subscribe to (e.g. 'pharma-research').",
+            },
+            "include_shared_memory": {
+                "type": "boolean",
+                "description": "When true, request a best-effort Shared Working Memory catch-up during subscription.",
             },
         },
         "required": ["context_graph_id"],
@@ -772,9 +785,12 @@ class DKGMemoryProvider(MemoryProvider):
             self._context_graph, self._agent_name,
         )
         assertion_uri = result.get("assertionUri")
-        if assertion_uri:
+        if assertion_uri or result.get("alreadyExists") is True:
             self._assertion_id = self._agent_name
-            logger.info(f"[dkg] Assertion ready: {assertion_uri}")
+            if assertion_uri:
+                logger.info(f"[dkg] Assertion ready: {assertion_uri}")
+            else:
+                logger.info(f"[dkg] Assertion ready: existing {self._assertion_id}")
         elif result.get("success") is False:
             logger.warning(f"[dkg] Assertion creation failed: {result.get('error')} — using direct query")
 
@@ -1146,13 +1162,33 @@ class DKGMemoryProvider(MemoryProvider):
         sparql = args.get("sparql", "")
         if not sparql:
             return tool_error("SPARQL query is required.")
-        cg = _first_text(args, "context_graph_id", "context_graph") or self._context_graph
+        if args.get("paranet_id") is not None or args.get("paranetId") is not None:
+            return tool_error('"paranet_id" is not a supported parameter. Use "context_graph_id".')
+        if args.get("include_shared_memory") is not None or args.get("includeSharedMemory") is not None:
+            return tool_error(
+                '"include_shared_memory" is no longer supported on dkg_query. '
+                'Omit "view" for the legacy data-graph path, or use '
+                '"view: shared-working-memory" for SWM-only reads.'
+            )
+        if args.get("context_graph") is not None:
+            return tool_error('"context_graph" is not a supported parameter on dkg_query. Use "context_graph_id".')
+        cg = _first_text(args, "context_graph_id") or self._context_graph
         view = _first_text(args, "view")
+        if view and view not in ("working-memory", "shared-working-memory", "verified-memory"):
+            return tool_error('"view" must be one of: working-memory, shared-working-memory, verified-memory.')
+        if view and not _first_text(args, "context_graph_id"):
+            return tool_error(f'"view: {view}" requires "context_graph_id".')
+        if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
+            return tool_error('"agent_address" must be a string.')
+        if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():
+            return tool_error('"agent_address" must be a non-empty string.')
         agent_address = _first_text(args, "agent_address")
         if view == "working-memory" and not agent_address:
             agent_address = self._client._resolve_agent_address()
             if not agent_address:
                 return tool_error('"view: working-memory" requires agent_address; retry after identity is available.')
+        if view == "working-memory" and agent_address:
+            agent_address = _normalize_wm_agent_address(agent_address)
         result = self._client.query(
             sparql,
             cg,
@@ -1176,12 +1212,13 @@ class DKGMemoryProvider(MemoryProvider):
 
         keywords = [k for k in query.lower().split() if len(k) >= 2]
         if not keywords:
-            return json.dumps({"query": query, "count": 0, "hits": []})
+            return json.dumps({"query": query, "count": 0, "scope": None, "hits": []})
 
         sparql = _build_memory_search_sparql(keywords, limit)
         agent_address = self._client._resolve_agent_address()
+        project_context_graph = _first_text(args, "context_graph", "context_graph_id") or self._context_graph
         context_graphs: List[str] = []
-        for cg in (_first_text(args, "context_graph", "context_graph_id") or self._context_graph, "agent-context"):
+        for cg in ("agent-context", project_context_graph):
             if cg and cg not in context_graphs:
                 context_graphs.append(cg)
 
@@ -1209,25 +1246,56 @@ class DKGMemoryProvider(MemoryProvider):
                     if not text:
                         continue
                     score = _keyword_overlap(text, keywords)
+                    layer = _memory_search_layer(cg, view)
+                    source = "sessions" if cg == "agent-context" else "memory"
                     hits.append({
                         "snippet": text[:500],
-                        "layer": view,
-                        "source": cg,
-                        "score": round(score * weight, 4),
-                        "path": f"dkg://{cg}/{view}/{_stable_scope_hash(uri or text)}",
+                        "layer": layer,
+                        "source": source,
+                        "score": round(score, 4),
+                        "_rank": score * weight,
+                        "path": f"dkg://{cg}/{layer}/{_stable_scope_hash(uri or text)}",
                         "predicate": pred,
                     })
 
         if not hits:
-            return json.dumps(_cache_memory_search(query, self._cache, limit))
+            fallback = _cache_memory_search(query, self._cache, limit)
+            fallback["scope"] = project_context_graph if project_context_graph != "agent-context" else None
+            return json.dumps(fallback)
 
+        trust_order = {
+            "agent-context-vm": 3,
+            "project-vm": 3,
+            "agent-context-swm": 2,
+            "project-swm": 2,
+            "agent-context-wm": 1,
+            "project-wm": 1,
+        }
         deduped: Dict[str, Dict[str, Any]] = {}
         for hit in hits:
             key = f"{hit.get('source')}::{hit.get('path')}"
-            if key not in deduped or float(hit.get("score", 0)) > float(deduped[key].get("score", 0)):
+            existing = deduped.get(key)
+            if not existing:
                 deduped[key] = hit
-        ranked = sorted(deduped.values(), key=lambda h: float(h.get("score", 0)), reverse=True)[:limit]
-        return json.dumps({"query": query, "count": len(ranked), "hits": ranked})
+                continue
+            hit_layer = str(hit.get("layer") or "project-wm")
+            existing_layer = str(existing.get("layer") or "project-wm")
+            if (
+                trust_order.get(hit_layer, 1) > trust_order.get(existing_layer, 1)
+                or (
+                    trust_order.get(hit_layer, 1) == trust_order.get(existing_layer, 1)
+                    and float(hit.get("score", 0)) > float(existing.get("score", 0))
+                )
+            ):
+                deduped[key] = hit
+        ranked = sorted(deduped.values(), key=lambda h: float(h.get("_rank", 0)), reverse=True)[:limit]
+        public_hits = [{k: v for k, v in hit.items() if k != "_rank"} for hit in ranked]
+        return json.dumps({
+            "query": query,
+            "count": len(public_hits),
+            "scope": project_context_graph if project_context_graph != "agent-context" else None,
+            "hits": public_hits,
+        })
 
     def _handle_share(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -1289,11 +1357,17 @@ class DKGMemoryProvider(MemoryProvider):
         elif not isinstance(clear_after, bool):
             return tool_error("clear_after must be a boolean.")
         registration = None
+        if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
+            return tool_error("register_if_needed must be a boolean.")
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
             if access_policy is not None and access_policy not in (0, 1):
                 return tool_error("access_policy must be 0 or 1.")
             registration = self._client.register_context_graph(cg, access_policy)
+            if _client_result_failed(registration):
+                error = str(registration.get("error") or registration.get("message") or "").lower()
+                if "already registered" not in error and "already exists" not in error:
+                    return json.dumps(registration)
         result = self._client.publish(
             cg,
             selection=selection,
@@ -1372,7 +1446,9 @@ class DKGMemoryProvider(MemoryProvider):
             params["peer"] = args["peer"]
         if args.get("limit"):
             params["limit"] = str(args["limit"])
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        if args.get("since"):
+            params["since"] = str(args["since"])
+        qs = urlencode(params)
         path = f"/api/messages?{qs}" if qs else "/api/messages"
         return json.dumps(self._client._get(path))
 
@@ -1839,6 +1915,22 @@ def _first_text(args: Dict[str, Any], *keys: str) -> str:
     return ""
 
 
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _normalize_wm_agent_address(agent_address: str) -> str:
+    value = agent_address.strip()
+    if value.startswith("did:dkg:agent:"):
+        value = value[len("did:dkg:agent:"):]
+    if _ETH_ADDRESS_RE.match(value):
+        try:
+            from eth_utils import to_checksum_address
+            return to_checksum_address(value)
+        except Exception:
+            return value
+    return value
+
+
 def _required_cg_and_name(args: Dict[str, Any]) -> tuple[str, str]:
     return _first_text(args, "context_graph_id", "context_graph"), _first_text(args, "name")
 
@@ -1909,6 +2001,16 @@ def _keyword_overlap(text: str, keywords: List[str]) -> float:
     return len([keyword for keyword in keywords if keyword in lower]) / len(keywords)
 
 
+def _memory_search_layer(context_graph_id: str, view: str) -> str:
+    suffix = {
+        "working-memory": "wm",
+        "shared-working-memory": "swm",
+        "verified-memory": "vm",
+    }.get(view, "wm")
+    prefix = "agent-context" if context_graph_id == "agent-context" else "project"
+    return f"{prefix}-{suffix}"
+
+
 def _cache_memory_search(query: str, cache: Dict[str, Any], limit: int) -> Dict[str, Any]:
     keywords = [k for k in query.lower().split() if len(k) >= 2]
     hits: List[Dict[str, Any]] = []
@@ -1931,7 +2033,7 @@ def _cache_memory_search(query: str, cache: Dict[str, Any], limit: int) -> Dict[
                 "path": f"local-cache://{target}/{_stable_scope_hash(content)}",
             })
     ranked = sorted(hits, key=lambda h: float(h.get("score", 0)), reverse=True)[:limit]
-    return {"query": query, "count": len(ranked), "hits": ranked, "offline": True}
+    return {"query": query, "count": len(ranked), "scope": None, "hits": ranked, "offline": True}
 
 
 def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:

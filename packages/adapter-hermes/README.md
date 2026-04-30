@@ -107,12 +107,13 @@ dkg hermes setup --profile research --memory-mode tools-only
 Tools-only mode preserves the existing provider and still writes DKG adapter
 state (`dkg.json`, the provider plugin files, and setup-state metadata) so
 status, doctor, reconnect, and uninstall can reason about the profile. In this
-release, Hermes-provider DKG tools such as `dkg_memory`, `dkg_query`,
-`dkg_share`, and status/wallet/network helpers are available when Hermes
-activates the DKG memory provider; a separate general Hermes tool plugin for
-tools-only mode is future work. The OpenClaw `memory_search` tool and
-`<recalled-memory>` auto-recall block documented in the node `SKILL.md` are
-OpenClaw runtime surfaces, not the Hermes tools-only surface in this release.
+release, Hermes-provider DKG tools such as `dkg_memory`, `memory_search`,
+`dkg_query`, `dkg_share`, assertion/sub-graph helpers, and
+status/wallet/network helpers are available when Hermes activates the DKG
+memory provider; a separate general Hermes tool plugin for tools-only mode is
+future work. The `<recalled-memory>` auto-recall block documented in the node
+`SKILL.md` remains an OpenClaw runtime surface, not a Hermes tools-only
+surface in this release.
 
 ## Hermes Memory Provider
 

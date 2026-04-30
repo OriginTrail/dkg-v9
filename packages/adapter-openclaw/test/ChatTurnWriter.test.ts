@@ -766,6 +766,34 @@ describe("ChatTurnWriter", () => {
     writeSpy.mockRestore();
   });
 
+  it("T105 - external marker write failure preserves a pre-existing exact marker", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-preexisting",
+      user: "preexisting question",
+      assistant: "preexisting answer",
+    });
+
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const marker = (writer as any).externalTurnMarkerId(
+      "node-ui-corr-preexisting",
+      "preexisting question",
+      "preexisting answer",
+    );
+    expect((writer as any).externalTurnMarkers.get(externalCursorKey)?.get(marker)).toBe(1);
+
+    const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile").mockReturnValueOnce(false);
+    await expect(writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-preexisting",
+      user: "preexisting question",
+      assistant: "preexisting answer",
+    })).rejects.toThrow("Failed to write external chat-turn marker");
+
+    expect((writer as any).externalTurnMarkers.get(externalCursorKey)?.get(marker)).toBe(1);
+    writeSpy.mockRestore();
+  });
+
   it("T94 — external marker write failure preserves unrelated debounce timers", async () => {
     writer.onAgentEnd({
       sessionId: "test",
@@ -1092,7 +1120,7 @@ describe("ChatTurnWriter", () => {
     }
   });
 
-  it("T97 - setStateDir adds external marker multiplicities", async () => {
+  it("T97 - setStateDir deduplicates exact external markers", async () => {
     const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-counts-"));
     try {
       const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
@@ -1111,12 +1139,12 @@ describe("ChatTurnWriter", () => {
       await writer.setStateDir(destinationStateDir);
 
       const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
-      expect(bucket?.get(marker)).toBe(2);
+      expect(bucket?.get(marker)).toBe(1);
       const persisted = JSON.parse(fs.readFileSync(
         path.join(destinationStateDir, "dkg-adapter", "chat-turn-watermarks.json"),
         "utf-8",
       ));
-      expect(persisted[externalCursorKey].m[marker]).toBe(2);
+      expect(persisted[externalCursorKey].m[marker]).toBe(1);
     } finally {
       fs.rmSync(destinationStateDir, { recursive: true, force: true });
     }
@@ -1182,6 +1210,9 @@ describe("ChatTurnWriter", () => {
         "final fail question",
         "final fail answer",
       );
+      fs.writeFileSync(path.join(newDir, "chat-turn-watermarks.json"), JSON.stringify({
+        [externalCursorKey]: { m: { [marker]: 1 } },
+      }));
       const realWrite = dkw.writeWatermarkFile.bind(dkw);
       const writeSpy = vi.spyOn(dkw, "writeWatermarkFile")
         .mockImplementationOnce((target: string, override: any) => {
@@ -1195,10 +1226,16 @@ describe("ChatTurnWriter", () => {
       expect(dkw.stateDir).toBe(originalStateDir);
       expect(dkw.watermarkFilePath).toBe(originalWatermarkFilePath);
       expect(dkw.externalTurnMarkers.get(externalCursorKey)?.get(marker)).toBe(1);
-      expect(writeSpy).toHaveBeenCalledTimes(3);
+      expect(writeSpy).toHaveBeenCalledTimes(4);
       const persistedOldPath = JSON.parse(fs.readFileSync(originalWatermarkFilePath, "utf-8"));
       expect(persistedOldPath[externalCursorKey].m[marker]).toBe(1);
       writeSpy.mockRestore();
+
+      await writer.setStateDir(destinationStateDir);
+      expect(dkw.stateDir).toBe(destinationStateDir);
+      expect(dkw.watermarkFilePath).toBe(path.join(newDir, "chat-turn-watermarks.json"));
+      const persistedNewPath = JSON.parse(fs.readFileSync(dkw.watermarkFilePath, "utf-8"));
+      expect(persistedNewPath[externalCursorKey].m[marker]).toBe(1);
     } finally {
       fs.rmSync(destinationStateDir, { recursive: true, force: true });
     }

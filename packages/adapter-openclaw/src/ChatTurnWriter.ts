@@ -257,12 +257,15 @@ export class ChatTurnWriter {
     // persist's increment that landed in live during the write
     // window is preserved. On write failure live is unchanged —
     // concurrent persists keep their advances; nothing got wiped.
+    const destinationFileExisted = fs.existsSync(newWatermarkFilePath);
+    const destinationWm = new Map<string, number>();
+    const destinationBc = new Map<string, number>();
+    const destinationMarkers = new Map<string, Map<string, number>>();
     const mergedWm = new Map(this.cachedWatermarks);
     const mergedBc = new Map(this.w4bSessionCounts);
-    const baseMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
     const mergedMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
     try {
-      if (fs.existsSync(newWatermarkFilePath)) {
+      if (destinationFileExisted) {
         const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === "object") {
@@ -276,12 +279,19 @@ export class ChatTurnWriter {
               if (typeof obj.b === "number") b = obj.b;
               if (obj.m && typeof obj.m === "object" && !Array.isArray(obj.m)) {
                 this.mergeExternalTurnMarkers(
+                  destinationMarkers,
+                  key,
+                  obj.m as Record<string, unknown>,
+                );
+                this.mergeExternalTurnMarkers(
                   mergedMarkers,
                   key,
                   obj.m as Record<string, unknown>,
                 );
               }
             }
+            destinationWm.set(key, w);
+            destinationBc.set(key, b);
             mergedWm.set(key, Math.max(mergedWm.get(key) ?? -1, w));
             mergedBc.set(key, Math.max(mergedBc.get(key) ?? 0, b));
           }
@@ -323,9 +333,8 @@ export class ChatTurnWriter {
       // persist advanced live's watermark during the write window,
       // its increment is preserved (max takes the higher of merged-
       // from-destination and post-flush-live). External markers are
-      // multiplicities, so only add the destination delta beyond the
-      // baseline snapshot; adding the whole merged snapshot would
-      // double-count markers that were already live before migration.
+      // exact daemon-success facts, so identical marker keys merge
+      // idempotently instead of adding counts.
       for (const [key, val] of mergedWm) {
         this.cachedWatermarks.set(key, Math.max(this.cachedWatermarks.get(key) ?? -1, val));
       }
@@ -335,9 +344,7 @@ export class ChatTurnWriter {
       for (const [key, markers] of mergedMarkers) {
         const live = this.externalTurnMarkers.get(key) ?? new Map<string, number>();
         for (const [marker, count] of markers) {
-          const baseCount = baseMarkers.get(key)?.get(marker) ?? 0;
-          const delta = count - baseCount;
-          if (delta > 0) live.set(marker, (live.get(marker) ?? 0) + delta);
+          if (count > 0) live.set(marker, Math.max(live.get(marker) ?? 0, count));
         }
         if (live.size > 0) this.externalTurnMarkers.set(key, live);
       }
@@ -358,6 +365,13 @@ export class ChatTurnWriter {
             { oldWatermarkFilePath: this.watermarkFilePath, newWatermarkFilePath },
           );
         }
+        this.restoreFailedMigrationDestination(
+          newWatermarkFilePath,
+          destinationFileExisted,
+          destinationWm,
+          destinationBc,
+          destinationMarkers,
+        );
       }
     }
     // T45 - If the initial new-path write failed, live state is still
@@ -684,14 +698,48 @@ export class ChatTurnWriter {
       this.externalTurnMarkerId(opts.turnId, opts.user, opts.assistant),
     ].filter(Boolean);
     if (!externalCursorKey || markers.length === 0) return;
+    const previousMarkerCounts = markers.map((marker) => ({
+      marker,
+      count: this.externalTurnMarkers.get(externalCursorKey)?.get(marker) ?? 0,
+    }));
     for (const marker of markers) {
       this.restoreExternalTurnMarker(externalCursorKey, marker);
     }
     if (!this.commitWatermarkStateSync(externalCursorKey)) {
-      for (const marker of markers) {
-        this.consumeExternalTurnMarker(externalCursorKey, marker);
+      for (const previous of previousMarkerCounts) {
+        this.restoreExternalTurnMarkerCount(externalCursorKey, previous.marker, previous.count);
       }
       throw new Error("Failed to write external chat-turn marker");
+    }
+  }
+
+  private restoreFailedMigrationDestination(
+    newWatermarkFilePath: string,
+    destinationFileExisted: boolean,
+    destinationWm: Map<string, number>,
+    destinationBc: Map<string, number>,
+    destinationMarkers: Map<string, Map<string, number>>,
+  ): void {
+    try {
+      if (destinationFileExisted) {
+        if (!this.writeWatermarkFile(newWatermarkFilePath, {
+          wm: destinationWm,
+          bc: destinationBc,
+          markers: destinationMarkers,
+        })) {
+          this.logger.warn?.(
+            "[ChatTurnWriter.setStateDir] Failed to restore destination file after migration rewrite failure.",
+            { newWatermarkFilePath },
+          );
+        }
+      } else if (fs.existsSync(newWatermarkFilePath)) {
+        fs.unlinkSync(newWatermarkFilePath);
+      }
+    } catch (err) {
+      this.logger.warn?.(
+        "[ChatTurnWriter.setStateDir] Failed to clean up destination file after migration rewrite failure.",
+        { err, newWatermarkFilePath },
+      );
     }
   }
 
@@ -1638,8 +1686,24 @@ export class ChatTurnWriter {
   private restoreExternalTurnMarker(sessionKeyCursor: string, marker: string): void {
     if (!marker) return;
     const bucket = this.externalTurnMarkers.get(sessionKeyCursor) ?? new Map<string, number>();
-    bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+    bucket.set(marker, Math.max(bucket.get(marker) ?? 0, 1));
     this.externalTurnMarkers.set(sessionKeyCursor, bucket);
+  }
+
+  private restoreExternalTurnMarkerCount(sessionKeyCursor: string, marker: string, count: number): void {
+    if (!marker) return;
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
+    if (count > 0) {
+      const target = bucket ?? new Map<string, number>();
+      target.set(marker, count);
+      this.externalTurnMarkers.set(sessionKeyCursor, target);
+      return;
+    }
+    if (!bucket) return;
+    bucket.delete(marker);
+    if (bucket.size === 0) {
+      this.externalTurnMarkers.delete(sessionKeyCursor);
+    }
   }
 
   private cloneExternalTurnMarkers(
@@ -1660,7 +1724,7 @@ export class ChatTurnWriter {
     const bucket = target.get(key) ?? new Map<string, number>();
     for (const [marker, count] of Object.entries(markers)) {
       if (typeof count === "number" && count > 0) {
-        bucket.set(marker, (bucket.get(marker) ?? 0) + count);
+        bucket.set(marker, Math.max(bucket.get(marker) ?? 0, count));
       }
     }
     if (bucket.size > 0) target.set(key, bucket);

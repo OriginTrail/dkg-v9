@@ -396,6 +396,7 @@ describe('ChatMemoryManager', () => {
     ]);
     const queryText = String(mockQuery.calls[1][0]);
     expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls');
+    expect(queryText).toContain('SELECT ?m ?ts WHERE');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 

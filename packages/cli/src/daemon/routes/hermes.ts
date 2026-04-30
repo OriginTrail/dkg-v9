@@ -317,12 +317,22 @@ async function persistHermesTurnWithDuplicateLock(
   const existing = hermesPersistTurnInflight.get(key);
   if (existing) {
     const result = await existing;
-    return result.statusCode === 200
-      ? {
-          statusCode: 200,
-          body: { ok: true, duplicate: true, turnId: payload.turnId },
-        }
-      : result;
+    if (result.statusCode !== 200) return result;
+    const queued = hermesPersistTurnInflight.get(key);
+    if (queued && queued !== existing) {
+      const queuedResult = await queued;
+      if (queuedResult.statusCode !== 200) return queuedResult;
+      return persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
+    }
+    const operation = persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
+    hermesPersistTurnInflight.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (hermesPersistTurnInflight.get(key) === operation) {
+        hermesPersistTurnInflight.delete(key);
+      }
+    }
   }
 
   const operation = persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);

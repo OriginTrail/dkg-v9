@@ -1546,7 +1546,7 @@ exists_http = client_http.create_assertion("cg:test", "Hermes")
 assert exists_http["success"] is True and exists_http["alreadyExists"] is True, exists_http
 
 class ExistingAssertionClient:
-    def __init__(self, base_url):
+    def __init__(self, base_url, **kwargs):
         self.base_url = base_url
 
     def health_check(self):
@@ -1779,6 +1779,7 @@ assert provider._client.calls == [
   it('uploads Hermes assertion imports as safe multipart requests', () => {
     const script = String.raw`
 import importlib.util
+import os
 import sys
 import tempfile
 import types
@@ -1796,6 +1797,13 @@ client_spec.loader.exec_module(client_module)
 
 safe_file = home / "notes.md"
 safe_file.write_text("# Notes", encoding="utf-8")
+outside_file = Path(tempfile.mkdtemp(prefix="hermes-dkg-import-outside-")) / "notes.md"
+outside_file.write_text("# Outside", encoding="utf-8")
+symlink_file = home / "linked-outside.md"
+try:
+    os.symlink(outside_file, symlink_file)
+except (AttributeError, NotImplementedError, OSError):
+    symlink_file = None
 blocked_dir = home / ".dkg"
 blocked_dir.mkdir()
 blocked_file = blocked_dir / "auth.token"
@@ -1826,7 +1834,7 @@ requests_module = types.ModuleType("requests")
 requests_module.post = fake_post
 sys.modules["requests"] = requests_module
 
-client = client_module.DKGClient("http://127.0.0.1:9200")
+client = client_module.DKGClient("http://127.0.0.1:9200", import_roots=[str(home)])
 client._token = "secret-token"
 result = client.import_assertion_file("assertion name", "cg:test", str(safe_file), sub_graph_name="sub")
 assert result == {"success": True}, result
@@ -1845,6 +1853,17 @@ assert "Refusing to import" in blocked["error"], blocked
 blocked_ssh = client.import_assertion_file("assertion", "cg:test", str(ssh_key))
 assert blocked_ssh["success"] is False, blocked_ssh
 assert "Refusing to import" in blocked_ssh["error"], blocked_ssh
+outside = client.import_assertion_file("assertion", "cg:test", str(outside_file))
+assert outside["success"] is False, outside
+assert "safe roots" in outside["error"], outside
+if symlink_file is not None:
+    symlinked = client.import_assertion_file("assertion", "cg:test", str(symlink_file))
+    assert symlinked["success"] is False, symlinked
+    assert "safe roots" in symlinked["error"], symlinked
+client_without_roots = client_module.DKGClient("http://127.0.0.1:9200", import_roots=[])
+no_roots = client_without_roots.import_assertion_file("assertion", "cg:test", str(safe_file))
+assert no_roots["success"] is False, no_roots
+assert "safe roots" in no_roots["error"], no_roots
 assert len(calls) == 1, calls
 `;
     const result = spawnSync('python', ['-B', '-c', script], {

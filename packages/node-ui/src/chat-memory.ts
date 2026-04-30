@@ -1040,6 +1040,12 @@ export class ChatMemoryManager {
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
         `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls WHERE {
+          {
+            SELECT ?m ?ts WHERE {
+              ?m <${SCHEMA}isPartOf> <${sessionUri}> .
+              ?m <${SCHEMA}dateCreated> ?ts
+            } ORDER BY ${order}(?ts) LIMIT ${limit}
+          }
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .

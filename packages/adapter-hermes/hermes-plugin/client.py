@@ -52,6 +52,38 @@ _BLOCKED_IMPORT_DIRS = {
 }
 
 
+def _parse_import_roots(value: Optional[str]) -> List[Path]:
+    if not value:
+        return []
+    roots: List[Path] = []
+    for raw in value.split(os.pathsep):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            root = Path(item).expanduser().resolve(strict=False)
+        except Exception:
+            continue
+        roots.append(root)
+    return roots
+
+
+def _import_roots_env() -> Optional[str]:
+    return (
+        os.environ.get("DKG_HERMES_IMPORT_ROOTS")
+        or os.environ.get("HERMES_DKG_IMPORT_ROOTS")
+        or os.environ.get("DKG_IMPORT_ROOTS")
+    )
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def redact_text(value: str, token: Optional[str] = None) -> str:
     """Remove bearer tokens from text safe to show in logs/errors."""
     redacted = _redact_bearer_tokens(value)
@@ -136,7 +168,8 @@ def _load_auth_token() -> Optional[str]:
 class DKGClient:
     """HTTP client for DKG V10 daemon."""
 
-    def __init__(self, base_url: str = _DEFAULT_URL, timeout: int = _TIMEOUT):
+    def __init__(self, base_url: str = _DEFAULT_URL, timeout: int = _TIMEOUT,
+                 import_roots: Optional[List[str]] = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._token = _load_auth_token()
@@ -144,6 +177,14 @@ class DKGClient:
         self._agent_address: Optional[str] = None
         self._peer_id: Optional[str] = None
         self._agent_identity_loaded = False
+        root_values = import_roots if import_roots is not None else _parse_import_roots(
+            _import_roots_env()
+        )
+        self._import_roots = [
+            Path(root).expanduser().resolve(strict=False)
+            for root in root_values
+            if str(root).strip()
+        ]
 
     def _get_session(self):
         if self._session is None:
@@ -363,6 +404,14 @@ class DKGClient:
                 return {"success": False, "error": f"File not found: {file_path}"}
             if not path.is_file():
                 return {"success": False, "error": f"File not found: {file_path}"}
+            if not self._import_path_allowed(path):
+                return {
+                    "success": False,
+                    "error": (
+                        "File imports are restricted to configured safe roots. "
+                        "Set DKG_HERMES_IMPORT_ROOTS or adapter import_roots to an approved directory."
+                    ),
+                }
             if _is_blocked_import_path(path):
                 return {"success": False, "error": "Refusing to import credentials, wallet, or DKG private state files."}
             if path.stat().st_size > _MAX_IMPORT_FILE_BYTES:
@@ -390,6 +439,11 @@ class DKGClient:
             return r.json()
         except Exception as e:
             return {"success": False, "error": redact_text(str(e), self._token)}
+
+    def _import_path_allowed(self, path: Path) -> bool:
+        if not self._import_roots:
+            return False
+        return any(_path_is_relative_to(path, root) for root in self._import_roots)
 
     # -- Shared Working Memory -------------------------------------------------
 

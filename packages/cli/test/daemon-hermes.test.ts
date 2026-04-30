@@ -1214,6 +1214,63 @@ describe('Hermes daemon routes', () => {
     expect(JSON.parse(second.res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
   });
 
+  it('applies a concurrent stored retry after an in-flight provisional persist completes', async () => {
+    let state: 'pending' | 'stored' | null = null;
+    const storeStarted = deferred();
+    const releaseStore = deferred();
+    const storeChatExchange = vi.fn(async (_sessionId: string, _userMessage: string, _assistantReply: string, _toolCalls: unknown, opts: any) => {
+      storeStarted.resolve();
+      await releaseStore.promise;
+      state = opts.persistenceState;
+    });
+    const recordChatTurnPersistenceTransition = vi.fn(async () => {
+      state = 'stored';
+    });
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      getChatTurnPersistenceState: vi.fn(async () => state),
+      hasChatTurn: vi.fn(async () => state != null),
+      recordChatTurnPersistenceTransition,
+      storeChatExchange,
+    };
+    const first = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: '',
+      turnId: 'turn-1',
+      persistenceState: 'pending',
+    }, memoryManager);
+    const second = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'final reply',
+      turnId: 'turn-1',
+      persistenceState: 'stored',
+    }, memoryManager);
+    first.ctx.agent.importMemories = importMemories;
+    second.ctx.agent.importMemories = importMemories;
+
+    const firstRun = handleHermesRoutes(first.ctx);
+    await storeStarted.promise;
+    const secondRun = handleHermesRoutes(second.ctx);
+    await Promise.resolve();
+    expect(recordChatTurnPersistenceTransition).not.toHaveBeenCalled();
+
+    releaseStore.resolve();
+    await Promise.all([firstRun, secondRun]);
+
+    expect(storeChatExchange).toHaveBeenCalledTimes(1);
+    expect(recordChatTurnPersistenceTransition).toHaveBeenCalledWith(
+      'hermes:default',
+      'turn-1',
+      'stored',
+      expect.objectContaining({ assistantReply: 'final reply' }),
+    );
+    expect(importMemories).toHaveBeenCalledWith('final reply', 'hermes-session:hermes:default:turn:turn-1');
+    expect(JSON.parse(first.res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(JSON.parse(second.res.body)).toEqual({ ok: true, transitioned: true, turnId: 'turn-1' });
+  });
+
   it('keeps persist-turn successful when Hermes extraction import fails', async () => {
     const storeChatExchange = vi.fn(async () => {});
     const importMemories = vi.fn(async () => {

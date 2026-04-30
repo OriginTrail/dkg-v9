@@ -49,6 +49,7 @@ def _load_config() -> dict:
         "publish_tool": "request-only",
         "allow_direct_publish": False,
         "allow_context_graph_admin_tools": False,
+        "import_roots": [],
     }
 
     config_path = get_hermes_home() / "dkg.json"
@@ -89,6 +90,17 @@ def _load_config() -> dict:
     admin_tools_env = os.environ.get("DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS")
     if admin_tools_env is not None and admin_tools_env != "":
         config["allow_context_graph_admin_tools"] = admin_tools_env.lower() in ("1", "true", "yes")
+    import_roots_env = (
+        os.environ.get("DKG_HERMES_IMPORT_ROOTS")
+        or os.environ.get("HERMES_DKG_IMPORT_ROOTS")
+        or os.environ.get("DKG_IMPORT_ROOTS")
+    )
+    if import_roots_env is not None and import_roots_env != "":
+        config["import_roots"] = [root for root in import_roots_env.split(os.pathsep) if root.strip()]
+    elif isinstance(config.get("import_roots"), str):
+        config["import_roots"] = [root for root in config["import_roots"].split(os.pathsep) if root.strip()]
+    elif not isinstance(config.get("import_roots"), list):
+        config["import_roots"] = []
 
     return config
 
@@ -532,13 +544,13 @@ DKG_ASSERTION_DISCARD_SCHEMA = {
 
 DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
     "name": "dkg_assertion_import_file",
-    "description": "Upload a local document into a Working Memory assertion and run daemon extraction.",
+    "description": "Upload a local document from an operator-approved import root into a Working Memory assertion and run daemon extraction.",
     "parameters": {
         "type": "object",
         "properties": {
             "context_graph_id": {"type": "string", "description": "Target context graph ID."},
             "name": {"type": "string", "description": "Assertion name."},
-            "file_path": {"type": "string", "description": "Local file path to upload."},
+            "file_path": {"type": "string", "description": "Local file path to upload. Must be under DKG_HERMES_IMPORT_ROOTS or adapter import_roots."},
             "content_type": {"type": "string", "description": "Optional MIME type override."},
             "ontology_ref": {"type": "string", "description": "Optional ontology reference."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -771,7 +783,8 @@ class DKGMemoryProvider(MemoryProvider):
         # Create HTTP client
         from .client import DKGClient
         self._client = DKGClient(
-            base_url=self._config.get("daemon_url", "http://127.0.0.1:9200")
+            base_url=self._config.get("daemon_url", "http://127.0.0.1:9200"),
+            import_roots=self._config.get("import_roots") or None,
         )
 
         # Check daemon health

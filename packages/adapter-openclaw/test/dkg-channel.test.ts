@@ -594,6 +594,63 @@ describe('DkgChannelPlugin', () => {
     }));
   });
 
+  it('normalizes gateway status account ids and preserves fields when reporting stopped', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    let currentStatus: Record<string, unknown> = {
+      accountId: '   ',
+      enabled: true,
+      configured: true,
+      linked: true,
+      mode: 'webhook',
+      port: 9201,
+      displayName: 'DKG UI',
+    };
+    const setStatus = vi.fn((status: Record<string, unknown>) => {
+      currentStatus = status;
+    });
+    const lifecycleCtx = {
+      accountId: '   ',
+      account: { accountId: '   ' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => currentStatus,
+      setStatus,
+    };
+    const lifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'default',
+        enabled: true,
+        configured: true,
+        linked: true,
+        running: true,
+        connected: true,
+        displayName: 'DKG UI',
+      }));
+    });
+
+    await registeredPlugin.gateway.stopAccount(lifecycleCtx);
+    await lifecycle;
+
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'default',
+      enabled: true,
+      configured: true,
+      linked: true,
+      running: false,
+      connected: false,
+      restartPending: false,
+      mode: 'webhook',
+      port: expect.any(Number),
+      displayName: 'DKG UI',
+    }));
+  });
+
   it('settles plugin-level gateway lifecycle only after bridge shutdown completes', async () => {
     const registerChannel = trackFn();
     const api = makeApi({ registerChannel });

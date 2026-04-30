@@ -665,8 +665,7 @@ export class DkgChannelPlugin {
 
   private reportGatewayLifecycleStopped(ctx: OpenClawGatewayLifecycleContext | null | undefined, lifecycleOwner?: object | null): void {
     if (!ctx) return;
-    ctx.setStatus?.({
-      accountId: ctx.accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID,
+    this.setGatewayLifecycleStatus(ctx, {
       running: false,
       connected: false,
       restartPending: false,
@@ -681,6 +680,22 @@ export class DkgChannelPlugin {
   private getGatewayAccountId(ctx: any): string {
     const accountId = typeof ctx?.accountId === 'string' ? ctx.accountId.trim() : '';
     return accountId || DEFAULT_CHANNEL_ACCOUNT_ID;
+  }
+
+  private getGatewayLifecycleStatus(ctx: OpenClawGatewayLifecycleContext): Record<string, unknown> {
+    const status = ctx.getStatus?.();
+    return status && typeof status === 'object' ? status : {};
+  }
+
+  private setGatewayLifecycleStatus(
+    ctx: OpenClawGatewayLifecycleContext,
+    patch: Record<string, unknown>,
+  ): void {
+    ctx.setStatus?.({
+      ...this.getGatewayLifecycleStatus(ctx),
+      ...patch,
+      accountId: this.getGatewayAccountId(ctx),
+    });
   }
 
   private reportUnsupportedGatewayAccount(ctx: any, message: string): void {
@@ -808,8 +823,7 @@ export class DkgChannelPlugin {
       this.gatewayLifecycleOwnersByAccount.set(accountId, lifecycleOwner);
       this.gatewayLifecycleStatusContext = ctx;
       this.gatewayLifecycleStatusOwner = lifecycleOwner;
-      ctx.setStatus?.({
-        accountId: ctx.accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID,
+      this.setGatewayLifecycleStatus(ctx, {
         enabled: this.config.enabled !== false,
         configured: true,
         linked: true,

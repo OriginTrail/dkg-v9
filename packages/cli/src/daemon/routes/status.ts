@@ -73,6 +73,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  resolveChainConfig,
   dkgDir,
   writePid,
   removePid,
@@ -396,6 +397,20 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return;
   }
 
+  // GET /api/context-graph/{id}/members — local SQL membership cache.
+  // Kept in this early route group so the cache has a lightweight read path.
+  const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
+  if (req.method === "GET" && contextGraphMembersMatch) {
+    const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
+    if (!isValidContextGraphId(contextGraphId)) {
+      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    }
+    return jsonResponse(res, 200, {
+      contextGraphId,
+      members: dashDb.listContextGraphMembers(contextGraphId),
+    });
+  }
+
   // GET /api/status
   if (req.method === "GET" && path === "/api/status") {
     const allConns = agent.node.libp2p.getConnections();
@@ -408,7 +423,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       a.includes("/p2p-circuit/"),
     );
     const networkId = await computeNetworkId();
-    const chainConf = config.chain ?? network?.chain;
+    const chainConf = resolveChainConfig(config, network);
     const blockExplorerUrl =
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
@@ -449,7 +464,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   if (req.method === "GET" && path === "/api/info") {
     const allConns = agent.node.libp2p.getConnections();
     const uniquePeers = new Set(allConns.map((c) => c.remotePeer.toString()));
-    const chainConf = config.chain ?? network?.chain;
+    const chainConf = resolveChainConfig(config, network);
     const now = Date.now();
 
     return jsonResponse(res, 200, {
@@ -591,13 +606,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   ) {
     return jsonResponse(res, 200, {
       wallets: opWallets.wallets.map((w) => w.address),
-      chainId: (config.chain ?? network?.chain)?.chainId,
+      chainId: resolveChainConfig(config, network)?.chainId,
     });
   }
 
   // GET /api/wallets/balances — ETH + TRAC per wallet, RPC health
   if (req.method === "GET" && path === "/api/wallets/balances") {
-    const chain = config.chain ?? network?.chain;
+    const chain = resolveChainConfig(config, network);
     const rpcUrl = chain?.rpcUrl;
     const hubAddress = chain?.hubAddress;
     const chainId = chain?.chainId ?? null;
@@ -667,7 +682,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/chain/rpc-health
   if (req.method === "GET" && path === "/api/chain/rpc-health") {
-    const chain = config.chain ?? network?.chain;
+    const chain = resolveChainConfig(config, network);
     const rpcUrl = chain?.rpcUrl;
     if (!rpcUrl) {
       return jsonResponse(res, 200, {

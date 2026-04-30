@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotReady } from './config.js';
 
 export const _migrationIo = {
   execSync: execSync as (...args: any[]) => any,
@@ -79,11 +79,6 @@ export async function migrateToBlueGreen(
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
-  const slotReady = (slotDir: string) => {
-    const entry = slotEntryPoint(slotDir);
-    if (!entry) return false;
-    return existsSync(join(slotDir, '.git')) || existsSync(join(slotDir, 'package.json'));
-  };
   if (hadCurrentLink && slotReady(slotA) && slotReady(slotB)) return;
 
   log('Migrating to blue-green release slots...');

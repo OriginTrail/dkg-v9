@@ -610,15 +610,26 @@ class DKGMemoryProvider(MemoryProvider):
             else:
                 result = self._client.query(sparql, self._context_graph)
             bindings = _extract_query_bindings(result)
-            if not bindings:
-                return ""
-
             lines = []
             for b in bindings[:10]:
                 s = b.get("s", {}).get("value", "?")
                 p = b.get("p", {}).get("value", "?")
                 o = b.get("o", {}).get("value", "?")
                 lines.append(f"  {_short(s)} — {_short(p)} — {o}")
+
+            if not lines:
+                needle = query.lower().strip()
+                for quad in _extract_quads(result):
+                    if _quad_predicate(quad) != "urn:hermes:content":
+                        continue
+                    content = _quad_object(quad)
+                    if needle and needle not in content.lower():
+                        continue
+                    lines.append(f"  {_short(_quad_subject(quad))} - {_short(_quad_predicate(quad))} - {content}")
+                    if len(lines) >= 10:
+                        break
+            if not lines:
+                return ""
 
             return f"<dkg-context>\nRelevant knowledge from DKG:\n" + "\n".join(lines) + "\n</dkg-context>"
         except Exception as e:

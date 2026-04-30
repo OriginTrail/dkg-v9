@@ -202,21 +202,17 @@ class DKGClient:
     def query_assertion(self, assertion_name: str, context_graph_id: str, sparql: str = "") -> Dict[str, Any]:
         """Query an assertion scope.
 
-        Without SPARQL, returns full assertion quads from
-        ``/api/assertion/{name}/query``. With SPARQL, uses the scoped
-        ``/api/query`` view path so filtering happens server-side.
+        Returns assertion quads from ``/api/assertion/{name}/query``. When
+        SPARQL is supplied, pass it as a hint for daemons that support
+        assertion-local filtering; callers must tolerate full-assertion results
+        from current daemons.
         """
-        if sparql and sparql.strip():
-            return self.query(
-                sparql,
-                context_graph_id,
-                view="working-memory",
-                assertion_name=assertion_name,
-                agent_address=self._resolve_agent_address(),
-            )
-        return self._post(f"/api/assertion/{assertion_name}/query", {
+        payload: Dict[str, Any] = {
             "contextGraphId": context_graph_id,
-        })
+        }
+        if sparql and sparql.strip():
+            payload["sparql"] = sparql
+        return self._post(f"/api/assertion/{assertion_name}/query", payload)
 
     def promote_assertion(self, assertion_name: str, context_graph_id: str) -> Dict[str, Any]:
         """POST /api/assertion/{name}/promote — promote assertion to SWM."""

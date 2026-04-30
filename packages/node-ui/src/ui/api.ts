@@ -716,6 +716,7 @@ interface LocalAgentChatRequestOptions {
   signal?: AbortSignal;
   identity?: string;
   sessionId?: string;
+  profile?: string;
   attachments?: LocalAgentChatAttachmentRef[];
   contextEntries?: LocalAgentChatContextEntry[];
   /**
@@ -798,6 +799,7 @@ function buildLocalAgentChatBody(
     correlationId: opts?.correlationId ?? crypto.randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+    ...(opts?.profile ? { profile: opts.profile } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
     ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
@@ -1072,6 +1074,7 @@ export interface LocalAgentIntegration {
   framework: string;
   description: string;
   defaultSessionId?: string;
+  profile?: string;
   chatSupported: boolean;
   chatAttachments: boolean;
   connectSupported: boolean;
@@ -1115,6 +1118,7 @@ interface LocalAgentSurface {
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<{
     ok: boolean;
@@ -1146,7 +1150,10 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     connectSupported: true,
     chatSupported: true,
     defaultSessionId: ({ integrationId, record, health }) => buildHermesDefaultSessionId(integrationId, record, health),
-    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
+    resolveChatContext: ({ sessionId, profile }) => ({
+      ...(sessionId ? { sessionId } : {}),
+      ...(profile ? { profile } : {}),
+    }),
     fetchHealth: fetchHermesLocalHealth,
     streamChat: streamHermesLocalChat,
   },
@@ -1394,6 +1401,9 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   );
   const hermesRuntimeDetail = hermesDetail(record, health);
   const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
+  const profile = id === 'hermes'
+    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile)
+    : undefined;
 
   let status: LocalAgentIntegrationStatus;
   let statusLabel: string;
@@ -1454,6 +1464,7 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     framework: record.name,
     description: record.description,
     defaultSessionId,
+    profile,
     chatSupported: hasChatBridge,
     chatAttachments,
     connectSupported,
@@ -1575,12 +1586,13 @@ export async function streamLocalAgentChat(
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    const { sessionId, ...transportOpts } = opts;
+    const { sessionId, profile, ...transportOpts } = opts;
     return surface.streamChat(text, {
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
         sessionId,
+        profile,
       }),
     });
   }

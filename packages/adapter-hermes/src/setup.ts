@@ -18,7 +18,7 @@ const STATE_VERSION = 1;
 const CONFIG_BEGIN = '# BEGIN DKG ADAPTER HERMES MANAGED';
 const CONFIG_END = '# END DKG ADAPTER HERMES MANAGED';
 const PLUGIN_OWNER_FILE = '.dkg-adapter-hermes-owner.json';
-const TOP_LEVEL_MEMORY_BLOCK_RE = /^memory\s*:\s*$/;
+const TOP_LEVEL_MEMORY_BLOCK_RE = /^memory\s*:\s*(?:#.*)?$/;
 const TOP_LEVEL_MEMORY_PROVIDER_RE = /^memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/;
 const INDENTED_PROVIDER_RE = /^(\s+)provider\s*:\s*["']?([^"'\s#]+)["']?/;
 

@@ -1543,6 +1543,7 @@ export function PanelRight() {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
+        profile: integration.profile,
         attachments,
         contextEntries,
         contextGraphId: activeProjectId ?? undefined,

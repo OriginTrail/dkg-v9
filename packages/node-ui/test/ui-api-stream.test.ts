@@ -145,6 +145,41 @@ describe('ui local-agent stream api', () => {
     expect(requestLog.some(r => r.url.includes('/api/hermes-channel/stream'))).toBe(true);
   });
 
+  it('forwards Hermes profile through the generic local-agent chat transport', async () => {
+    const savedFetch = globalThis.fetch;
+    let payload: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      payload = JSON.parse(String(init?.body ?? '{}'));
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"type":"final","text":"Hermes","correlationId":"h-profile"}\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await streamLocalAgentChat('hermes', 'hello', {
+        sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+        profile: 'dkg-smoke',
+      });
+
+      expect(result.text).toBe('Hermes');
+      expect(payload).toMatchObject({
+        text: 'hello',
+        sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+        profile: 'dkg-smoke',
+      });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
   it('normalizes Hermes delta/text SSE frames into local-agent text deltas', async () => {
     const prevFetch = globalThis.fetch;
     globalThis.fetch = (async () => {

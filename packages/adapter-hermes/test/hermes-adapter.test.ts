@@ -403,6 +403,13 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: mem0');
   });
 
+  it('detects provider conflicts when the top-level memory block has an inline comment', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'memory: # existing provider\n  provider: mem0\n');
+
+    expect(() => setupHermesProfile({ hermesHome, memoryMode: 'provider' })).toThrow('memory.provider: mem0');
+  });
+
   it('ignores nested memory provider blocks when managing Hermes provider config', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     writeFileSync(join(hermesHome, 'config.yaml'), [
@@ -1016,7 +1023,7 @@ assert saved[0][0]["queued_writes"] == [], saved
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
-  it('uses server-side assertion query filtering for prefetch', () => {
+  it('uses assertion-scoped reads for prefetch without requiring an agent-scoped token', () => {
     const script = String.raw`
 import importlib.util
 import json
@@ -1060,22 +1067,18 @@ sys.modules["plugins.memory.dkg.client"] = client_module
 client_spec.loader.exec_module(client_module)
 
 client = client_module.DKGClient("http://127.0.0.1:9200")
-client._get = lambda path: {"agentAddress": "0xabc"} if path == "/api/agent/identity" else {}
 client_calls = []
 def post(path, data=None):
     client_calls.append((path, data or {}))
-    return {"result": {"bindings": []}}
+    return {"quads": []}
 client._post = post
 client.query_assertion("hermes", "cg:test", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
 assert client_calls == [
     (
-        "/api/query",
+        "/api/assertion/hermes/query",
         {
-            "sparql": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
             "contextGraphId": "cg:test",
-            "view": "working-memory",
-            "assertionName": "hermes",
-            "agentAddress": "0xabc",
+            "sparql": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
         },
     )
 ], client_calls
@@ -1098,15 +1101,13 @@ class FakeClient:
     def query_assertion(self, assertion_name, context_graph_id, sparql=""):
         self.calls.append((assertion_name, context_graph_id, sparql))
         return {
-            "result": {
-                "bindings": [
-                    {
-                        "s": {"value": "urn:hermes:agent:memory"},
-                        "p": {"value": "urn:hermes:content"},
-                        "o": {"value": "Needle fact from DKG"},
-                    }
-                ]
-            }
+            "quads": [
+                {
+                    "subject": "urn:hermes:agent:memory",
+                    "predicate": "urn:hermes:content",
+                    "object": "Needle fact from DKG",
+                }
+            ]
         }
 
     def query(self, *args, **kwargs):

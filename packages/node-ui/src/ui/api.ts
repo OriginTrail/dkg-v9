@@ -1258,13 +1258,27 @@ function buildHermesDefaultSessionId(
     metadata.profile,
   );
   const hermesHome = firstTrimmedString(metadata.hermesHome);
+  const transportSegment = !hermesHome ? buildHermesTransportSessionSegment(record) : null;
   const segments = [
     profile ? `profile-${sessionSegment(profile)}` : null,
     hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
+    transportSegment,
   ].filter((value): value is string => value != null);
   return segments.length
     ? `${integrationId}:dkg-ui:${segments.join(':')}`
     : `${integrationId}:dkg-ui`;
+}
+
+function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord): string | null {
+  const transport = record?.transport;
+  if (!transport) return null;
+  const parts = [
+    transport.kind,
+    transport.bridgeUrl,
+    transport.gatewayUrl,
+    transport.healthUrl,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
 }
 
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
@@ -1293,19 +1307,42 @@ function isHealthObject(value: unknown): value is Omit<LocalAgentHealthResponse,
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function healthObjectScore(value: unknown): number {
+  if (!isHealthObject(value)) return -1;
+  let score = value.ok === false ? 100 : 0;
+  if (value.profile) score += 10;
+  if (value.memory) score += 10;
+  if (value.status) score += 10;
+  if (value.error) score += 10;
+  if (value.ok === true) score += 1;
+  return score;
+}
+
+function localAgentHealthTargetDetails(health: LocalAgentHealthResponse): {
+  target?: LocalAgentChannelTarget;
+  details?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
+} {
+  if (health.target === 'bridge') return { target: 'bridge', details: health.bridge };
+  if (health.target === 'gateway') return { target: 'gateway', details: health.gateway };
+
+  const bridgeScore = healthObjectScore(health.bridge);
+  const gatewayScore = healthObjectScore(health.gateway);
+  if (bridgeScore < 0 && gatewayScore < 0) return {};
+  return bridgeScore >= gatewayScore
+    ? { target: 'bridge', details: health.bridge }
+    : { target: 'gateway', details: health.gateway };
+}
+
 function normalizeLocalAgentHealth(health: LocalAgentHealthResponse | null): LocalAgentHealthResponse | null {
   if (!health) return null;
-  const targetDetails = health.target === 'bridge'
-    ? health.bridge
-    : health.target === 'gateway'
-      ? health.gateway
-      : undefined;
+  const { target, details: targetDetails } = localAgentHealthTargetDetails(health);
   if (!isHealthObject(targetDetails)) return health;
   const targetOk = typeof targetDetails.ok === 'boolean' ? targetDetails.ok : undefined;
   return {
     ...targetDetails,
     ...health,
     ok: health.ok === false ? false : targetOk ?? health.ok,
+    target: health.target ?? target,
     profile: health.profile ?? targetDetails.profile,
     memory: health.memory ?? targetDetails.memory,
     status: health.status ?? targetDetails.status,

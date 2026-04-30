@@ -112,6 +112,9 @@ def register_cli(cli_group):
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
+                        agent_name=agent_name,
+                        turn_id=item.get("turn_id", ""),
+                        idempotency_key=item.get("idempotency_key", ""),
                     )
                     if result.get("success") is False:
                         click.echo(f"  Turn sync failed: {result.get('error', 'unknown')}")

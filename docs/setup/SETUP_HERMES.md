@@ -66,8 +66,11 @@ dkg hermes setup --profile research --memory-mode tools-only
 Tools-only mode preserves `memory.provider` in `config.yaml`. It still writes
 adapter state and installs the provider package files so `status`, `doctor`,
 `disconnect`, `reconnect`, and `uninstall` can inspect and repair the
-DKG/Hermes profile relationship. Model-injected DKG memory tools require
-provider mode in this release.
+DKG/Hermes profile relationship. Hermes-provider DKG tools such as
+`dkg_memory`, `dkg_query`, `dkg_share`, and status/wallet/network helpers
+require provider mode in this release. The OpenClaw `memory_search` tool and
+`<recalled-memory>` auto-recall block documented in the node `SKILL.md` are
+OpenClaw runtime surfaces, not the Hermes tools-only surface.
 
 `--memory-mode ask` is reserved for a future interactive setup flow and is not
 supported in this release.
@@ -122,7 +125,9 @@ If the local-agent registry has a Hermes gateway URL, the daemon forwards to:
 `dkg hermes setup` registers only the Hermes channel kind by default. Use
 `--bridge-url` for a same-host loopback bridge or `--gateway-url` for WSL2 and
 remote Hermes deployments. Do not use a non-loopback `bridgeUrl`; remote
-targets should be registered as gateways.
+targets should be registered as gateways. If `--bridge-health-url` is supplied,
+it must belong to the same configured bridge or gateway base so readiness
+checks cannot pass against one endpoint while chat is routed to another.
 
 Node UI chat is considered ready only when the bridge or gateway health route
 responds successfully. When it is unavailable, Hermes may still be registered,

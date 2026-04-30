@@ -146,10 +146,9 @@ describe('HermesAdapterPlugin', () => {
 
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(2);
+    expect(api.registerHttpRouteCalls).toHaveLength(1);
     expect([...api.routes.keys()].sort()).toEqual([
       'GET /api/hermes/status',
-      'POST /api/hermes-channel/persist-turn',
     ]);
   });
 
@@ -171,114 +170,7 @@ describe('HermesAdapterPlugin', () => {
     plugin.register(api);
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(2);
-  });
-});
-
-describe('POST /api/hermes-channel/persist-turn', () => {
-  let api: TrackingApi;
-  let handler: (req: any, res: any) => Promise<void>;
-
-  beforeEach(() => {
-    api = createTrackingApi();
-    registerHermesRoutes(api);
-    handler = api.routes.get('POST /api/hermes-channel/persist-turn')!;
-  });
-
-  it('stores chat turn and returns success', async () => {
-    const body = {
-      sessionId: 's1',
-      turnId: 't1',
-      idempotencyKey: 'idem-t1',
-      userMessage: 'hello',
-      assistantReply: 'hi there',
-    };
-    const { res, calls } = trackingRes();
-
-    await handler({ body }, res);
-
-    expect((api.agent as any)._storeChatTurnCalls[0]).toEqual([
-      's1',
-      'hello',
-      'hi there',
-      { turnId: 't1', idempotencyKey: 'idem-t1', source: 'hermes-channel' },
-    ]);
-    expect((api.agent as any)._importMemoriesCalls[0][0]).toBe('hi there');
-    expect((api.agent as any)._importMemoriesCalls[0][1]).toBe('hermes-session:s1:turn:t1');
-    expect(calls.some(c => c.json?.success === true && c.json?.turnId === 't1')).toBe(true);
-  });
-
-  it('returns 400 when sessionId is missing', async () => {
-    const { res, calls } = trackingRes();
-
-    await handler({ body: { turnId: 't1', idempotencyKey: 'idem', userMessage: 'hello' } }, res);
-
-    expect(calls.some(c => c.status === 400)).toBe(true);
-    expect(calls.some(c => c.json?.success === false)).toBe(true);
-  });
-
-  it('returns 400 when both user and assistant are missing', async () => {
-    const { res, calls } = trackingRes();
-
-    await handler({ body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem' } }, res);
-
-    expect(calls.some(c => c.status === 400)).toBe(true);
-  });
-
-  it('succeeds with only user (no assistant)', async () => {
-    const { res, calls } = trackingRes();
-
-    await handler({
-      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'hello' },
-    }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-    expect((api.agent as any)._importMemoriesCalls).toHaveLength(0);
-  });
-
-  it('does not fail when importMemories throws', async () => {
-    (api.agent as any)._setImportMemoriesError(new Error('LLM timeout'));
-    const { res, calls } = trackingRes();
-
-    await handler({
-      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: '', assistantReply: 'x' },
-    }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-  });
-
-  it('returns 500 when storeChatTurn throws', async () => {
-    (api.agent as any)._setStoreChatTurnError(new Error('DB error'));
-    const { res, calls } = trackingRes();
-
-    await handler({
-      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'u', assistantReply: 'a' },
-    }, res);
-
-    expect(calls.some(c => c.status === 500)).toBe(true);
-    expect(calls.some(c => c.json?.success === false)).toBe(true);
-  });
-
-  it('handles absent storeChatTurn gracefully', async () => {
-    api.agent.storeChatTurn = undefined;
-    const { res, calls } = trackingRes();
-
-    await handler({
-      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'u', assistantReply: 'a' },
-    }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-  });
-
-  it('handles absent importMemories gracefully', async () => {
-    api.agent.importMemories = undefined;
-    const { res, calls } = trackingRes();
-
-    await handler({
-      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: '', assistantReply: 'stuff' },
-    }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
+    expect(api.registerHttpRouteCalls).toHaveLength(1);
   });
 });
 
@@ -776,7 +668,7 @@ describe('Hermes profile setup helpers', () => {
       memoryMode: 'tools-only',
       daemonUrl: 'https://dkg.example.com/',
       gatewayUrl: 'https://hermes.example.com/',
-      bridgeHealthUrl: 'https://hermes.example.com/health/',
+      bridgeHealthUrl: 'https://hermes.example.com/api/hermes-channel/health/',
     });
     disconnectHermesProfile({ hermesHome });
 
@@ -787,7 +679,7 @@ describe('Hermes profile setup helpers', () => {
     expect(config.daemon_url).toBe('https://dkg.example.com');
     expect(config.bridge).toEqual({
       gatewayUrl: 'https://hermes.example.com',
-      healthUrl: 'https://hermes.example.com/health',
+      healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
     });
     expect(state.daemonUrl).toBe('https://dkg.example.com');
     expect(state.bridge).toEqual(config.bridge);
@@ -801,7 +693,7 @@ describe('Hermes profile setup helpers', () => {
       memoryMode: 'tools-only',
       daemonUrl: 'https://stale-dkg.example.com',
       gatewayUrl: 'https://stale-hermes.example.com',
-      bridgeHealthUrl: 'https://stale-hermes.example.com/health',
+      bridgeHealthUrl: 'https://stale-hermes.example.com/api/hermes-channel/health',
     });
     disconnectHermesProfile({ hermesHome });
 
@@ -809,7 +701,7 @@ describe('Hermes profile setup helpers', () => {
       hermesHome,
       daemonUrl: 'https://fresh-dkg.example.com/',
       gatewayUrl: 'https://fresh-hermes.example.com/',
-      bridgeHealthUrl: 'https://fresh-hermes.example.com/health/',
+      bridgeHealthUrl: 'https://fresh-hermes.example.com/api/hermes-channel/health/',
       start: false,
       verify: false,
     });
@@ -819,7 +711,7 @@ describe('Hermes profile setup helpers', () => {
     expect(config.daemon_url).toBe('https://fresh-dkg.example.com');
     expect(config.bridge).toEqual({
       gatewayUrl: 'https://fresh-hermes.example.com',
-      healthUrl: 'https://fresh-hermes.example.com/health',
+      healthUrl: 'https://fresh-hermes.example.com/api/hermes-channel/health',
     });
     expect(state.daemonUrl).toBe('https://fresh-dkg.example.com');
     expect(state.bridge).toEqual(config.bridge);
@@ -923,6 +815,30 @@ describe('Hermes profile setup helpers', () => {
       healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
     });
   });
+
+  it('rejects bridge health URLs without a matching transport base', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    await expect(runSetup({
+      hermesHome,
+      verify: false,
+      bridgeHealthUrl: 'https://hermes.example.com/health',
+    })).rejects.toThrow('requires --bridge-url or --gateway-url');
+
+    await expect(runSetup({
+      hermesHome,
+      verify: false,
+      gatewayUrl: 'https://hermes.example.com',
+      bridgeHealthUrl: 'https://other-hermes.example.com/api/hermes-channel/health',
+    })).rejects.toThrow('must belong to the configured');
+
+    await expect(runSetup({
+      hermesHome,
+      verify: false,
+      gatewayUrl: 'https://hermes.example.com',
+      bridgeHealthUrl: 'https://hermes.example.com/health',
+    })).rejects.toThrow('must belong to the configured');
+  });
 });
 
 describe('Hermes Python provider', () => {
@@ -992,6 +908,105 @@ assert turns[0]["turn_id"] != turns[1]["turn_id"], turns
 assert turns[0]["idempotency_key"] != turns[1]["idempotency_key"], turns
 assert turns[0]["turn_id"].split(":")[-2] == "1", turns
 assert turns[1]["turn_id"].split(":")[-2] == "2", turns
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('CLI sync preserves queued turn idempotency fields', () => {
+    const script = String.raw`
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+
+pkg = types.ModuleType("plugins.memory.dkg")
+pkg.__path__ = [str(plugin_dir)]
+pkg._load_config = lambda: {"daemon_url": "http://127.0.0.1:9200", "agent_name": "agent"}
+cache = {
+    "queued_writes": [{
+        "type": "turn",
+        "session_id": "session-1",
+        "user": "hello",
+        "assistant": "hi",
+        "turn_id": "turn-123",
+        "idempotency_key": "idem-123",
+    }]
+}
+saved = []
+pkg._load_cache = lambda agent_name: cache
+pkg._save_cache = lambda next_cache, agent_name: saved.append((next_cache, agent_name))
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+sys.modules["plugins.memory.dkg"] = pkg
+
+store_calls = []
+client_mod = types.ModuleType("plugins.memory.dkg.client")
+class DKGClient:
+    def __init__(self, base_url):
+        self.base_url = base_url
+    def health_check(self):
+        return True
+    def store_turn(self, session_id, user, assistant, agent_name="", turn_id="", idempotency_key=""):
+        store_calls.append({
+            "session_id": session_id,
+            "user": user,
+            "assistant": assistant,
+            "agent_name": agent_name,
+            "turn_id": turn_id,
+            "idempotency_key": idempotency_key,
+        })
+        return {"success": True}
+    def close(self):
+        pass
+client_mod.DKGClient = DKGClient
+sys.modules["plugins.memory.dkg.client"] = client_mod
+
+click = types.ModuleType("click")
+click.echo = lambda *args, **kwargs: None
+click.argument = lambda *args, **kwargs: (lambda fn: fn)
+class FakeGroup:
+    def __init__(self):
+        self.commands = {}
+    def group(self, name):
+        def decorate(fn):
+            group = FakeGroup()
+            self.commands[name] = group
+            return group
+        return decorate
+    def command(self, name):
+        def decorate(fn):
+            self.commands[name] = fn
+            return fn
+        return decorate
+click.Group = FakeGroup
+sys.modules["click"] = click
+
+spec = importlib.util.spec_from_file_location("plugins.memory.dkg.cli", plugin_dir / "cli.py")
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg.cli"] = module
+spec.loader.exec_module(module)
+
+root = FakeGroup()
+module.register_cli(root)
+root.commands["dkg"].commands["sync"]()
+
+assert store_calls == [{
+    "session_id": "session-1",
+    "user": "hello",
+    "assistant": "hi",
+    "agent_name": "agent",
+    "turn_id": "turn-123",
+    "idempotency_key": "idem-123",
+}], store_calls
+assert saved[0][0]["queued_writes"] == [], saved
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

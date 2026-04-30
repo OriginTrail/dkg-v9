@@ -829,10 +829,11 @@ describe('OpenClaw bridge behavioral tests', () => {
         ok: true,
         json: async () => ({
           ok: true,
-          target: 'bridge',
           bridge: {
             ok: false,
             profile: 'dkg-smoke',
+            status: 'provider_conflict',
+            memory: { provider: 'mem0', conflict: true },
             error: 'daemon auth failed',
           },
         }),
@@ -845,13 +846,15 @@ describe('OpenClaw bridge behavioral tests', () => {
       const result = await fetchLocalAgentIntegrations();
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
-        status: 'bridge_offline',
-        statusLabel: 'Bridge offline',
-        bridgeStatusLabel: 'Unavailable',
+        status: 'degraded',
+        statusLabel: 'Degraded',
+        bridgeStatusLabel: 'Degraded',
         chatReady: false,
         bridgeOnline: false,
+        target: 'bridge',
       });
-      expect(hermes?.detail).toContain('daemon auth failed');
+      expect(hermes?.detail).toContain('profile dkg-smoke');
+      expect(hermes?.detail).toContain('memory provider conflict');
     } finally {
       globalThis.fetch = original;
     }
@@ -899,6 +902,52 @@ describe('OpenClaw bridge behavioral tests', () => {
       const result = await fetchLocalAgentIntegrations();
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:home-[a-z0-9]+$/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations separates Hermes default sessions by transport when home is unavailable', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              transport: {
+                kind: 'hermes-channel',
+                gatewayUrl: 'https://hermes.example.com',
+                healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
+              },
+              metadata: {
+                profileName: 'dkg-smoke',
+              },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'gateway',
+          gateway: { ok: true, profile: 'dkg-smoke' },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:transport-[a-z0-9]+$/);
     } finally {
       globalThis.fetch = original;
     }

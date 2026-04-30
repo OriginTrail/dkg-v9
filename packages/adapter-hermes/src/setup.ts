@@ -513,11 +513,43 @@ function normalizeBridgeConfig(
   if (url && !isLoopbackUrl(url)) {
     throw new Error('Hermes bridge URL must be a loopback URL; use --gateway-url for WSL2 or remote Hermes gateways.');
   }
+  if (healthUrl) {
+    if (!url && !gatewayUrl) {
+      throw new Error('Hermes bridge health URL requires --bridge-url or --gateway-url so health checks match the chat transport.');
+    }
+    const allowedBases = [
+      ...(url ? [url] : []),
+      ...(gatewayUrl ? [buildHermesGatewayBase(gatewayUrl)] : []),
+    ];
+    if (!allowedBases.some((base) => urlBelongsToBase(healthUrl, base))) {
+      throw new Error('Hermes bridge health URL must belong to the configured --bridge-url or --gateway-url transport.');
+    }
+  }
   return {
     ...(url ? { url } : {}),
     ...(gatewayUrl ? { gatewayUrl } : {}),
     ...(healthUrl ? { healthUrl } : {}),
   };
+}
+
+function buildHermesGatewayBase(value: string): string {
+  return value.endsWith('/api/hermes-channel')
+    ? value
+    : `${value}/api/hermes-channel`;
+}
+
+function urlBelongsToBase(value: string, base: string): boolean {
+  try {
+    const parsedValue = new URL(value);
+    const parsedBase = new URL(base);
+    if (parsedValue.origin !== parsedBase.origin) return false;
+    const basePath = stripTrailingSlashes(parsedBase.pathname);
+    if (!basePath || basePath === '/') return true;
+    return parsedValue.pathname === basePath
+      || parsedValue.pathname.startsWith(`${basePath}/`);
+  } catch {
+    return false;
+  }
 }
 
 function isLoopbackUrl(value: string): boolean {

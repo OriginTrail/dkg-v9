@@ -69,7 +69,7 @@ Common setup flags:
 | `--daemon-url <url>` | DKG daemon URL. Defaults to `http://127.0.0.1:9200`. |
 | `--bridge-url <url>` | Same-host Hermes bridge URL for local chat. Use loopback addresses only. |
 | `--gateway-url <url>` | Gateway URL for WSL2 or remote Hermes chat. |
-| `--bridge-health-url <url>` | Optional health URL override for the configured bridge/gateway. |
+| `--bridge-health-url <url>` | Optional health URL override for the configured bridge/gateway. Must belong to the configured `--bridge-url` or `--gateway-url` base. |
 | `--port <port>` | Shortcut for `http://127.0.0.1:<port>`. |
 | `--memory-mode <mode>` | `primary` maps to provider-election mode and is the default path; use `tools-only` to preserve an existing Hermes memory provider. |
 | `--dry-run` | Print planned file changes without writing them. |
@@ -107,9 +107,12 @@ dkg hermes setup --profile research --memory-mode tools-only
 Tools-only mode preserves the existing provider and still writes DKG adapter
 state (`dkg.json`, the provider plugin files, and setup-state metadata) so
 status, doctor, reconnect, and uninstall can reason about the profile. In this
-release, model-injected DKG memory tools are available when Hermes activates the DKG
-memory provider; a separate general Hermes tool plugin for tools-only mode is
-future work.
+release, Hermes-provider DKG tools such as `dkg_memory`, `dkg_query`,
+`dkg_share`, and status/wallet/network helpers are available when Hermes
+activates the DKG memory provider; a separate general Hermes tool plugin for
+tools-only mode is future work. The OpenClaw `memory_search` tool and
+`<recalled-memory>` auto-recall block documented in the node `SKILL.md` are
+OpenClaw runtime surfaces, not the Hermes tools-only surface in this release.
 
 ## Hermes Memory Provider
 

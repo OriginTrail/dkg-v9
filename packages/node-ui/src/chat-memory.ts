@@ -593,7 +593,19 @@ export class ChatMemoryManager {
   }
 
   async hasChatTurn(sessionId: string, turnId: string): Promise<boolean> {
-    return (await this.getChatTurnPersistenceState(sessionId, turnId)) !== null;
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return false;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+      } LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    return (result.bindings ?? []).length > 0;
   }
 
   async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<'stored' | 'failed' | 'pending' | null> {

@@ -4,12 +4,13 @@
  * Lightweight adapter following the OpenClaw adapter pattern but simpler:
  * - No channel bridge (Hermes has its own CLI/gateway system)
  * - No game plugin
- * - No write-capture (daemon's importMemories handles entity extraction)
+ * - No write-capture (daemon's Hermes persist-turn route owns chat persistence
+ *   and entity extraction)
  *
  * The Hermes Python plugin installed into $HERMES_HOME/plugins/dkg persists turns
  * through the daemon's /api/hermes-channel/persist-turn route. Node UI chat
- * health/send/stream dispatch is owned by the DKG daemon integration, not by this
- * package-level plugin.
+ * health/send/stream dispatch and persistence are owned by the DKG daemon
+ * integration, not by this package-level plugin.
  */
 
 import type { DaemonPluginApi, HermesAdapterConfig } from './types.js';
@@ -37,9 +38,9 @@ export class HermesAdapterPlugin {
     }
     this.initialized = true;
 
-    // Register Hermes provider persistence/status routes.
+    // Register package-local status routes only. Persistence is daemon-owned.
     registerHermesRoutes(api);
-    api.logger.info?.('[hermes] Hermes adapter provider routes registered');
+    api.logger.info?.('[hermes] Hermes adapter status routes registered');
 
     // Register cleanup hook
     api.registerHook('session_end', async () => {

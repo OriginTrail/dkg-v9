@@ -9,7 +9,8 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -22,7 +23,7 @@
     "build": "tsc",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

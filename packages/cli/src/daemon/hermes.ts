@@ -87,6 +87,16 @@ function optionalTrimmedString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+const HERMES_CHAT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+
+function validateHermesChatIdentifier(value: string, field: string): string | null {
+  if (value.length > 512) return `${field} is too long`;
+  if (!HERMES_CHAT_ID_RE.test(value)) {
+    return `${field} must contain only letters, numbers, dots, underscores, colons, and hyphens`;
+  }
+  return null;
+}
+
 function buildHermesGatewayBase(value: string): string {
   return value.endsWith('/api/hermes-channel')
     ? value
@@ -445,6 +455,8 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
 
   const sessionId = optionalTrimmedString(raw.sessionId);
   if (!sessionId) return { error: 'Missing required field: sessionId' };
+  const sessionIdError = validateHermesChatIdentifier(sessionId, 'sessionId');
+  if (sessionIdError) return { error: sessionIdError };
 
   const userMessage = typeof raw.userMessage === 'string' ? raw.userMessage : '';
   const assistantReply = typeof raw.assistantReply === 'string' ? raw.assistantReply : '';
@@ -457,9 +469,12 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
     return { error: 'Invalid "attachmentRefs"' };
   }
   const persistenceState =
-    raw.persistenceState === 'failed' || raw.persistenceState === 'pending'
-      ? raw.persistenceState
-      : 'stored';
+    raw.persistenceState === undefined
+      ? 'stored'
+      : raw.persistenceState === 'stored' || raw.persistenceState === 'failed' || raw.persistenceState === 'pending'
+        ? raw.persistenceState
+        : null;
+  if (!persistenceState) return { error: 'Invalid "persistenceState"' };
   const failureReason = optionalTrimmedString(raw.failureReason);
   const toolCalls = Array.isArray(raw.toolCalls)
     ? raw.toolCalls.filter(isPlainRecord).map((toolCall) => ({
@@ -480,6 +495,8 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
     profile,
     contextGraphId,
   });
+  const turnIdError = validateHermesChatIdentifier(turnId, 'turnId');
+  if (turnIdError) return { error: turnIdError };
 
   return {
     sessionId,

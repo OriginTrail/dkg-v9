@@ -212,7 +212,6 @@ class DKGClient:
 
     def _resolve_agent_address(self) -> Optional[str]:
         if not self._agent_identity_loaded:
-            self._agent_identity_loaded = True
             identity = self.agent_identity()
             agent_address = identity.get("agentAddress") if isinstance(identity, dict) else None
             if isinstance(agent_address, str) and agent_address:
@@ -225,6 +224,8 @@ class DKGClient:
                 status_peer_id = status.get("peerId") if isinstance(status, dict) else None
                 if isinstance(status_peer_id, str) and status_peer_id:
                     self._peer_id = status_peer_id
+            if self._agent_address or self._peer_id:
+                self._agent_identity_loaded = True
         if not self._agent_address and self._peer_id:
             return self._peer_id
         return self._agent_address

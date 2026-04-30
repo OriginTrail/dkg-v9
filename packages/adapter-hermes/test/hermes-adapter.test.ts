@@ -1404,6 +1404,21 @@ def fake_status_get(path):
     raise AssertionError(path)
 client_status._get = fake_status_get
 assert client_status._resolve_agent_address() == "peer-from-status"
+
+client_retry = client_module.DKGClient("http://127.0.0.1:9200")
+retry_calls = {"count": 0}
+def fake_retry_get(path):
+    retry_calls["count"] += 1
+    if retry_calls["count"] <= 2:
+        return {"success": False}
+    if path == "/api/agent/identity":
+        return {"peerId": "peer-after-retry"}
+    raise AssertionError(path)
+client_retry._get = fake_retry_get
+assert client_retry._resolve_agent_address() is None
+assert client_retry._agent_identity_loaded is False
+assert client_retry._resolve_agent_address() == "peer-after-retry"
+assert client_retry._agent_identity_loaded is True
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

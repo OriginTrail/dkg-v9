@@ -404,6 +404,30 @@ describe('Hermes channel helpers', () => {
     }));
   });
 
+  it('rejects unsafe Hermes persist-turn identifiers before chat URI persistence', () => {
+    expect(normalizeHermesPersistTurnPayload({
+      sessionId: 'hermes default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+    })).toEqual({ error: 'sessionId must contain only letters, numbers, dots, underscores, colons, and hyphens' });
+
+    expect(normalizeHermesPersistTurnPayload({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      turnId: 'turn>1',
+    })).toEqual({ error: 'turnId must contain only letters, numbers, dots, underscores, colons, and hyphens' });
+  });
+
+  it('rejects unknown Hermes persist-turn states', () => {
+    expect(normalizeHermesPersistTurnPayload({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      persistenceState: 'complete',
+    })).toEqual({ error: 'Invalid "persistenceState"' });
+  });
+
   it('does not collapse identical persist-turn payloads without an idempotency key', () => {
     const payload = {
       sessionId: 'hermes:default',

@@ -1577,6 +1577,7 @@ export async function streamLocalAgentChat(
     signal?: AbortSignal;
     onEvent?: (event: LocalAgentStreamEvent) => void;
     sessionId?: string;
+    profile?: string;
     attachments?: LocalAgentChatAttachmentRef[];
     contextEntries?: LocalAgentChatContextEntry[];
     /** UI-selected project context graph for this turn (memory scope). */

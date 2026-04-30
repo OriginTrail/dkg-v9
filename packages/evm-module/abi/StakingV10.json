@@ -11,6 +11,22 @@
     "type": "constructor"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "feeBalance",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "AmountExceedsOperatorFeeBalance",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "InvalidLockTier",
     "type": "error"
@@ -38,6 +54,17 @@
   {
     "inputs": [],
     "name": "OnlyConvictionNFT",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "OnlyProfileAdminFunction",
     "type": "error"
   },
   {
@@ -77,6 +104,27 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "nowTimestamp",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "endTimestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "WithdrawalPeriodPending",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "WithdrawalWasntInitiated",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
@@ -84,6 +132,11 @@
   {
     "inputs": [],
     "name": "ZeroAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroTokenAmount",
     "type": "error"
   },
   {
@@ -321,6 +374,19 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "cancelOperatorFeeWithdrawal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -378,11 +444,37 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "finalizeOperatorFeeWithdrawal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "hub",
     "outputs": [
       {
         "internalType": "contract Hub",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "identityStorage",
+    "outputs": [
+      {
+        "internalType": "contract IdentityStorage",
         "name": "",
         "type": "address"
       }
@@ -496,6 +588,24 @@
       }
     ],
     "name": "relock",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "withdrawalAmount",
+        "type": "uint96"
+      }
+    ],
+    "name": "requestOperatorFeeWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

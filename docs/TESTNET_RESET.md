@@ -32,35 +32,57 @@ is published, score non-zero from the first proof period after that.
 
 `packages/cli/src/daemon/auto-update.ts` + `daemon/lifecycle.ts:735-781` +
 `cli.ts:163,210` implement a polling auto-update with supervised restart.
-Defaults are sensible for testnet:
+The testnet config (`network/testnet.json`) sets:
 
-- Poll interval: 30 min (`autoUpdate.checkIntervalMinutes`, configurable)
-- Source:
-  - **Standalone install** (`npm install -g @origintrail-official/dkg`):
-    daemon polls npm for newer versions, runs `npm install -g` on hit.
-  - **Monorepo install** (operator runs from a git checkout): daemon polls
-    the configured `autoUpdate.repo` + branch, does a blue/green slot
-    swap to the new commit.
-- After update: daemon exits with `DAEMON_EXIT_CODE_RESTART`.
-- The CLI parent (`runForegroundSupervisor` / background variant) catches
-  that exit code and respawns the daemon against the new code.
+```json
+"autoUpdate": {
+  "enabled": true,
+  "repo": "OriginTrail/dkg",
+  "branch": "main",
+  "checkIntervalMinutes": 5
+}
+```
 
-So once the maintainer cuts the release tag in Phase A, every testnet
-node picks it up within `checkIntervalMinutes` and auto-restarts itself
-into the new build. **Operators do nothing for the code update.**
+Implications for the cutover:
+
+- **Trigger = merge to `main`**, not a release tag. The daemon polls the
+  branch tip, not the latest GitHub Release. Once PR #357 merges, every
+  testnet node picks the new commit up within ≤ 5 min.
+- **Source per install mode**:
+  - Standalone install (`npm install -g @origintrail-official/dkg`):
+    daemon polls npm for newer versions and runs `npm install -g` on hit.
+    On testnet most operators run the standalone install, so the
+    `branch: main` polling path doesn't apply unless they switched to
+    a monorepo checkout — they get updates as soon as the new npm
+    version is published (Phase A step 2).
+  - Monorepo install (operator runs from a git checkout): daemon polls
+    `OriginTrail/dkg@main`, does a blue/green slot swap to the new
+    commit. No npm publish required for these operators — they update
+    the moment the merge commit lands.
+- After update: daemon exits with `DAEMON_EXIT_CODE_RESTART`. The CLI
+  parent (`runForegroundSupervisor` / background variant) catches that
+  exit code and respawns the daemon against the new code.
+
+**Operators do nothing for the code update** — they only do the one-time
+state wipe in Phase C.
 
 ## Phase A — Maintainer release (one-shot)
 
-1. Tag `main` at the merge commit:
+1. **Merge PR #357 to `main`**. That's the trigger for monorepo-install
+   operators — their daemons will swap slots within ≤ 5 min.
+2. (Optional but recommended) Tag the merge commit and publish to npm
+   so standalone-install operators (the majority on testnet) also get
+   the new code:
    ```bash
    git tag v10.x.y
    git push origin v10.x.y
    ```
-2. The `release.yml` workflow builds binaries, creates the GitHub Release,
-   and (manually, per `docs/RELEASE.md`) publishes to npm.
-3. From this point: every operator's daemon will pick up the new release
-   on its next 30-min auto-update poll and self-restart. No operator
-   action needed for the code update.
+   The `release.yml` workflow builds binaries + creates the GitHub
+   Release; npm publish is a manual step per `docs/RELEASE.md`. Once
+   the new npm version is up, standalone daemons pick it up on their
+   next 5-min poll.
+3. From this point on, no operator code-update action needed for any
+   install mode — they're all on the new build within minutes.
 
 ## Phase B — Contracts deploy (deployer + multisig)
 
@@ -95,7 +117,7 @@ except `Hub` and `Token`, edit the snapshot before running.
    every node — even ones still running the old release — re-resolves
    the new addresses on its next contract call (per-call resolution for
    V10 staking contracts) or after its next restart (boot-cached
-   contracts; auto-update will trigger this within 30 min anyway).
+   contracts; auto-update will trigger this within ≤ 5 min anyway).
 5. One-shot bootstrap, same multisig:
    - `DKGStakingConvictionNFT.finalizeMigrationBatch(currentEpoch)` to
      set the `v10LaunchEpoch` marker on `ConvictionStakingStorage`.

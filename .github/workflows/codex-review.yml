@@ -236,15 +236,21 @@ jobs:
 
             if (validComments.length === 0) {
               console.log(`No valid inline comments (${comments.length} total from Codex, ${droppedComments.length} dropped).`);
-              // Always post a review so the PR author knows the check ran
-              const summary = droppedComments.length > 0
+              // "All dropped" means the model produced comments but every one
+              // targeted lines outside the right-side diff — usually a line
+              // mapping failure, not a real no-issues signal. Treat it as
+              // transient: post the warning without the hash marker so the
+              // next run on the same diff retries instead of silently skipping.
+              const isLineMappingFailure = droppedComments.length > 0;
+              const summary = isLineMappingFailure
                 ? `Codex review produced ${droppedComments.length} comment(s) but all targeted lines outside the diff and were dropped. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`
                 : 'Codex review completed — no issues found.';
+              const body = isLineMappingFailure ? summary : `${hashMarker}\n${summary}`;
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.issue.number,
-                body: `${hashMarker}\n${summary}`,
+                body,
                 event: 'COMMENT',
                 comments: [],
               });

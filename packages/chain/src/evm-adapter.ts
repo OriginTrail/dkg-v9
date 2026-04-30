@@ -104,7 +104,19 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
  */
 export function enrichEvmError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
-  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
+  // Match the revert-data hex across the RPC-shape variants we see in the
+  // wild. CH-10:
+  //   - Hardhat:        ... data="0x..."             (key="value", quoted)
+  //   - Geth:           ... data: "0x..."            (key: value, JS-object)
+  //   - Geth no-quote:  ... data=0x...               (key=value, unquoted)
+  //   - Infura/Alchemy: ... errorData="0x..."        (errorData= prefix)
+  //   - JSON body:      ... "data":"0x..."           (JSON-encoded provider error)
+  // Leading non-letter (or string start) ensures `errorData` doesn't match
+  // as `data`. Separator class accepts any combination of `=`, `:`, `"`,
+  // `'`, whitespace.
+  const match = err.message.match(
+    /(?:^|[^a-zA-Z])(?:errorData|data)["':=\s]+(0x[0-9a-fA-F]+)/,
+  );
   if (!match) return null;
   const decoded = decodeEvmError(match[1]);
   if (!decoded) return null;

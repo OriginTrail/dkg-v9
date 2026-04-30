@@ -48,11 +48,6 @@ function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
 }
 
-function fallbackRouteInboundSessionKey(identity: string | undefined): string {
-  const rawIdentity = identity || 'owner';
-  return rawIdentity === 'owner' ? 'agent:main:main' : `agent:main:${sanitizeIdentity(rawIdentity)}`;
-}
-
 function finalizeAgentReplyText(text: string): string {
   if (text.trim().length === 0) {
     throw new Error(NO_TEXT_RESPONSE_ERROR);
@@ -1235,15 +1230,14 @@ export class DkgChannelPlugin {
       // UI-selected `uiContextGraphId`. The `routeInboundMessage` fallback
       // used when `runtime.channel` is unavailable must do the same, or
       // tool calls fired during this dispatch will read an empty ALS store
-      // and silently degrade recall to `agent-context` only. We don't have
-      // runtime.channel route metadata here, so stamp a deterministic
-      // transcript key that matches the DKG UI owner transcript marker
-      // bucket used by ChatTurnWriter replay dedupe.
-      const fallbackSessionKey = fallbackRouteInboundSessionKey(identity || 'owner');
+      // and silently degrade recall to `agent-context` only. We deliberately
+      // do not guess a sessionKey here: legacy routes may resolve a different
+      // OpenClaw session, and sending a synthetic key can split transcript
+      // state from the real route. Marker persistence uses only the key
+      // returned by routeInboundMessage.
       const dispatchContext: DkgDispatchContext = {
         uiContextGraphId,
         correlationId,
-        sessionKey: fallbackSessionKey,
       };
       const reply = await this.runWithDispatchContext(dispatchContext, () =>
         api.routeInboundMessage!({
@@ -1252,8 +1246,6 @@ export class DkgChannelPlugin {
           senderIsOwner: true,
           text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
           correlationId,
-          sessionKey: fallbackSessionKey,
-          SessionKey: fallbackSessionKey,
         }),
       );
       const { sessionKey: replySessionKey, SessionKey: replyOpenClawSessionKey, ...replyForCaller } = reply;

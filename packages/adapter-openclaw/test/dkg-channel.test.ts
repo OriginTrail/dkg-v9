@@ -2018,8 +2018,6 @@ describe('DkgChannelPlugin', () => {
       senderIsOwner: true,
       text: 'Hello',
       correlationId: 'corr-2',
-      sessionKey: 'agent:main:main',
-      SessionKey: 'agent:main:main',
     });
     expect(reply.text).toBe('Reply!');
     expect(reply.correlationId).toBe('corr-2');
@@ -2033,7 +2031,7 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
-  it('processInbound routeInboundMessage fallback marks direct-channel persists with a stable session key', async () => {
+  it('processInbound routeInboundMessage fallback marks direct-channel persists with the returned session key', async () => {
     const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-route-marker',
       text: 'Reply!',
@@ -2049,9 +2047,8 @@ describe('DkgChannelPlugin', () => {
     await plugin.processInbound('Hello', 'corr-route-marker', 'owner');
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
-      sessionKey: 'agent:main:main',
-    }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
     expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
@@ -2083,9 +2080,9 @@ describe('DkgChannelPlugin', () => {
 
     expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
       senderId: 'owner!',
-      sessionKey: 'agent:main:owner',
-      SessionKey: 'agent:main:owner',
     }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
     expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
       sessionKey: 'agent:main:owner',
       turnId: 'corr-route-ownerish',
@@ -2112,9 +2109,9 @@ describe('DkgChannelPlugin', () => {
 
     expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
       senderId: 'background-worker',
-      sessionKey: 'agent:main:background-worker',
-      SessionKey: 'agent:main:background-worker',
     }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
     expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui:background-worker',
       'Work item',
@@ -2171,10 +2168,8 @@ describe('DkgChannelPlugin', () => {
     await plugin.processInbound('Hello', 'corr-route-no-session', 'owner');
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
-      sessionKey: 'agent:main:main',
-      SessionKey: 'agent:main:main',
-    }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
     expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
@@ -2201,16 +2196,14 @@ describe('DkgChannelPlugin', () => {
     const capture: {
       inScope?: string | undefined;
       sessionScope?: string | undefined;
-      mismatchedSessionScope?: string | undefined;
-      messageSessionKey?: string | undefined;
-      messageOpenClawSessionKey?: string | undefined;
+      alternateSessionScope?: string | undefined;
     } = {};
     const routeInboundMessage = vi.fn().mockImplementation(async (message: any) => {
-      capture.messageSessionKey = message.sessionKey;
-      capture.messageOpenClawSessionKey = message.SessionKey;
+      expect(message).not.toHaveProperty('sessionKey');
+      expect(message).not.toHaveProperty('SessionKey');
       capture.inScope = plugin.getSessionProjectContextGraphId(undefined);
       capture.sessionScope = plugin.getSessionProjectContextGraphId('agent:main:main');
-      capture.mismatchedSessionScope = plugin.getSessionProjectContextGraphId('agent:other:owner');
+      capture.alternateSessionScope = plugin.getSessionProjectContextGraphId('agent:other:owner');
       return { correlationId: 'corr-b13', text: 'Reply from route' };
     });
     const api = makeApi({ routeInboundMessage });
@@ -2226,9 +2219,7 @@ describe('DkgChannelPlugin', () => {
     // While the fallback was running, the ALS scope was populated.
     expect(capture.inScope).toBe('research-b13');
     expect(capture.sessionScope).toBe('research-b13');
-    expect(capture.mismatchedSessionScope).toBeUndefined();
-    expect(capture.messageSessionKey).toBe('agent:main:main');
-    expect(capture.messageOpenClawSessionKey).toBe('agent:main:main');
+    expect(capture.alternateSessionScope).toBe('research-b13');
     // After the dispatch resolves, the ALS is torn down.
     expect(plugin.getSessionProjectContextGraphId(undefined)).toBeUndefined();
   });

@@ -440,6 +440,41 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[0].failureReason).toBe('timeout');
   });
 
+  it('getSession collapses persistence transition rows into one message', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Answer"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"failed"',
+            transitionFailureReason: '"temporary"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Answer"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-transition-rows');
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(1);
+    expect(session!.messages[0].persistStatus).toBe('stored');
+    expect(session!.messages[0].failureReason).toBeUndefined();
+  });
+
   it('getStats returns session and triple counts', async () => {
     mockQuery.returns.push(
       { bindings: [] },

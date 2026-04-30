@@ -125,6 +125,7 @@ export interface SessionGraphDeltaResult {
 }
 
 export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
+type ChatTurnPersistenceDisplayState = 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
 
 const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
@@ -177,6 +178,13 @@ const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_I
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
+const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
+  skipped: 1,
+  pending: 2,
+  in_progress: 3,
+  failed: 4,
+  stored: 5,
+};
 
 interface ChatAttachmentRef {
   id?: string;
@@ -196,6 +204,23 @@ function stripRdfLiteral(value: string): string {
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
+}
+
+function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {
+  const status = stripRdfLiteral(value).trim();
+  if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
+    return status;
+  }
+  return undefined;
+}
+
+function choosePersistenceStatus(
+  current: ChatTurnPersistenceDisplayState | undefined,
+  candidate: ChatTurnPersistenceDisplayState | undefined,
+): ChatTurnPersistenceDisplayState | undefined {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
 }
 
 function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
@@ -968,27 +993,44 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
+      const messagesByUri = new Map<string, {
+        uri: string;
+        author: string;
+        text: string;
+        ts: string;
+        turnId?: string;
+        persistStatus?: ChatTurnPersistenceDisplayState;
+        failureReason?: string | null;
+        attachmentRefs?: ChatAttachmentRef[];
+      }>();
+      for (const mb of bindings) {
+        const uri = String(mb.m ?? '').replace(/[<>]/g, '');
+        const key = uri || `${String(mb.author ?? '')}:${String(mb.ts ?? '')}:${String(mb.text ?? '')}`;
+        let message = messagesByUri.get(key);
+        if (!message) {
+          message = {
+            uri,
+            author: mb.author?.includes('user') ? 'user' : 'agent',
+            text: stripRdfLiteral(mb.text ?? ''),
+            ts: stripRdfLiteral(mb.ts ?? ''),
+            turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+            attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
+          };
+          messagesByUri.set(key, message);
+        }
+        const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
+        message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
+        const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
+        if (candidateStatus === 'failed' && candidateReason) {
+          message.failureReason = candidateReason;
+        }
+        if (message.persistStatus && message.persistStatus !== 'failed') {
+          message.failureReason = undefined;
+        }
+      }
       return {
         session: sessionId,
-        messages: bindings.map((mb: any) => ({
-          uri: String(mb.m ?? '').replace(/[<>]/g, ''),
-          author: mb.author?.includes('user') ? 'user' : 'agent',
-          text: stripRdfLiteral(mb.text ?? ''),
-          ts: stripRdfLiteral(mb.ts ?? ''),
-          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
-          attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
-          persistStatus: (() => {
-            const status = stripRdfLiteral(mb.transitionState ?? mb.persistenceState ?? '').trim();
-            if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
-              return status;
-            }
-            return undefined;
-          })(),
-          failureReason: (() => {
-            const reason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
-            return reason.length > 0 ? reason : undefined;
-          })(),
-        })),
+        messages: [...messagesByUri.values()],
       };
     } catch {
       return null;

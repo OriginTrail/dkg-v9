@@ -209,19 +209,40 @@ describe('resolveDkgHome', () => {
     expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
   });
 
-  it('9) nothing exists at all (fresh install) → returns ~/.dkg', async () => {
-    // Both dirs are present (created in beforeEach) but contain no pid/port files.
-    expect(resolveDkgHome()).toBe(dkg);
+  it('9) nothing exists at all, non-monorepo (npm install) → returns ~/.dkg', async () => {
+    // Both dirs are present (created in beforeEach) but contain no
+    // pid/port files. `isDkgMonorepo: false` simulates the npm-install
+    // case where the consumer repo doesn't have monorepo markers.
+    expect(resolveDkgHome({ isDkgMonorepo: false })).toBe(dkg);
   });
 
-  it('9b) neither ~/.dkg nor ~/.dkg-dev exist on disk at all → returns ~/.dkg without crashing', async () => {
+  it('9b) neither ~/.dkg nor ~/.dkg-dev exist on disk at all (npm install) → returns ~/.dkg without crashing', async () => {
     // Cheap defensive coverage (per QA T70 review): a brand-new account
     // where neither directory has been created yet. All sync fs reads
     // must return null cleanly (no ENOENT throw escaping). Resolver
     // falls through every step and returns the default ~/.dkg.
     await rm(dkg, { recursive: true, force: true });
     await rm(dkgDev, { recursive: true, force: true });
-    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200', isDkgMonorepo: false })).toBe(dkg);
+  });
+
+  it('T75 — nothing exists at all, monorepo, no global ~/.dkg/config.json → returns ~/.dkg-dev', async () => {
+    // Codex T75 (post-#337 merge): the runtime fresh-install fallback
+    // must mirror `resolveDkgConfigHome()` so the gateway in a fresh
+    // monorepo install doesn't cache `~/.dkg` while setup writes the
+    // daemon's config to `~/.dkg-dev`.
+    await rm(dkg, { recursive: true, force: true });
+    await rm(dkgDev, { recursive: true, force: true });
+    expect(resolveDkgHome({ isDkgMonorepo: true })).toBe(dkgDev);
+  });
+
+  it("T75 — fresh install in monorepo but ~/.dkg/config.json already exists (globally-installed CLI) → returns ~/.dkg", async () => {
+    // Mirrors `resolveDkgConfigHome()`'s second condition: when a
+    // globally-installed CLI has previously initialized `~/.dkg`, defer
+    // to it even in a monorepo checkout to avoid splitting state across
+    // two homes.
+    await writeFile(join(dkg, 'config.json'), '{}');
+    expect(resolveDkgHome({ isDkgMonorepo: true })).toBe(dkg);
   });
 
   it('10) liveness-only signal: no daemonUrl provided, only one pid alive → returns the live dir', async () => {

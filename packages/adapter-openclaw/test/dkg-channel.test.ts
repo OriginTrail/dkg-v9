@@ -1708,7 +1708,6 @@ describe('DkgChannelPlugin', () => {
       const markExternalTurnPersistedDurable = vi.fn()
         .mockRejectedValueOnce(new Error('marker disk outage'))
         .mockRejectedValueOnce(new Error('marker disk outage again'))
-        .mockRejectedValueOnce(new Error('marker disk outage third'))
         .mockResolvedValueOnce(undefined);
       plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
       plugin.register(api);
@@ -1724,11 +1723,52 @@ describe('DkgChannelPlugin', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(storeCalls).toHaveLength(1);
       expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(storeCalls).toHaveLength(1);
-      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(4);
       expect(api.logger.warn.calls.some((call: unknown[]) =>
         String(call[0]).includes('retrying marker'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('processInbound caps ChatTurnWriter marker-only retries after daemon write succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValue(new Error('marker disk outage'));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-permanent-fail', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('failed permanently'),
       )).toBe(true);
     } finally {
       vi.useRealTimers();

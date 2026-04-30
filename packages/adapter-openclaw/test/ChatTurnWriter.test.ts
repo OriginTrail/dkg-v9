@@ -1093,6 +1093,78 @@ describe("ChatTurnWriter", () => {
     }
   });
 
+  it("T102 - setStateDir final rewrite preserves concurrent external markers", async () => {
+    const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-marker-race-"));
+    try {
+      const newDir = path.join(destinationStateDir, "dkg-adapter");
+      fs.mkdirSync(newDir, { recursive: true });
+      const newFile = path.join(newDir, "chat-turn-watermarks.json");
+      fs.writeFileSync(newFile, JSON.stringify({}));
+
+      const dkw = writer as any;
+      const externalCursorKey = dkw.externalCursorKeyFromSessionKey("agent:main:main");
+      const marker = dkw.externalTurnMarkerId("node-ui-corr-marker-race");
+      const realWrite = dkw.writeWatermarkFile.bind(dkw);
+      const writeSpy = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce((target: string, override: any) => {
+        dkw.restoreExternalTurnMarker(externalCursorKey, marker);
+        return realWrite(target, override);
+      });
+
+      await writer.setStateDir(destinationStateDir);
+
+      const persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted[externalCursorKey].m[marker]).toBe(1);
+      const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir: destinationStateDir });
+      mockClient.storeChatTurn.mockClear();
+      restarted.onAgentEnd({
+        sessionId: "test",
+        messages: [
+          { role: "user", content: "migrated ui question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-marker-race" } },
+          { role: "assistant", content: "migrated ui answer" },
+        ],
+      }, { channelId: "telegram", sessionKey: "agent:main:main" });
+      await flushMicrotasks();
+
+      expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+      writeSpy.mockRestore();
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(destinationStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("T103 - setStateDir does not swap to a stale file when final marker rewrite fails", async () => {
+    const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-marker-fail-"));
+    try {
+      const newDir = path.join(destinationStateDir, "dkg-adapter");
+      fs.mkdirSync(newDir, { recursive: true });
+      fs.writeFileSync(path.join(newDir, "chat-turn-watermarks.json"), JSON.stringify({}));
+
+      const dkw = writer as any;
+      const originalStateDir = dkw.stateDir;
+      const originalWatermarkFilePath = dkw.watermarkFilePath;
+      const externalCursorKey = dkw.externalCursorKeyFromSessionKey("agent:main:main");
+      const marker = dkw.externalTurnMarkerId("node-ui-corr-marker-final-fail");
+      const realWrite = dkw.writeWatermarkFile.bind(dkw);
+      const writeSpy = vi.spyOn(dkw, "writeWatermarkFile")
+        .mockImplementationOnce((target: string, override: any) => {
+          dkw.restoreExternalTurnMarker(externalCursorKey, marker);
+          return realWrite(target, override);
+        })
+        .mockImplementationOnce(() => false);
+
+      await writer.setStateDir(destinationStateDir);
+
+      expect(dkw.stateDir).toBe(originalStateDir);
+      expect(dkw.watermarkFilePath).toBe(originalWatermarkFilePath);
+      expect(dkw.externalTurnMarkers.get(externalCursorKey)?.get(marker)).toBe(1);
+      expect(writeSpy).toHaveBeenCalledTimes(2);
+      writeSpy.mockRestore();
+    } finally {
+      fs.rmSync(destinationStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("T17 — disk file accepts the legacy number format for backward compat", async () => {
     // The pre-fix file contained `{ "sid": <number> }` (watermark only).
     // Existing on-disk files MUST still load correctly to avoid losing

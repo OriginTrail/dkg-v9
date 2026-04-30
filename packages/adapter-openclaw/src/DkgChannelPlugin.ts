@@ -1887,7 +1887,14 @@ export class DkgChannelPlugin {
       this.deletePendingMarkerPersistence(opts.correlationId);
       return;
     }
-    const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[Math.min(attempt - 1, TURN_PERSIST_RETRY_DELAYS_MS.length - 1)];
+    const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+    if (retryDelayMs == null) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      this.api?.logger.warn?.(
+        `[dkg-channel] ChatTurnWriter marker failed permanently after ${attempt} retry attempt(s) for ${opts.correlationId}: ${err?.message ?? err}`,
+      );
+      return;
+    }
     this.api?.logger.warn?.(
       `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}; retrying marker in ${retryDelayMs}ms: ${err?.message ?? err}`,
     );

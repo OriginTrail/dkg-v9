@@ -341,10 +341,23 @@ export class ChatTurnWriter {
         }
         if (live.size > 0) this.externalTurnMarkers.set(key, live);
       }
+      const finalDiskWm = this.snapshotWatermarksForWrite();
+      wrote = this.writeWatermarkFile(newWatermarkFilePath, {
+        wm: finalDiskWm,
+        bc: this.w4bSessionCounts,
+        markers: this.externalTurnMarkers,
+      });
+      if (!wrote) {
+        this.logger.warn?.(
+          "[ChatTurnWriter.setStateDir] Final post-commit rewrite at new path failed; preserving old path for retry.",
+          { newWatermarkFilePath },
+        );
+      }
     }
-    // T45 — On failure, live state is already untouched. No restore
-    // needed; concurrent persists' advances during the failed merge
-    // are preserved automatically.
+    // T45 - If the initial new-path write failed, live state is still
+    // untouched. If only the final post-union rewrite failed, live may
+    // hold merged state but the old path is preserved so a retry or
+    // normal flush can serialize it without switching to a stale file.
     if (wrote) {
       // Only NOW commit the swap. Subsequent normal writes via
       // `writeWatermarkFile()` (no explicit target) will hit the new
@@ -362,27 +375,6 @@ export class ChatTurnWriter {
       // depends on them.
       this.stateDir = newStateDir;
       this.watermarkFilePath = newWatermarkFilePath;
-      // T54 — Final rewrite at the new path with the post-union live
-      // state. The earlier `writeWatermarkFile(newWatermarkFilePath,
-      // { wm: mergedWm, bc: mergedBc })` wrote a SNAPSHOT taken
-      // before the union; any late persist that fired between
-      // `flush()` returning and the union step landed in live but
-      // not in the file. Without this rewrite, a process crash
-      // before the next debounce flush would leave the new file
-      // stale, and the restarted writer would load the snapshot
-      // and replay turns the daemon already has (daemon does not
-      // dedup — ADR-002). Best-effort; if this write fails, live
-      // still has the unioned state in memory and the next debounce
-      // flush at this path catches up. Race window narrows from
-      // "merge+write+union" (multi-step) to "between this final
-      // rewrite and the next persist's debounce" (~50ms cap, same
-      // shape as the writer's normal durability gap).
-      try { this.writeWatermarkFile(); } catch (err) {
-        this.logger.warn?.(
-          "[ChatTurnWriter.setStateDir] Final post-commit rewrite at new path failed; next debounce flush will retry.",
-          { err, newWatermarkFilePath },
-        );
-      }
     } else {
       // T23/T27 — Internal state stays at the OLD path so a future
       // setStateDir(newStateDir) retry re-attempts the write. The

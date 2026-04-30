@@ -99,6 +99,21 @@ export interface OpenClawToolResult {
 // Channel types
 // ---------------------------------------------------------------------------
 
+export interface OpenClawGatewayLifecycleContext {
+  accountId?: string;
+  account?: Record<string, unknown>;
+  cfg?: any;
+  runtime?: any;
+  abortSignal?: AbortSignal;
+  getStatus?: () => Record<string, unknown>;
+  setStatus?: (status: Record<string, unknown>) => void;
+}
+
+export interface OpenClawGatewayLifecycleAdapter {
+  startAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+  stopAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+}
+
 /** Inbound message from an external channel into OpenClaw. */
 export interface ChannelInboundMessage {
   /** Channel name (e.g. "dkg-ui"). */
@@ -155,6 +170,8 @@ export interface OpenClawChannelAdapter {
   start?(): Promise<void>;
   /** Called when the gateway stops.  Tear down transport. */
   stop?(): Promise<void>;
+  /** Per-account lifecycle hooks consumed by current OpenClaw gateway monitors. */
+  gateway?: OpenClawGatewayLifecycleAdapter;
   /**
    * Called by the gateway when the agent produces a reply for this channel.
    * The adapter should deliver it via its transport.
@@ -388,16 +405,13 @@ export interface DkgOpenClawConfig {
 
   /**
    * Explicit DKG home directory for the daemon the adapter targets via
-   * `daemonUrl`. T42 — when set, the adapter reads the agent eth address
-   * from `<dkgHome>/agent-keystore.json` regardless of the gateway
-   * process's own `DKG_HOME` env. This is the explicit override for
-   * "localhost daemon started with `dkg start --home /custom/path`",
-   * service-unit-managed daemons, or container-isolated daemons where
-   * the gateway's filesystem cannot see the daemon's home dir at the
-   * default path. Falls back to `process.env.DKG_HOME` when undefined.
-   * Ignored when `daemonUrl` is non-localhost (the localhost gate
-   * still applies — remote daemons need the `DKG_AGENT_ADDRESS` env
-   * override or the future daemon endpoint).
+   * `daemonUrl`. Used only for loading the node-level `<dkgHome>/auth.token`
+   * when the daemon runs with a custom home outside the auto-detected
+   * `~/.dkg` / `~/.dkg-dev` homes.
+   *
+   * This is not used for agent identity probing; the adapter resolves the
+   * default agent through `/api/agent/identity` with the node-level Bearer
+   * token.
    */
   dkgHome?: string;
 

@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
+  OpenClawChannelAdapter,
+  OpenClawGatewayLifecycleContext,
   OpenClawPluginApi,
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
@@ -375,6 +377,16 @@ export class DkgChannelPlugin {
   private stopping = false;
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
+  private serverStop: Promise<void> | null = null;
+  private gatewayLifecycleStop: (() => void) | null = null;
+  private gatewayLifecycleOwner: object | null = null;
+  private gatewayLifecyclePendingOwner: object | null = null;
+  private gatewayLifecycleStatusContext: OpenClawGatewayLifecycleContext | null = null;
+  private gatewayLifecycleStatusOwner: object | null = null;
+  private readonly gatewayLifecycleOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecyclePendingOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecycleOwnersByContext = new WeakMap<object, object>();
+  private readonly gatewayLifecycleOwnersBySignal = new WeakMap<AbortSignal, object>();
   /**
    * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
    * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
@@ -540,6 +552,10 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    if (this.serverStop) await this.serverStop;
+    this.stopping = false;
+    this.stopDrainDeadlineAt = null;
+
     if (this.server?.listening) return;
     if (this.serverStart) return this.serverStart;
 
@@ -590,43 +606,261 @@ export class DkgChannelPlugin {
     await this.serverStart;
   }
 
-  async stop(): Promise<void> {
-    this.stopping = true;
-    this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
+  async stop(options: { updateGatewayStatus?: boolean } = {}): Promise<void> {
+    if (this.serverStop) return this.serverStop;
+    const updateGatewayStatus = options.updateGatewayStatus !== false;
+    const stopWork = Promise.resolve().then(async () => {
+      this.stopping = true;
+      this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
 
-    // Reject all pending requests
-    for (const [id, pending] of this.pendingRequests) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Channel shutting down'));
-      this.pendingRequests.delete(id);
+      // Reject all pending requests
+      for (const [id, pending] of this.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Channel shutting down'));
+        this.pendingRequests.delete(id);
+      }
+
+      for (const [id, job] of this.pendingTurnPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingTurnPersistence(id);
+      }
+
+      if (this.serverStart) {
+        await this.serverStart.catch(() => {});
+      }
+
+      if (this.server) {
+        await new Promise<void>((resolve) => {
+          this.server!.close(() => resolve());
+        });
+        this.server = null;
+      }
+
+      const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
+        );
+        this.clearPendingTurnPersistence();
+      }
+      this.stopDrainDeadlineAt = null;
+      if (updateGatewayStatus) {
+        this.reportGatewayLifecycleStopped(this.gatewayLifecycleStatusContext, this.gatewayLifecycleStatusOwner);
+      }
+      this.gatewayLifecycleStop?.();
+      this.gatewayLifecycleStop = null;
+    });
+
+    this.serverStop = stopWork;
+    try {
+      await stopWork;
+    } finally {
+      if (this.serverStop === stopWork) {
+        this.serverStop = null;
+      }
+    }
+  }
+
+  private reportGatewayLifecycleStopped(ctx: OpenClawGatewayLifecycleContext | null | undefined, lifecycleOwner?: object | null): void {
+    if (!ctx) return;
+    this.setGatewayLifecycleStatus(ctx, {
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastStopAt: Date.now(),
+    });
+    if (lifecycleOwner && this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+      this.gatewayLifecycleStatusContext = null;
+      this.gatewayLifecycleStatusOwner = null;
+    }
+  }
+
+  private getGatewayAccountId(ctx: any): string {
+    const accountId = typeof ctx?.accountId === 'string' ? ctx.accountId.trim() : '';
+    return accountId || DEFAULT_CHANNEL_ACCOUNT_ID;
+  }
+
+  private getGatewayLifecycleStatus(ctx: OpenClawGatewayLifecycleContext): Record<string, unknown> {
+    const status = ctx.getStatus?.();
+    return status && typeof status === 'object' ? status : {};
+  }
+
+  private setGatewayLifecycleStatus(
+    ctx: OpenClawGatewayLifecycleContext,
+    patch: Record<string, unknown>,
+  ): void {
+    ctx.setStatus?.({
+      ...this.getGatewayLifecycleStatus(ctx),
+      ...patch,
+      accountId: this.getGatewayAccountId(ctx),
+    });
+  }
+
+  private reportUnsupportedGatewayAccount(ctx: any, message: string): void {
+    ctx?.setStatus?.({
+      accountId: this.getGatewayAccountId(ctx),
+      enabled: false,
+      configured: false,
+      linked: false,
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastError: message,
+      lastStopAt: Date.now(),
+    });
+  }
+
+  private ensureSupportedGatewayAccount(ctx: any): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return;
+    const message = `DKG UI channel only supports the "${DEFAULT_CHANNEL_ACCOUNT_ID}" gateway account`;
+    this.reportUnsupportedGatewayAccount(ctx, message);
+    throw new Error(message);
+  }
+
+  private ignoreUnsupportedGatewayStop(ctx: any): boolean {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return false;
+    this.reportUnsupportedGatewayAccount(ctx, `DKG UI channel does not run gateway account "${accountId}"`);
+    return true;
+  }
+
+  private cancelPendingGatewayLifecycle(ctx: any, lifecycleOwner: object): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = null;
+    }
+    if (this.gatewayLifecycleOwner && this.gatewayLifecycleOwner !== lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = this.gatewayLifecycleOwner;
+    }
+    if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+    }
+    if (ctx && typeof ctx === 'object' && this.gatewayLifecycleOwnersByContext.get(ctx) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersByContext.delete(ctx);
+    }
+    if (signal && this.gatewayLifecycleOwnersBySignal.get(signal) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersBySignal.delete(signal);
+    }
+  }
+
+  private async stopAbortedGatewayLifecycle(ctx: any, lifecycleOwner?: object): Promise<void> {
+    await this.stop({ updateGatewayStatus: false });
+    this.reportGatewayLifecycleStopped(ctx, lifecycleOwner);
+  }
+
+  private async stopCurrentGatewayLifecycle(ctx: any): Promise<void> {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner =
+      (ctx && typeof ctx === 'object' ? this.gatewayLifecycleOwnersByContext.get(ctx) : undefined) ??
+      (signal ? this.gatewayLifecycleOwnersBySignal.get(signal) : undefined) ??
+      this.gatewayLifecycleOwnersByAccount.get(accountId) ??
+      this.gatewayLifecyclePendingOwnersByAccount.get(accountId);
+    const activeOwner = this.gatewayLifecycleOwner;
+    const pendingOwner = this.gatewayLifecyclePendingOwner;
+    if ((activeOwner || pendingOwner) && lifecycleOwner !== activeOwner && lifecycleOwner !== pendingOwner) {
+      return;
+    }
+    if (
+      lifecycleOwner === pendingOwner &&
+      activeOwner &&
+      activeOwner !== pendingOwner &&
+      this.server?.listening === true &&
+      !this.serverStop &&
+      !this.stopping
+    ) {
+      this.cancelPendingGatewayLifecycle(ctx, lifecycleOwner);
+      return;
+    }
+    await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+  }
+
+  private async runGatewayLifecycle(ctx: any): Promise<void> {
+    if (ctx?.abortSignal?.aborted) {
+      return;
     }
 
-    for (const [id, job] of this.pendingTurnPersistence) {
-      if (job.allowDuringShutdown) continue;
-      if (!job.timer) continue;
-      clearTimeout(job.timer);
-      this.deletePendingTurnPersistence(id);
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner = {};
+    this.gatewayLifecyclePendingOwner = lifecycleOwner;
+    this.gatewayLifecyclePendingOwnersByAccount.set(accountId, lifecycleOwner);
+    if (ctx && typeof ctx === 'object') {
+      this.gatewayLifecycleOwnersByContext.set(ctx, lifecycleOwner);
+    }
+    if (signal) {
+      this.gatewayLifecycleOwnersBySignal.set(signal, lifecycleOwner);
     }
 
-    if (this.serverStart) {
-      await this.serverStart.catch(() => {});
-    }
+    try {
+      const hadStableBridgeBeforeStart =
+        this.server?.listening === true &&
+        !this.serverStop &&
+        !this.stopping;
+      await this.start();
+      if (this.gatewayLifecyclePendingOwner !== lifecycleOwner) {
+        return;
+      }
+      if (ctx?.abortSignal?.aborted) {
+        if (!hadStableBridgeBeforeStart) {
+          await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+        }
+        return;
+      }
+      if (this.serverStop || this.stopping || !this.server?.listening) {
+        if (this.serverStop) await this.serverStop;
+          return;
+      }
 
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
+      this.gatewayLifecycleOwner = lifecycleOwner;
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      this.gatewayLifecycleOwnersByAccount.set(accountId, lifecycleOwner);
+      this.gatewayLifecycleStatusContext = ctx;
+      this.gatewayLifecycleStatusOwner = lifecycleOwner;
+      this.setGatewayLifecycleStatus(ctx, {
+        enabled: this.config.enabled !== false,
+        configured: true,
+        linked: true,
+        running: true,
+        connected: true,
+        restartPending: false,
+        lastError: null,
+        lastStartAt: Date.now(),
+        mode: 'webhook',
+        port: this.bridgePort || this.port,
       });
-      this.server = null;
-    }
 
-    const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
-    if (!drained) {
-      this.api?.logger.warn?.(
-        `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
-      );
-      this.clearPendingTurnPersistence();
+      await this.waitForGatewayLifecycleStop(ctx?.abortSignal);
+    } finally {
+      const ownsActiveLifecycle =
+        this.gatewayLifecycleOwner === lifecycleOwner &&
+        this.gatewayLifecyclePendingOwner === lifecycleOwner;
+      if (ctx?.abortSignal?.aborted && ownsActiveLifecycle) {
+        await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+      }
+      if (this.gatewayLifecycleOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecycleOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwner = null;
+      }
+      if (this.gatewayLifecycleOwner === lifecycleOwner) {
+        this.gatewayLifecycleOwner = null;
+      }
+      if (this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+        this.gatewayLifecycleStatusContext = null;
+        this.gatewayLifecycleStatusOwner = null;
+      }
     }
-    this.stopDrainDeadlineAt = null;
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
@@ -735,7 +969,7 @@ export class DkgChannelPlugin {
     return this.sdk;
   }
 
-  private buildRegisteredChannelPlugin() {
+  private buildRegisteredChannelPlugin(): OpenClawChannelAdapter {
     return {
       id: CHANNEL_NAME,
       name: CHANNEL_NAME,
@@ -765,10 +999,40 @@ export class DkgChannelPlugin {
         disabledReason: () => 'disabled',
         unconfiguredReason: () => 'not configured',
       },
+      gateway: {
+        startAccount: async (ctx: any) => {
+          this.ensureSupportedGatewayAccount(ctx);
+          await this.runGatewayLifecycle(ctx);
+        },
+        stopAccount: async (ctx: any) => {
+          if (this.ignoreUnsupportedGatewayStop(ctx)) return;
+          await this.stopCurrentGatewayLifecycle(ctx);
+        },
+      },
       start: () => this.start(),
       stop: () => this.stop(),
       onOutbound: (reply: ChannelOutboundReply) => this.handleOutboundReply(reply),
     };
+  }
+
+  private waitForGatewayLifecycleStop(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.gatewayLifecycleStop?.();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', finish);
+        if (this.gatewayLifecycleStop === finish) {
+          this.gatewayLifecycleStop = null;
+        }
+        resolve();
+      };
+      this.gatewayLifecycleStop = finish;
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
+    });
   }
 
   private resolveRegisteredAccount(accountId?: string): Record<string, unknown> {

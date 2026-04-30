@@ -890,19 +890,13 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).not.toContain('did:dkg:agent:');
     });
 
-    it('dkg_query falls back to nodePeerId when agent_address is omitted on no-keystore nodes (T57/T60)', async () => {
-      // T57 — handler default for omitted agent_address must mirror
-      // the resolver's `nodeAgentAddress ?? nodePeerId` priority.
-      // T60 — fallback gates on `localKeystoreCheckedAndAbsent` so
-      // remote-daemon (probe-skipped) doesn't silently route to
-      // gateway's local peerId.
+    it('dkg_query falls back to nodePeerId when agent_address is omitted before identity resolves', async () => {
+      // Handler default for omitted agent_address must mirror the
+      // daemon's writer-side `defaultAgentAddress ?? peerId` priority.
       const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
       (plugin as any).nodeAgentAddress = undefined;
       (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
-      // T60 — explicitly mark the local-keystore-confirmed-absent
-      // state. Without this the resolver returns undefined on
-      // remote-daemon paths.
-      (plugin as any).localKeystoreCheckedAndAbsent = true;
+      (plugin as any).ensureNodeAgentAddress = vi.fn().mockResolvedValue(undefined);
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
@@ -915,19 +909,12 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).toBe('12D3KooWNoKeystorePeer');
     });
 
-    it('dkg_query refuses to fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
-      // T60 — On remote daemonUrl, `probeNodeAgentAddressOnce()`
-      // intentionally skips the keystore read (T38), so
-      // `nodeAgentAddress` stays undefined AND
-      // `localKeystoreCheckedAndAbsent` stays false. The fallback
-      // to gateway's local peerId would silently scope WM to a
-      // namespace the remote daemon has never heard of. Handler
-      // MUST error in that case so the operator sees the
-      // recovery knobs surfaced.
+    it('dkg_query errors when neither daemon identity nor peerId fallback is available', async () => {
       const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
       (plugin as any).nodeAgentAddress = undefined;
-      (plugin as any).nodePeerId = '12D3KooWGatewayLocal';
-      (plugin as any).localKeystoreCheckedAndAbsent = false;  // remote-daemon: probe skipped
+      (plugin as any).nodePeerId = undefined;
+      (plugin as any).ensureNodeAgentAddress = vi.fn().mockResolvedValue(undefined);
+      (plugin as any).ensureNodePeerId = vi.fn().mockResolvedValue(undefined);
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
@@ -937,9 +924,8 @@ describe('DkgNodePlugin', () => {
       const text = result.content[0].text;
       expect(text).toContain('working-memory');
       expect(text).toContain('agent identity');
-      // Error names the recovery knobs operators should reach for.
-      expect(text).toContain('DKG_AGENT_ADDRESS');
-      expect(text).toContain('dkgHome');
+      expect(text).not.toContain('DKG_AGENT_ADDRESS');
+      expect(text).not.toContain('dkgHome');
     });
 
     it('dkg_query forwards peerId-form WM agent_address verbatim (T48/T53 — daemon accepts as self-alias on no-keystore nodes)', async () => {
@@ -4586,23 +4572,10 @@ describe('DkgNodePlugin', () => {
     });
   });
 
-  describe('node agent address keystore (T31)', () => {
-    // T31 — The resolver returns `nodeAgentAddress` (eth address from
-    // `<DKG_HOME>/agent-keystore.json`) instead of `nodePeerId` (libp2p
-    // from `/api/status`). These tests exercise the new lazy-read pattern
-    // by setting DKG_HOME to a tmpdir and writing/mutating the keystore
-    // file mid-test. Mirrors the previous B9 lazy re-probe semantics for
-    // the keystore source.
-    // T63 — Adapter HTTP-probes `/api/agent/identity` to get the canonical
-    // eth (already EIP-55 from the daemon). Tests stub `client.getAgentIdentity`
-    // and assert resolver returns whatever the stub responded with.
-    // Test fixtures: keystore JSON keys are LOWERCASE (the form the daemon
-    // writes). Stubs return EIP-55 checksum form (what the daemon's HTTP
-    // response gives). Both forms are derived at runtime.
+  describe('node agent address identity probe (#324)', () => {
     const ETH_PRIMARY_LC = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
     const ETH_SECONDARY_LC = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
     const ETH_PRIMARY = toEip55Checksum(ETH_PRIMARY_LC);
-    const ETH_SECONDARY = toEip55Checksum(ETH_SECONDARY_LC);
 
     function makeMockApi(): OpenClawPluginApi {
       return {
@@ -4616,459 +4589,58 @@ describe('DkgNodePlugin', () => {
       } as unknown as OpenClawPluginApi;
     }
 
+    function identityResult(agentAddress: string) {
+      return {
+        ok: true,
+        identity: {
+          agentAddress,
+          agentDid: `did:dkg:agent:${agentAddress}`,
+          name: 'test-agent',
+          peerId: '12D3KooWDaemonPeerFromIdentity',
+          nodeIdentityId: '0',
+        },
+      };
+    }
+
     let tempHome: string;
     let prevDkgHome: string | undefined;
-    let prevAgentEnv: string | undefined;
 
     beforeEach(() => {
-      tempHome = path.join(require('os').tmpdir(), `dkg-node-keystore-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      tempHome = path.join(require('os').tmpdir(), `dkg-node-identity-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       fs.mkdirSync(tempHome, { recursive: true });
       prevDkgHome = process.env.DKG_HOME;
-      prevAgentEnv = process.env.DKG_AGENT_ADDRESS;
       process.env.DKG_HOME = tempHome;
-      delete process.env.DKG_AGENT_ADDRESS;
     });
 
     afterEach(() => {
       if (prevDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = prevDkgHome;
-      if (prevAgentEnv === undefined) delete process.env.DKG_AGENT_ADDRESS;
-      else process.env.DKG_AGENT_ADDRESS = prevAgentEnv;
       try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best effort */ }
     });
 
-    function writeKeystore(addresses: string[]): void {
-      const payload: Record<string, unknown> = {};
-      for (const addr of addresses) payload[addr] = { authToken: `tok-${addr.toLowerCase()}` };
-      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), JSON.stringify(payload));
-    }
-
-    /**
-     * T63 — Stub `client.getAgentIdentity` to return a canned response.
-     * Tests that exercise the local-keystore-with-agent path need this so
-     * the probe doesn't try a real HTTP fetch. Returns the spy so callers
-     * can assert the auth token forwarded matches the keystore entry.
-     */
-    function stubAgentIdentity(plugin: DkgNodePlugin, ethAddress: string): ReturnType<typeof vi.fn> {
-      const spy = vi.fn().mockResolvedValue({
-        ok: true,
-        identity: {
-          agentAddress: ethAddress,
-          agentDid: `did:dkg:agent:${ethAddress}`,
-          name: 'test-agent',
-          peerId: '12D3KooWDaemonPeerFromIdentity',
-          nodeIdentityId: '0',
-        },
-      });
-      (plugin as any).client.getAgentIdentity = spy;
+    function installIdentityClient(plugin: DkgNodePlugin, response: unknown): ReturnType<typeof vi.fn> {
+      const spy = vi.fn().mockResolvedValue(response);
+      (plugin as any).client = { getAgentIdentity: spy };
       return spy;
     }
 
-    it('resolver.getDefaultAgentAddress returns the eth address from the daemon HTTP probe (T31/T63)', async () => {
-      // T63 — Adapter now reads agent token from keystore and HTTP-probes
-      // `/api/agent/identity` to get the canonical eth (already EIP-55).
-      writeKeystore([ETH_PRIMARY_LC]);
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        const spy = stubAgentIdentity(plugin, ETH_PRIMARY);
-        await (plugin as any).ensureNodeAgentAddress();
-        const resolver = (plugin as any).memorySessionResolver;
-        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-        // T63 regression — probe forwards the AGENT auth token from the
-        // keystore (NOT the constructor's node-level token).
-        expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
-      } finally {
-        await plugin.stop();
-      }
-    });
+    function attachResolverApi(plugin: DkgNodePlugin, api: OpenClawPluginApi): void {
+      (plugin as any).memoryResolverApi = api;
+      (plugin as any).dkgHome = tempHome;
+    }
 
-    it('lazily re-reads keystore when the register-time read found no file', async () => {
-      // Keystore absent at register; appears later (e.g. daemon provisions
-      // identity after gateway start).
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        // Stub from the start so the eventual probe doesn't try real HTTP.
-        stubAgentIdentity(plugin, ETH_PRIMARY);
-        // Drive the register-time probe to completion explicitly. With no
-        // keystore, the probe sets `localKeystoreCheckedAndAbsent = true`
-        // and never reaches getAgentIdentity.
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
-        // Drain the .finally microtask so the in-flight promise clears.
-        await new Promise((r) => setImmediate(r));
-
-        // Keystore appears.
-        writeKeystore([ETH_PRIMARY_LC]);
-        // Lazy re-read — fires a fresh probe; keystore now present, so
-        // probe reaches the HTTP stub and sets nodeAgentAddress.
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('multi-agent keystore without DKG_AGENT_ADDRESS fails loud (refuses to guess)', async () => {
-      writeKeystore([ETH_PRIMARY_LC, ETH_SECONDARY_LC]);
-      const api = makeMockApi();
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(api);
-        // Drive the probe directly — `refreshMemoryResolverState` is
-        // fire-and-forget at register-time and the keystore read may
-        // not have landed by the time the test reaches this point.
-        await (plugin as any).ensureNodeAgentAddress();
-        // Refused — `nodeAgentAddress` stays undefined, NOT silently
-        // picked from one of the two keys.
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        // Operator-visible warn fired.
-        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
-        expect(warnCalls.some((m: string) => m.includes('Multi-agent keystore detected'))).toBe(true);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('DKG_AGENT_ADDRESS env disambiguates a multi-agent keystore', async () => {
-      writeKeystore([ETH_PRIMARY_LC, ETH_SECONDARY_LC]);
-      process.env.DKG_AGENT_ADDRESS = ETH_SECONDARY;
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        const spy = stubAgentIdentity(plugin, ETH_SECONDARY);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_SECONDARY);
-        // T63 — env disambiguates which keystore entry's authToken to forward.
-        expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_SECONDARY_LC}` });
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('falls back to nodePeerId when nodeAgentAddress is unresolved on confirmed-local-no-keystore (T56/T60)', async () => {
-      // T56 — On fresh / auth-disabled / no-keystore nodes, the
-      // daemon's writer-side falls back to peerId via
-      // `defaultAgentAddress ?? peerId`. Adapter resolver mirrors
-      // that priority. T60 — fallback gates on
-      // `localKeystoreCheckedAndAbsent`, set by `probeNodeAgentAddressOnce`
-      // when a localhost-gated probe legitimately found no keystore.
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        // Drive the probe — empty tempDir yields no keystore →
-        // probe sets `localKeystoreCheckedAndAbsent = true`.
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
-        (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
-        const resolver = (plugin as any).memorySessionResolver;
-        expect(resolver.getDefaultAgentAddress()).toBe('12D3KooWNoKeystorePeer');
-        expect(resolver.getSession(undefined)?.agentAddress).toBe('12D3KooWNoKeystorePeer');
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('does NOT fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
-      // T60 — `probeNodeAgentAddressOnce` skips the keystore read
-      // for non-localhost daemonUrl. `localKeystoreCheckedAndAbsent`
-      // stays false → resolver returns undefined even though
-      // nodePeerId is populated. Without the gate, remote-daemon
-      // recall would silently scope WM to gateway's local peerId
-      // (which the remote daemon has never heard of) instead of
-      // surfacing the actual misconfiguration via the "backend
-      // not ready" path.
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://daemon.example.com:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-        (plugin as any).nodePeerId = '12D3KooWGatewayLocalPeer';
-        const resolver = (plugin as any).memorySessionResolver;
-        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
-        expect(resolver.getSession(undefined)?.agentAddress).toBeUndefined();
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('keystore eth wins over peerId when both are available (T56 — keystore-present deployments)', async () => {
-      // T56 — Keystore-present deployments must keep using eth
-      // (the original Bug A / T31 fix). Fallback only kicks in when
-      // nodeAgentAddress is undefined.
-      writeKeystore([ETH_PRIMARY_LC]);
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        stubAgentIdentity(plugin, ETH_PRIMARY);
-        await (plugin as any).ensureNodeAgentAddress();
-        (plugin as any).nodePeerId = '12D3KooWShouldNotBeReturned';
-        const resolver = (plugin as any).memorySessionResolver;
-        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
-        expect(resolver.getSession(undefined)?.agentAddress).toBe(ETH_PRIMARY);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('skips keystore read for remote daemonUrl + warns operator (T38)', async () => {
-      // T38 — Remote/custom-daemon setup: gateway's local keystore is
-      // either absent or belongs to a different identity. Reading it
-      // would silently scope WM queries to the wrong agent. Adapter
-      // must skip the read, leave nodeAgentAddress undefined, and
-      // surface an operator-actionable warn.
-      writeKeystore([ETH_PRIMARY_LC]);
-      const api = makeMockApi();
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://daemon.example.com:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(api);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
-        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('rejects invalid DKG_AGENT_ADDRESS for the localhost gate, warns, falls through to remote-skip (T44)', async () => {
-      // T44 — `DKG_AGENT_ADDRESS=foo` (typo) must NOT bypass the
-      // localhost gate. Pre-fix: truthy-string check passed → gate
-      // skipped → keystore read with no env override → scoped WM
-      // to the gateway's local identity for a remote-daemon setup.
-      writeKeystore([ETH_PRIMARY_LC]);
-      process.env.DKG_AGENT_ADDRESS = 'foo';
-      const api = makeMockApi();
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://daemon.example.com:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(api);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
-        expect(warnCalls.some((m: string) => m.includes('not a valid 0x-prefixed eth address'))).toBe(true);
-        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('treats IPv6 loopback (`http://[::1]:…`) as localhost (T40)', async () => {
-      // T40 — `new URL('http://[::1]:9200').hostname` returns `[::1]`
-      // (with brackets) per WHATWG URL. Without bracket-stripping,
-      // the heuristic misclassifies a local IPv6 daemon as remote
-      // and skips the keystore read, leaving recall/search broken
-      // for an entirely valid local-only deployment.
-      writeKeystore([ETH_PRIMARY_LC]);
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://[::1]:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        stubAgentIdentity(plugin, ETH_PRIMARY);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('config.dkgHome overrides DKG_HOME for the keystore read (T42)', async () => {
-      // T42 — Operator runs `dkg start --home /custom/path` (or daemon
-      // is service-unit-managed with its own home). Gateway process's
-      // DKG_HOME points elsewhere (or default). Explicit `dkgHome`
-      // config field must reach the keystore read so the adapter
-      // resolves the right identity without env-level coordination.
-      const otherHome = path.join(require('os').tmpdir(), `dkg-other-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      fs.mkdirSync(otherHome, { recursive: true });
-      try {
-        // Write keystore at OTHER home; leave the env-DKG_HOME tempHome empty.
-        fs.writeFileSync(
-          path.join(otherHome, 'agent-keystore.json'),
-          JSON.stringify({ [ETH_PRIMARY_LC]: { authToken: 'other-home-tok' } }),
-        );
-        const plugin = new DkgNodePlugin({
-          daemonUrl: 'http://localhost:9200',
-          dkgHome: otherHome,
-          memory: { enabled: true },
-          channel: { enabled: false },
-        });
-        try {
-          plugin.register(makeMockApi());
-          stubAgentIdentity(plugin, ETH_PRIMARY);
-          await (plugin as any).ensureNodeAgentAddress();
-          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-        } finally {
-          await plugin.stop();
-        }
-      } finally {
-        try { fs.rmSync(otherHome, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
-    });
-
-    it('localhost + DKG_AGENT_ADDRESS + missing keystore: env override wins, no peerId fallback (T68)', async () => {
-      // T68 — When the operator supplies `DKG_AGENT_ADDRESS` AND the local
-      // keystore is genuinely absent (e.g., container/service-unit split
-      // where the gateway can't see the daemon's home), the env value
-      // MUST flow into `nodeAgentAddress` directly. Pre-fix the probe
-      // unconditionally set `localKeystoreCheckedAndAbsent = true` on the
-      // missing-keystore branch and the env override was silently
-      // ignored — the resolver returned `nodePeerId` instead of the
-      // operator's asserted eth.
-      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        const spy = stubAgentIdentity(plugin, 'unused');
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-        // No HTTP probe — env override short-circuited the resolution.
-        expect(spy).not.toHaveBeenCalled();
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('malformed keystore JSON triggers kind=unusable, NO peerId fallback, transient retry (T64)', async () => {
-      // T64 — File present but malformed (operator mid-write, JSON parse
-      // error, EACCES). The peerId fallback is UNSAFE — the daemon may
-      // already be using eth on this same host. Probe must NOT set the
-      // `localKeystoreCheckedAndAbsent` flag, so the resolver returns
-      // undefined (operator sees "not ready"), and the next probe retries.
-      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
-      const api = makeMockApi();
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(api);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
-        expect(warnCalls.some((m: string) => m.includes('keystore present but unusable'))).toBe(true);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('keystore eth entry without authToken triggers kind=unusable (T64)', async () => {
-      // Eth key present but no authToken field — malformed entry. Same
-      // semantics as malformed JSON: NO peerId fallback, transient retry.
+    function writePoisonKeystore(): void {
       fs.writeFileSync(
         path.join(tempHome, 'agent-keystore.json'),
-        JSON.stringify({ [ETH_PRIMARY_LC]: { privateKey: '0xpk' } }),
+        JSON.stringify({
+          [ETH_PRIMARY_LC]: { authToken: 'agent-token-that-must-not-be-read' },
+          [ETH_SECONDARY_LC]: { authToken: 'second-token-that-would-have-triggered-multi-agent-branch' },
+        }),
       );
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-      } finally {
-        await plugin.stop();
-      }
-    });
+    }
 
-    it('localKeystoreCheckedAndAbsent resets on each probe (T64/T66 — sticky-flag fix)', async () => {
-      // T64/T66 — After a first probe that sets the flag (legitimate
-      // keystore-absent state), a second probe that finds the keystore
-      // present but mid-write (malformed) MUST clear the flag back to
-      // false. Pre-fix the flag was sticky and the resolver kept routing
-      // to peerId even after the keystore appeared.
-      const plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        memory: { enabled: true },
-        channel: { enabled: false },
-      });
-      try {
-        plugin.register(makeMockApi());
-        // Probe 1 — empty tempHome → kind=absent → flag set.
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
-        await new Promise((r) => setImmediate(r));
-
-        // Probe 2 — malformed JSON appears → kind=unusable → flag MUST
-        // reset to false (transient).
-        fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-        await new Promise((r) => setImmediate(r));
-
-        // Probe 3 — valid keystore appears → flag stays false (real
-        // success path), nodeAgentAddress set from HTTP probe.
-        writeKeystore([ETH_PRIMARY_LC]);
-        stubAgentIdentity(plugin, ETH_PRIMARY);
-        await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-      } finally {
-        await plugin.stop();
-      }
-    });
-
-    it('HTTP probe failure leaves nodeAgentAddress undefined and localKeystoreCheckedAndAbsent false (T63)', async () => {
-      // T63 — A transient HTTP failure (daemon down, 401, 5xx) is NOT a
-      // signal that the keystore is missing. The probe must keep the
-      // door open for retry: nodeAgentAddress stays undefined AND
-      // localKeystoreCheckedAndAbsent stays false (so the resolver
-      // returns undefined → "backend not ready" surfaces, NOT the
-      // peerId fallback which is only correct when keystore is genuinely
-      // absent).
-      writeKeystore([ETH_PRIMARY_LC]);
+    it('caches the daemon default agent from the HTTP identity probe and ignores local keystore content', async () => {
+      writePoisonKeystore();
       const api = makeMockApi();
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -5076,51 +4648,100 @@ describe('DkgNodePlugin', () => {
         channel: { enabled: false },
       });
       try {
-        plugin.register(api);
-        const failingSpy = vi.fn().mockResolvedValue({ ok: false, error: 'ECONNREFUSED' });
-        (plugin as any).client.getAgentIdentity = failingSpy;
+        attachResolverApi(plugin, api);
+        const spy = installIdentityClient(plugin, identityResult(ETH_PRIMARY));
+
         await (plugin as any).ensureNodeAgentAddress();
-        expect((plugin as any).nodeAgentAddress).toBeUndefined();
-        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
-        // Forwarded the agent token from the keystore (regression).
-        expect(failingSpy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
-        // Operator-visible warn fired.
-        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
-        expect(warnCalls.some((m: string) => m.includes('/api/agent/identity probe failed'))).toBe(true);
+
+        const resolver = (plugin as any).memorySessionResolver;
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
+        expect(resolver.getSession(undefined)?.agentAddress).toBe(ETH_PRIMARY);
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0]).toEqual([]);
       } finally {
         await plugin.stop();
       }
     });
 
-    it('honors DKG_AGENT_ADDRESS even when daemonUrl is remote (T38)', async () => {
-      // T38 — Operator escape hatch: setting DKG_AGENT_ADDRESS lets
-      // remote-daemon deployments scope WM correctly without waiting
-      // for the daemon-side endpoint to ship.
-      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
+    it('probes daemon identity for non-local daemonUrl instead of skipping to local keystore logic', async () => {
+      writePoisonKeystore();
+      const api = makeMockApi();
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://daemon.example.com:9200',
         memory: { enabled: true },
         channel: { enabled: false },
       });
       try {
-        plugin.register(makeMockApi());
+        attachResolverApi(plugin, api);
+        const spy = installIdentityClient(plugin, identityResult(ETH_PRIMARY));
+
         await (plugin as any).ensureNodeAgentAddress();
+
         expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect(spy).toHaveBeenCalledWith();
       } finally {
         await plugin.stop();
       }
     });
 
-    it('T70 — when resolved <dkgHome>/auth.token is briefly missing, client does NOT silently fall back to ~/.dkg/auth.token', async () => {
-      // T70 corner case (caught in QA review): the resolver picks the live
-      // daemon's home (~/.dkg-dev), but its auth.token is briefly absent
-      // (operator deleted it during a token rotation, mid-write, fresh
-      // checkout where the daemon hasn't yet written the token, etc.).
-      // The OTHER home (~/.dkg) has a stale auth.token from a previous
-      // npm-side install. Without `dkgHome` plumbed through DkgClientOptions,
-      // the constructor's `?? loadTokenFromFile()` no-arg fallback would
-      // read the default ~/.dkg/auth.token and silently authenticate with
-      // the wrong identity → 401 on every authenticated daemon call.
+    it('debounces concurrent daemon identity probes', async () => {
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      try {
+        attachResolverApi(plugin, api);
+        const spy = vi.fn(async () => {
+          await gate;
+          return identityResult(ETH_PRIMARY);
+        });
+        (plugin as any).client = { getAgentIdentity: spy };
+
+        const first = (plugin as any).ensureNodeAgentAddress();
+        const second = (plugin as any).ensureNodeAgentAddress();
+        expect(spy).toHaveBeenCalledTimes(1);
+        release();
+        await Promise.all([first, second]);
+
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('warns on failed identity probe and keeps the nodePeerId fallback available', async () => {
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        attachResolverApi(plugin, api);
+        (plugin as any).nodePeerId = '12D3KooWPeerFallback';
+        installIdentityClient(plugin, { ok: false, error: '401 Unauthorized' });
+
+        await (plugin as any).ensureNodeAgentAddress();
+
+        const resolver = (plugin as any).memorySessionResolver;
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect(resolver.getDefaultAgentAddress()).toBe('12D3KooWPeerFallback');
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('/api/agent/identity probe failed'))).toBe(true);
+        expect(warnCalls.some((m: string) => m.includes('node API token'))).toBe(true);
+        expect(warnCalls.some((m: string) => m.includes('keystore'))).toBe(false);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('keeps resolved dkgHome scoped to node-level auth.token loading only', async () => {
       delete process.env.DKG_HOME;
 
       const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -5131,15 +4752,36 @@ describe('DkgNodePlugin', () => {
 
       const prevHome = process.env.HOME;
       const prevUserProfile = process.env.USERPROFILE;
+      const originalFetch = globalThis.fetch;
       process.env.HOME = isolatedHome;
       process.env.USERPROFILE = isolatedHome;
 
+      globalThis.fetch = vi.fn(async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: '12D3KooWResolvedHomePeer' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/agent/identity')) {
+          return new Response(JSON.stringify(identityResult(ETH_PRIMARY).identity), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(JSON.stringify({ contextGraphs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as any;
+
       try {
-        // Stale npm-side token that MUST NOT bleed into the client.
         fs.writeFileSync(path.join(dkg, 'auth.token'), 'STALE-NPM-TOKEN');
-        // Live monorepo daemon with no auth.token (briefly missing).
         fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
-        // (no auth.token in dkgDev — that's the corner case)
 
         const plugin = new DkgNodePlugin({
           daemonUrl: 'http://127.0.0.1:9200',
@@ -5148,16 +4790,13 @@ describe('DkgNodePlugin', () => {
         });
         try {
           plugin.register(makeMockApi());
-          // Resolver correctly picks the live monorepo dir.
           expect((plugin as any).dkgHome).toBe(dkgDev);
-          // CRITICAL invariant — apiToken must be undefined (the resolved
-          // home's auth.token is absent). It must NOT silently pick up
-          // 'STALE-NPM-TOKEN' from the other home.
           expect((plugin as any).client.apiToken).toBeUndefined();
         } finally {
           await plugin.stop();
         }
       } finally {
+        globalThis.fetch = originalFetch;
         if (prevHome === undefined) delete process.env.HOME;
         else process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
@@ -5166,99 +4805,65 @@ describe('DkgNodePlugin', () => {
       }
     });
 
-    it('T70 — auto-resolves dkgHome to the live daemon dir when both ~/.dkg and ~/.dkg-dev exist (no env override)', async () => {
-      // T70 — User's monorepo↔npm switch scenario: both home dirs exist on
-      // disk, but only the monorepo daemon is currently alive. Adapter
-      // should pick ~/.dkg-dev automatically, with no openclaw.json edit
-      // and no DKG_HOME env override.
-      //
-      // Test redirects `homedir()` by overriding HOME / USERPROFILE to a
-      // tmp dir, then writes:
-      //   <tmp>/.dkg/daemon.pid       = 999999999      (stale, dead)
-      //   <tmp>/.dkg/api.port         = 9200           (stale)
-      //   <tmp>/.dkg/auth.token       = "wrong-token"  (npm-side stale)
-      //   <tmp>/.dkg-dev/daemon.pid   = process.pid    (alive)
-      //   <tmp>/.dkg-dev/api.port     = 9200           (live)
-      //   <tmp>/.dkg-dev/auth.token   = "right-token"  (monorepo-side live)
-      //   <tmp>/.dkg-dev/agent-keystore.json = { ETH_PRIMARY_LC: { authToken: 'tok-…' } }
-      //
-      // Expected: plugin's resolved dkgHome === <tmp>/.dkg-dev,
-      // its DkgDaemonClient.apiToken === "right-token", and the keystore
-      // probe forwards the dkg-dev keystore's authToken (not dkg's).
+    it('honors config.dkgHome for node-level auth.token without using agent-keystore identity auth', async () => {
+      const customHome = path.join(require('os').tmpdir(), `dkg-custom-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      fs.mkdirSync(customHome, { recursive: true });
+      fs.writeFileSync(path.join(customHome, 'auth.token'), 'CUSTOM-NODE-TOKEN');
+      fs.writeFileSync(
+        path.join(customHome, 'agent-keystore.json'),
+        JSON.stringify({
+          [ETH_PRIMARY_LC]: { authToken: 'agent-token-that-must-not-be-forwarded' },
+          [ETH_SECONDARY_LC]: { authToken: 'second-agent-token-that-must-not-matter' },
+        }),
+      );
 
-      // Force resolveDkgHome out of the env-wins shortcut so it actually
-      // exercises the liveness signal path.
-      delete process.env.DKG_HOME;
-
-      // Redirect `homedir()` to a fresh tmp dir.
-      const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      const dkg = path.join(isolatedHome, '.dkg');
-      const dkgDev = path.join(isolatedHome, '.dkg-dev');
-      fs.mkdirSync(dkg, { recursive: true });
-      fs.mkdirSync(dkgDev, { recursive: true });
-
-      const prevHome = process.env.HOME;
-      const prevUserProfile = process.env.USERPROFILE;
-      process.env.HOME = isolatedHome;
-      process.env.USERPROFILE = isolatedHome; // Windows
-
-      try {
-        // Stale npm-side state.
-        fs.writeFileSync(path.join(dkg, 'daemon.pid'), '999999999');
-        fs.writeFileSync(path.join(dkg, 'api.port'), '9200');
-        fs.writeFileSync(path.join(dkg, 'auth.token'), 'wrong-token-from-npm-side');
-
-        // Live monorepo-side state — same port (the user's exact scenario).
-        fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
-        fs.writeFileSync(path.join(dkgDev, 'api.port'), '9200');
-        fs.writeFileSync(path.join(dkgDev, 'auth.token'), 'right-token-from-monorepo-side');
-        fs.writeFileSync(
-          path.join(dkgDev, 'agent-keystore.json'),
-          JSON.stringify({ [ETH_PRIMARY_LC]: { authToken: `tok-${ETH_PRIMARY_LC}` } }),
-        );
-
-        const plugin = new DkgNodePlugin({
-          daemonUrl: 'http://127.0.0.1:9200',
-          memory: { enabled: true },
-          channel: { enabled: false },
-          // No `dkgHome` override — we want the auto-resolver to fire.
-        });
-        try {
-          plugin.register(makeMockApi());
-
-          // (a) Plugin resolved to the live monorepo dir, not the stale npm one.
-          expect((plugin as any).dkgHome).toBe(dkgDev);
-
-          // (b) DkgDaemonClient picked up the live dir's auth.token (not the
-          //     stale wrong-token from ~/.dkg/auth.token).
-          expect((plugin as any).client.apiToken).toBe('right-token-from-monorepo-side');
-
-          // (c) HTTP probe forwards the keystore's agent token (the keystore
-          //     was only written into ~/.dkg-dev — if the resolver had picked
-          //     ~/.dkg, this would fail with 'absent').
-          const spy = vi.fn().mockResolvedValue({
-            ok: true,
-            identity: {
-              agentAddress: ETH_PRIMARY,
-              agentDid: `did:dkg:agent:${ETH_PRIMARY}`,
-              name: 'test-agent',
-              peerId: '12D3KooWDaemonPeerFromIdentity',
-              nodeIdentityId: '0',
-            },
+      const originalFetch = globalThis.fetch;
+      const identityRequests: RequestInit[] = [];
+      globalThis.fetch = vi.fn(async (input: any, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: '12D3KooWCustomHomePeer' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
           });
-          (plugin as any).client.getAgentIdentity = spy;
-          await (plugin as any).ensureNodeAgentAddress();
-          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
-          expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
-        } finally {
-          await plugin.stop();
         }
+        if (url.includes('/api/agent/identity')) {
+          identityRequests.push(init ?? {});
+          return new Response(JSON.stringify(identityResult(ETH_PRIMARY).identity), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(JSON.stringify({ contextGraphs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://127.0.0.1:9200',
+        dkgHome: customHome,
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        expect((plugin as any).dkgHome).toBe(customHome);
+        expect((plugin as any).client.apiToken).toBe('CUSTOM-NODE-TOKEN');
+
+        await (plugin as any).ensureNodeAgentAddress();
+
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect(identityRequests.length).toBeGreaterThanOrEqual(1);
+        const auth = new Headers(identityRequests.at(-1)?.headers as HeadersInit).get('authorization');
+        expect(auth).toBe('Bearer CUSTOM-NODE-TOKEN');
       } finally {
-        if (prevHome === undefined) delete process.env.HOME;
-        else process.env.HOME = prevHome;
-        if (prevUserProfile === undefined) delete process.env.USERPROFILE;
-        else process.env.USERPROFILE = prevUserProfile;
-        try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* best effort */ }
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+        try { fs.rmSync(customHome, { recursive: true, force: true }); } catch { /* best effort */ }
       }
     });
   });

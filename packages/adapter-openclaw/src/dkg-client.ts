@@ -143,34 +143,21 @@ export class DkgDaemonClient {
   }
 
   /**
-   * T63 — Probe the daemon's `/api/agent/identity` route to discover the
-   * canonical agent identity for the supplied agent-bound auth token.
+   * Probe the daemon's `/api/agent/identity` route using the client's normal
+   * constructor-loaded node-level Bearer token.
    *
-   * This replaces the previous T62 path of reading the keystore JSON key
-   * and EIP-55-checksumming it client-side. The daemon already returns
-   * `agentAddress` in canonical EIP-55 form (set from `verifyWallet.address`
-   * at registration), so the adapter trusts the response verbatim and the
-   * checksum helper no longer needs to be applied to keystore reads.
-   *
-   * The endpoint requires AGENT-bound auth (not the node-level token in
-   * `auth.token`). Callers extract the per-agent token from
-   * `agent-keystore.json` (via `loadAgentAuthTokenSync` in dkg-core) and
-   * pass it through `opts.authToken`. The constructor's default node-level
-   * Bearer is bypassed for this call.
-   *
-   * Failure shape mirrors `getStatus()`: `{ ok: false, error }` for
-   * transport / 401 / 5xx so the probe site can branch without try/catch.
+   * The daemon resolves unknown node-level tokens to its default agent address,
+   * so the response is the canonical WM identity the adapter should cache.
+   * Failure shape mirrors `getStatus()`: `{ ok: false, error }` for transport,
+   * 401, and 5xx responses so the probe site can branch without try/catch.
    */
-  async getAgentIdentity(opts: { authToken: string }): Promise<{
+  async getAgentIdentity(): Promise<{
     ok: boolean;
     identity?: AgentIdentity;
     error?: string;
   }> {
     try {
-      const data = await this.get<Record<string, unknown>>(
-        '/api/agent/identity',
-        { Authorization: `Bearer ${opts.authToken}` },
-      );
+      const data = await this.get<Record<string, unknown>>('/api/agent/identity');
       return {
         ok: true,
         identity: {
@@ -763,24 +750,8 @@ export class DkgDaemonClient {
   // HTTP primitives
   // ---------------------------------------------------------------------------
 
-  /**
-   * T63 — `headersOverride` lets callers replace the constructor's
-   * node-level Bearer for a single request. Used by `getAgentIdentity`
-   * which requires the agent-bound auth token (loaded per-request from
-   * the keystore), not the node-level `auth.token`. Without this, the
-   * request would fail with 401 because `/api/agent/identity` rejects
-   * node-level tokens.
-   */
-  private async get<T>(
-    path: string,
-    headersOverride?: Record<string, string>,
-  ): Promise<T> {
-    const headers: Record<string, string> = { 'Accept': 'application/json' };
-    if (headersOverride) {
-      Object.assign(headers, headersOverride);
-    } else {
-      Object.assign(headers, this.authHeaders());
-    }
+  private async get<T>(path: string): Promise<T> {
+    const headers: Record<string, string> = { 'Accept': 'application/json', ...this.authHeaders() };
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
       headers,

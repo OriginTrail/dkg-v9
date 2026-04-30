@@ -1775,6 +1775,120 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
+  it('stop should force one final ChatTurnWriter marker flush before dropping timed-out marker jobs', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveSecondMarker!: () => void;
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveSecondMarker = resolve; }));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-stop-timeout', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(1);
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+
+      resolveSecondMarker();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect(markExternalTurnPersistedDurable).toHaveBeenLastCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-marker-stop-timeout',
+        user: 'Already stored',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should keep the final ChatTurnWriter marker flush bounded when the final write hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockImplementation(() => new Promise(() => {}));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-stop-timeout-hang', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(249);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('Final ChatTurnWriter marker flush timed out'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('persistTurn should use separate sessionId for non-owner identities', async () => {
     const { runtime } = makeMockRuntime({
       resolveAgentRouteImpl: () => ({ agentId: 'agent-1', sessionKey: 'session-1' }),
@@ -1923,6 +2037,7 @@ describe('DkgChannelPlugin', () => {
     const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-route-marker',
       text: 'Reply!',
+      sessionKey: 'agent:main:main',
     }));
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
@@ -1955,6 +2070,7 @@ describe('DkgChannelPlugin', () => {
     const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-route-ownerish',
       text: 'Reply!',
+      sessionKey: 'agent:main:owner',
     }));
     client.storeChatTurn = async () => undefined as any;
     const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
@@ -1982,6 +2098,7 @@ describe('DkgChannelPlugin', () => {
     const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-route-worker',
       text: 'Worker reply',
+      sessionKey: 'agent:main:background-worker',
     }));
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
@@ -2034,6 +2151,40 @@ describe('DkgChannelPlugin', () => {
       user: 'Hello',
       assistant: 'Reply!',
     });
+  });
+
+  it('processInbound routeInboundMessage fallback skips marker persistence when the route does not return its resolved session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-no-session',
+      text: 'Reply!',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({
+      routeInboundMessage,
+      logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+    });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-no-session', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      SessionKey: 'agent:main:main',
+    }));
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply!',
+      { turnId: 'corr-route-no-session' },
+    ]);
+    expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+    expect(api.logger.warn.calls.some((call: unknown[]) =>
+      String(call[0]).includes('did not include sessionKey'),
+    )).toBe(true);
   });
 
   it('processInbound wraps the routeInboundMessage fallback in an ALS dispatch scope so slot-backed recall sees the UI-selected CG (Codex B13)', async () => {

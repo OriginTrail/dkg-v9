@@ -38,6 +38,7 @@ const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
 const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
 const STOP_DRAIN_TIMEOUT_MS = 1_500;
+const FINAL_MARKER_FLUSH_TIMEOUT_MS = 250;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
 const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
 const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
@@ -224,6 +225,14 @@ interface PersistTurnOptions {
   turnId?: string;
 }
 
+interface ExternalTurnMarkerPersistOptions {
+  sessionKey?: string;
+  turnId: string;
+  user: string;
+  assistant: string;
+  correlationId: string;
+}
+
 interface InboundChatOptions {
   attachmentRefs?: OpenClawAttachmentRef[];
   contextEntries?: ChatContextEntry[];
@@ -370,6 +379,8 @@ export class DkgChannelPlugin {
     attempt: number;
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
+    opts: ExternalTurnMarkerPersistOptions;
+    inFlight: Promise<void> | null;
   }>();
   /**
    * Per-dispatch AsyncLocalStorage holding the UI-selected project
@@ -667,6 +678,7 @@ export class DkgChannelPlugin {
         this.api?.logger.warn?.(
           `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
         );
+        await this.flushPendingMarkerPersistenceBeforeDrop();
         this.clearPendingTurnPersistence();
         this.clearPendingMarkerPersistence();
       }
@@ -925,6 +937,56 @@ export class DkgChannelPlugin {
     }
     this.pendingMarkerPersistence.clear();
     this.notifyStopIdle();
+  }
+
+  private async flushPendingMarkerPersistenceBeforeDrop(): Promise<void> {
+    if (!this.chatTurnWriter || this.pendingMarkerPersistence.size === 0) return;
+    const jobs = Array.from(this.pendingMarkerPersistence.entries());
+    const deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS;
+    for (const [correlationId, job] of jobs) {
+      try {
+        if (job.timer) clearTimeout(job.timer);
+        const remainingMs = Math.max(0, deadlineAt - Date.now());
+        if (remainingMs === 0) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+          continue;
+        }
+        const markerWrite = job.inFlight ?? this.writeExternalTurnMarker(job.opts);
+        const flushed = await this.waitForExternalMarkerWrite(markerWrite, remainingMs);
+        if (!flushed) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+        }
+      } catch (err: any) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Final ChatTurnWriter marker flush failed during shutdown for ${correlationId}: ${err?.message ?? err}`,
+        );
+      } finally {
+        this.pendingMarkerPersistence.delete(correlationId);
+      }
+    }
+    this.notifyStopIdle();
+  }
+
+  private async waitForExternalMarkerWrite(
+    markerWrite: Promise<void>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    void markerWrite.catch(() => {});
+    try {
+      return await Promise.race([
+        markerWrite.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private notifyStopIdle(): void {
@@ -1195,13 +1257,17 @@ export class DkgChannelPlugin {
         }),
       );
       const { sessionKey: replySessionKey, SessionKey: replyOpenClawSessionKey, ...replyForCaller } = reply;
-      const sessionKey =
+      const returnedSessionKey =
         (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
-        || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '')
-        || fallbackSessionKey;
+        || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '');
+      if (!returnedSessionKey && this.chatTurnWriter) {
+        api.logger.warn?.(
+          `[dkg-channel] routeInboundMessage reply for ${correlationId} did not include sessionKey; skipping ChatTurnWriter marker for this direct-channel turn.`,
+        );
+      }
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
-        sessionKey,
+        sessionKey: returnedSessionKey || undefined,
       }, true);
       return replyForCaller;
     }
@@ -1854,14 +1920,12 @@ export class DkgChannelPlugin {
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
 
-  private async markExternalTurnPersistedAfterStore(opts: {
-    sessionKey?: string;
-    turnId: string;
-    user: string;
-    assistant: string;
-    correlationId: string;
-  }, allowDuringShutdown: boolean): Promise<void> {
+  private async markExternalTurnPersistedAfterStore(
+    opts: ExternalTurnMarkerPersistOptions,
+    allowDuringShutdown: boolean,
+  ): Promise<void> {
     if (!this.chatTurnWriter) return;
+    if (!opts.sessionKey) return;
     try {
       await this.writeExternalTurnMarker(opts);
       this.deletePendingMarkerPersistence(opts.correlationId);
@@ -1870,12 +1934,7 @@ export class DkgChannelPlugin {
     }
   }
 
-  private async writeExternalTurnMarker(opts: {
-    sessionKey?: string;
-    turnId: string;
-    user: string;
-    assistant: string;
-  }): Promise<void> {
+  private async writeExternalTurnMarker(opts: ExternalTurnMarkerPersistOptions): Promise<void> {
     await this.chatTurnWriter?.markExternalTurnPersistedDurable({
       sessionKey: opts.sessionKey,
       turnId: opts.turnId,
@@ -1885,13 +1944,7 @@ export class DkgChannelPlugin {
   }
 
   private scheduleExternalTurnMarkerRetry(
-    opts: {
-      sessionKey?: string;
-      turnId: string;
-      user: string;
-      assistant: string;
-      correlationId: string;
-    },
+    opts: ExternalTurnMarkerPersistOptions,
     attempt: number,
     allowDuringShutdown: boolean,
     err: any,
@@ -1918,8 +1971,15 @@ export class DkgChannelPlugin {
         this.deletePendingMarkerPersistence(opts.correlationId);
         return;
       }
-      this.pendingMarkerPersistence.set(opts.correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
-      void this.writeExternalTurnMarker(opts)
+      const markerWrite = this.writeExternalTurnMarker(opts);
+      this.pendingMarkerPersistence.set(opts.correlationId, {
+        attempt: attempt + 1,
+        timer: null,
+        allowDuringShutdown,
+        opts,
+        inFlight: markerWrite,
+      });
+      void markerWrite
         .then(() => {
           this.deletePendingMarkerPersistence(opts.correlationId);
         })
@@ -1927,7 +1987,13 @@ export class DkgChannelPlugin {
           this.scheduleExternalTurnMarkerRetry(opts, attempt + 1, allowDuringShutdown, nextErr);
         });
     }, retryDelayMs);
-    this.pendingMarkerPersistence.set(opts.correlationId, { attempt, timer, allowDuringShutdown });
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt,
+      timer,
+      allowDuringShutdown,
+      opts,
+      inFlight: null,
+    });
     this.notifyStopIdle();
   }
 

@@ -74,12 +74,16 @@ DKG_HOME="$DKG_HOME" dkg update 9.0.5 --no-verify-tag
 
 ## 5) Validate swap and metadata after each update
 
+Git-based blue-green updates require the Node UI static bundle before swapping. `build:runtime` now also emits the bundle so nodes updating from an older updater still prepare the UI, and the new updater keeps a pre-swap bundle check.
+
 ```bash
 readlink "$DKG_HOME/releases/current"
 cat "$DKG_HOME/releases/active"
 cat "$DKG_HOME/.current-commit"
 cat "$DKG_HOME/.current-version"
 test ! -f "$DKG_HOME/.update-pending.json" && echo "pending state cleared"
+SLOT="$(readlink -f "$DKG_HOME/releases/current")"
+test -f "$SLOT/packages/node-ui/dist-ui/index.html" && echo "Node UI static bundle ready"
 ```
 
 ## 6) Rollback test

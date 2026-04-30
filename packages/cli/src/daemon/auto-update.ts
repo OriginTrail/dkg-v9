@@ -45,6 +45,16 @@ import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
 } from '../extraction/markitdown-bundle-metadata.js';
+import {
+  NODE_UI_PACKAGE_NAME_FALLBACKS,
+  nodeUiPackageJsonPath,
+  nodeUiPackageNamesFromCliPackageJson,
+  nodeUiPackageNameFromPackageJson,
+  nodeUiNpmStaticIndexPaths,
+  nodeUiStaticBuildCommand,
+  nodeUiStaticBuildLabel,
+  nodeUiStaticIndexPath,
+} from '../node-ui-static.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -466,6 +476,22 @@ async function _performNpmUpdateInner(
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return "failed";
   }
+  let npmNodeUiPackageNames = NODE_UI_PACKAGE_NAME_FALLBACKS;
+  try {
+    npmNodeUiPackageNames = nodeUiPackageNamesFromCliPackageJson(
+      await readFile(join(npmPkgDir, "package.json"), "utf-8"),
+    );
+  } catch {
+    // Older packages or damaged installs may not expose readable metadata.
+  }
+  const npmNodeUiIndexes = nodeUiNpmStaticIndexPaths(targetDir, npmNodeUiPackageNames);
+  if (!npmNodeUiIndexes.some((indexFile) => existsSync(indexFile))) {
+    log(
+      `Auto-update (npm): Node UI static bundle missing after install ` +
+        `(${npmNodeUiIndexes.join(', ')}). Aborting swap.`,
+    );
+    return "failed";
+  }
   let resolvedVersion = readCliPackageVersion(npmPkgDir);
   if (!resolvedVersion) {
     resolvedVersion = targetVersion;
@@ -859,8 +885,9 @@ async function cleanGeneratedOutputs(
     const cliPkgDir = join(packagesDir, 'cli');
     await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
     await rm(join(cliPkgDir, 'project.json'), { force: true });
+    await rm(dirname(nodeUiStaticIndexPath(targetDir)), { recursive: true, force: true });
     log(
-      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json before build (incremental caches preserved).`,
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json + node-ui/dist-ui before build (incremental caches preserved).`,
     );
   } catch (primaryErr: any) {
     log(
@@ -1329,6 +1356,36 @@ async function _performUpdateInner(
       }
     }
 
+    let nodeUiPackageNames = NODE_UI_PACKAGE_NAME_FALLBACKS;
+    try {
+      nodeUiPackageNames = [nodeUiPackageNameFromPackageJson(
+        await readFile(nodeUiPackageJsonPath(targetDir), 'utf-8'),
+      )];
+    } catch {
+      // Older/broken refs may still have a buildable UI; try known workspace names below.
+    }
+    if (existsSync(nodeUiStaticIndexPath(targetDir))) {
+      log("Auto-update: Node UI static bundle already produced by runtime build.");
+    } else {
+      for (let i = 0; i < nodeUiPackageNames.length; i++) {
+        const nodeUiPackageName = nodeUiPackageNames[i];
+        try {
+          await runBuildStep(execAsync, nodeUiStaticBuildCommand(nodeUiPackageName), {
+            cwd: targetDir,
+            timeoutMs: timeouts.build,
+            label: nodeUiStaticBuildLabel(nodeUiPackageName),
+            log,
+          });
+          break;
+        } catch (err) {
+          if (i === nodeUiPackageNames.length - 1) throw err;
+          log(
+            `Auto-update: ${nodeUiStaticBuildLabel(nodeUiPackageName)} failed; trying ${nodeUiStaticBuildLabel(nodeUiPackageNames[i + 1])}.`,
+          );
+        }
+      }
+    }
+
     log("Auto-update: staging MarkItDown binary for the inactive slot...");
     try {
       await runBuildStep(
@@ -1356,6 +1413,13 @@ async function _performUpdateInner(
   const entryFile = join(targetDir, "packages", "cli", "dist", "cli.js");
   if (!existsSync(entryFile)) {
     log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
+    return "failed";
+  }
+  const nodeUiIndexFile = nodeUiStaticIndexPath(targetDir);
+  if (!existsSync(nodeUiIndexFile)) {
+    log(
+      `Auto-update: Node UI static bundle missing (${nodeUiIndexFile}). Aborting swap.`,
+    );
     return "failed";
   }
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();

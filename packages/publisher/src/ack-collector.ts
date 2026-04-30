@@ -76,6 +76,8 @@ export class ACKCollector {
     swmGraphId?: string;
     /** Optional sub-graph name suffix appended to the SWM URI. */
     subGraphName?: string;
+    /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
+    merkleLeafCount: number;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -106,6 +108,7 @@ export class ACKCollector {
         ? params.swmGraphId
         : undefined,
       subGraphName: params.subGraphName,
+      merkleLeafCount: params.merkleLeafCount,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -134,6 +137,7 @@ export class ACKCollector {
       publicByteSize,
       BigInt(params.epochs ?? 1),
       params.tokenAmount ?? 0n,
+      BigInt(params.merkleLeafCount),
     );
 
     const collected: CollectedACK[] = [];

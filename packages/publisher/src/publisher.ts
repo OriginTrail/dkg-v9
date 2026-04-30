@@ -58,6 +58,8 @@ export type V10ACKProvider = (
   tokenAmount?: bigint,
   swmGraphId?: string,
   subGraphName?: string,
+  /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
+  merkleLeafCount?: number,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**

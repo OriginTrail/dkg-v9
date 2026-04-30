@@ -6,7 +6,10 @@ import {
   computePublishACKDigest,
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -44,8 +47,8 @@ export interface StorageACKHandlerConfig {
  * 2. Verify the data exists in SWM
  * 3. Recompute the merkle root from SWM triples
  * 4. Sign ACK = EIP-191(computePublishACKDigest(chainId, kav10Address, cgId,
- *    merkleRoot, kaCount, byteSize, epochs, tokenAmount)) — the H5-prefixed
- *    8-field digest. Matches KnowledgeAssetsV10.sol:362-373 byte-for-byte.
+ *    merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount)) —
+ *    the H5-prefixed digest. Matches `KnowledgeAssetsV10._executePublishCore`.
  * 5. Return StorageACK via the P2P stream response
  */
 export class StorageACKHandler {
@@ -211,9 +214,23 @@ export class StorageACKHandler {
     const intentTokenAmount = intent.tokenAmountStr
       ? BigInt(intent.tokenAmountStr)
       : 0n;
-    // H5-prefixed ACK digest matching KnowledgeAssetsV10.sol:362-373. `chainId`
-    // and `kav10Address` are threaded in via StorageACKHandlerConfig at
-    // construction time from the node's chain adapter.
+
+    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    if (verifiedLeafCount === 0) {
+      throw new Error(
+        'StorageACK: empty knowledge collection (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
+      );
+    }
+    const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
+    if (claimedLeafCount !== verifiedLeafCount) {
+      throw new Error(
+        `StorageACK: merkleLeafCount mismatch (intent=${claimedLeafCount}, computed=${verifiedLeafCount}). ` +
+        'Publishers must set PublishIntent.merkleLeafCount to the V10 flat-KC leaf count.',
+      );
+    }
+
+    // H5-prefixed ACK digest matching `KnowledgeAssetsV10._executePublishCore`.
+    // `chainId` and `kav10Address` are threaded in via StorageACKHandlerConfig.
     const digest = computePublishACKDigest(
       this.config.chainId,
       this.config.kav10Address,
@@ -223,6 +240,7 @@ export class StorageACKHandler {
       verifiedByteSize,
       BigInt(intentEpochs),
       intentTokenAmount,
+      BigInt(verifiedLeafCount),
     );
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),

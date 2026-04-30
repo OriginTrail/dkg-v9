@@ -93,6 +93,11 @@ async function waitForBridgePort(plugin: DkgChannelPlugin): Promise<number> {
   throw new Error('Bridge server did not bind to a port');
 }
 
+async function flushAsyncContinuations(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('DkgChannelPlugin', () => {
   let client: DkgDaemonClient;
   let plugin: DkgChannelPlugin;
@@ -270,6 +275,838 @@ describe('DkgChannelPlugin', () => {
       configured: true,
       linked: true,
     });
+    expect(registeredPlugin.gateway.startAccount).toBeTypeOf('function');
+    expect(registeredPlugin.gateway.stopAccount).toBeTypeOf('function');
+  });
+
+  it('keeps the registered gateway lifecycle running until OpenClaw aborts it', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const controller = new AbortController();
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    }).then(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'default',
+        running: true,
+        connected: true,
+        restartPending: false,
+        mode: 'webhook',
+      }));
+    });
+    expect(settled).toBe(false);
+
+    controller.abort();
+    await lifecycle;
+    expect(settled).toBe(true);
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('does not tear down an active bridge for an already-aborted gateway lifecycle start', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+    await waitForBridgePort(plugin);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const controller = new AbortController();
+    controller.abort();
+    const setStatus = vi.fn();
+
+    await registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('keeps the registered gateway lifecycle pending until stopAccount even without an abort signal', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycleCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    };
+    const lifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx).then(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    expect(settled).toBe(false);
+
+    await registeredPlugin.gateway.stopAccount(lifecycleCtx);
+    await lifecycle;
+    expect(settled).toBe(true);
+  });
+
+  it('stops the current no-signal lifecycle from a fresh stopAccount context for the same account', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+
+    await lifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('stops a pending replacement lifecycle before it reports running', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await registeredPlugin.gateway.stopAccount(replacementCtx);
+
+    await firstLifecycle;
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+    expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    expect(replacementCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('stops a pending same-account lifecycle from a fresh stop context', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const stopStatus = vi.fn();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: stopStatus,
+    });
+
+    await firstLifecycle;
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+    expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    expect(stopStatus).toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('stops the registered gateway lifecycle bridge when OpenClaw stops the channel', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    expect(plugin.isListening).toBe(true);
+
+    const setStatus = vi.fn();
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(false);
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'default',
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('settles plugin-level gateway lifecycle only after bridge shutdown completes', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    }).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+      await flushAsyncContinuations();
+
+      expect(settled).toBe(false);
+      expect(setStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: false,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await lifecycle;
+
+      expect(settled).toBe(true);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: false,
+        connected: false,
+        restartPending: false,
+      }));
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('preserves replacement lifecycle status when OpenClaw reuses the same context object', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    const lifecycleCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+    await vi.waitFor(() => {
+      expect(setStatus.mock.calls.filter(([status]) => status.running === true)).toHaveLength(1);
+    });
+
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+    await vi.waitFor(() => {
+      expect(setStatus.mock.calls.filter(([status]) => status.running === true)).toHaveLength(2);
+    });
+    await firstLifecycle;
+
+    await plugin.stop();
+    await replacementLifecycle;
+
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('clears shutdown state when OpenClaw restarts the registered gateway lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    const internal = plugin as unknown as { stopping: boolean };
+    expect(internal.stopping).toBe(true);
+
+    const controller = new AbortController();
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    await waitForBridgePort(plugin);
+
+    expect(internal.stopping).toBe(false);
+
+    controller.abort();
+    await lifecycle;
+  });
+
+  it('waits for an in-flight stop before restarting the registered gateway lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+
+      await flushAsyncContinuations();
+      expect(setStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await waitForBridgePort(plugin);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      controller.abort();
+      await lifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('ignores different-account stopAccount while a lifecycle is waiting to claim ownership', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+      await flushAsyncContinuations();
+
+      const unrelatedStopStatus = vi.fn();
+      await registeredPlugin.gateway.stopAccount({
+        accountId: 'other',
+        account: { accountId: 'other' },
+        cfg: {},
+        runtime: {},
+        getStatus: () => ({ accountId: 'other' }),
+        setStatus: unrelatedStopStatus,
+      });
+      expect(unrelatedStopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: false,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await waitForBridgePort(plugin);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      controller.abort();
+      await lifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('waits for an abort-triggered lifecycle stop before starting the replacement lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    await waitForBridgePort(plugin);
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      firstController.abort();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const replacementController = new AbortController();
+      const replacementStatus = vi.fn();
+      const replacementLifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: replacementController.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus: replacementStatus,
+      });
+
+      await flushAsyncContinuations();
+      expect(replacementStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+      }));
+
+      closeNow?.();
+      await firstLifecycle;
+      await waitForBridgePort(plugin);
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      replacementController.abort();
+      await replacementLifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('does not let a stale aborted lifecycle stop a replacement bridge', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstStatus = vi.fn();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    });
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementController = new AbortController();
+    const replacementStatus = vi.fn();
+    firstController.abort();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: replacementController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    });
+
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(true);
+
+    replacementController.abort();
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('ignores a stale stopAccount request for a replaced lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstStatus = vi.fn();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    });
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementController = new AbortController();
+    const replacementStatus = vi.fn();
+    firstController.abort();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: replacementController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    });
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+
+    const staleStopStatus = vi.fn();
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: staleStopStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(staleStopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+    }));
+
+    replacementController.abort();
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('ignores a stale no-signal stopAccount request for a replaced lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstStatus = vi.fn();
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementStatus = vi.fn();
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    };
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+
+    await registeredPlugin.gateway.stopAccount(firstCtx);
+    expect(plugin.isListening).toBe(true);
+    expect(firstStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+    }));
+
+    await registeredPlugin.gateway.stopAccount(replacementCtx);
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('does not stop an active bridge when a lifecycle aborts before claiming post-start ownership', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+    await plugin.start();
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    let abortedReads = 0;
+    const signal: any = {
+      get aborted() {
+        abortedReads += 1;
+        return abortedReads > 1;
+      },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    const setStatus = vi.fn();
+
+    await registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not report running when a replacement lifecycle is aborted while waiting for stop to finish', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+      controller.abort();
+
+      closeNow?.();
+      await stopPromise;
+      await lifecycle;
+
+      expect(plugin.isListening).toBe(false);
+      expect(setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('settles the gateway lifecycle wait if abort flips during listener registration', async () => {
+    const signal: any = {
+      aborted: false,
+      removeEventListener: vi.fn(),
+    };
+    signal.addEventListener = vi.fn(() => {
+      signal.aborted = true;
+    });
+
+    await (plugin as any).waitForGatewayLifecycleStop(signal);
+
+    expect(signal.addEventListener).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(signal.removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('should call registerHttpRoute if available', () => {

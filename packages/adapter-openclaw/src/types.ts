@@ -99,6 +99,21 @@ export interface OpenClawToolResult {
 // Channel types
 // ---------------------------------------------------------------------------
 
+export interface OpenClawGatewayLifecycleContext {
+  accountId?: string;
+  account?: Record<string, unknown>;
+  cfg?: any;
+  runtime?: any;
+  abortSignal?: AbortSignal;
+  getStatus?: () => Record<string, unknown>;
+  setStatus?: (status: Record<string, unknown>) => void;
+}
+
+export interface OpenClawGatewayLifecycleAdapter {
+  startAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+  stopAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+}
+
 /** Inbound message from an external channel into OpenClaw. */
 export interface ChannelInboundMessage {
   /** Channel name (e.g. "dkg-ui"). */
@@ -155,6 +170,8 @@ export interface OpenClawChannelAdapter {
   start?(): Promise<void>;
   /** Called when the gateway stops.  Tear down transport. */
   stop?(): Promise<void>;
+  /** Per-account lifecycle hooks consumed by current OpenClaw gateway monitors. */
+  gateway?: OpenClawGatewayLifecycleAdapter;
   /**
    * Called by the gateway when the agent produces a reply for this channel.
    * The adapter should deliver it via its transport.

@@ -152,6 +152,15 @@ export interface VerifyParams {
 export interface PublishToContextGraphParams extends PublishParams {
   contextGraphId: bigint;
   participantSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * V10 Merkle leaf count of the published flat-KC payload. Required: the
+   * adapter mirrors this V9 publish to V10 (`createKnowledgeAssetsV10`)
+   * and `RandomSampling` reads `merkleLeafCount` from on-chain storage to
+   * pick / verify `chunkId`. Hard-coding it would corrupt every bridged
+   * KC whose tree has more than one leaf. Callers must supply the value
+   * from `V10MerkleTree.leafCount`.
+   */
+  merkleLeafCount: number;
 }
 
 // ----- Permanent Publishing types -----

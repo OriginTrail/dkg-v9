@@ -1212,6 +1212,23 @@ export class EVMChainAdapter implements ChainAdapter {
       i === arr.findIndex((a) => a.identityId === s.identityId),
     );
 
+    // V9→V10 mirror: RandomSampling reads `merkleLeafCount` from on-chain
+    // storage to pick `chunkId`. Silently writing 1 here would brick every
+    // bridged KC whose flat-KC tree has more than one leaf (the prover
+    // would request a chunk past the tree's leaf range). Refuse to mirror
+    // if the caller didn't supply the real count.
+    if (
+      typeof params.merkleLeafCount !== 'number'
+      || !Number.isInteger(params.merkleLeafCount)
+      || params.merkleLeafCount < 1
+    ) {
+      throw new Error(
+        'publishToContextGraph: missing/invalid merkleLeafCount. '
+        + 'V10 mirror requires the caller to supply the V10MerkleTree leaf count '
+        + '(integer ≥ 1). Hard-coding would corrupt RandomSampling chunk selection.',
+      );
+    }
+
     return this.createKnowledgeAssetsV10({
       publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
       contextGraphId: params.contextGraphId,
@@ -1220,10 +1237,7 @@ export class EVMChainAdapter implements ChainAdapter {
       byteSize: params.publicByteSize,
       epochs: params.epochs,
       tokenAmount: params.tokenAmount,
-      // Legacy V9→V10 bridge: no triple-level payload here — assume a single
-      // Merkle leaf unless the caller migrates to `publishDirect` with an
-      // explicit `merkleLeafCount` from `V10MerkleTree`.
-      merkleLeafCount: 1,
+      merkleLeafCount: params.merkleLeafCount,
       isImmutable: false,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       publisherSignature: params.publisherSignature,

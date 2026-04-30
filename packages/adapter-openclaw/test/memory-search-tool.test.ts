@@ -102,7 +102,7 @@ describe('memory_search tool', () => {
     expect(typeof result).toBe('object');
   });
 
-  it('returns "not ready" error when the resolver has no agent eth address yet (R7.6 / T51)', async () => {
+  it('returns "not ready" error when the resolver has no agent identity yet (R7.6 / T51)', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     // Force resolver to surface no agent address (neither session-bound nor default).
     (plugin as any).memorySessionResolver.getSession = () => undefined;
@@ -112,35 +112,28 @@ describe('memory_search tool', () => {
     const text = (result as any).content?.[0]?.text ?? '';
     // Tool should return the structured "not ready" error, NOT an empty hits list.
     expect(text).toMatch(/not ready/i);
-    // T51 — message names the actual missing dependency (agent eth address)
-    // and surfaces the operator recovery knobs (DKG_HOME/dkgHome/keystore/
-    // DKG_AGENT_ADDRESS) so remote/multi-agent setups know where to look.
-    expect(text).toMatch(/agent eth address/i);
-    expect(text).toMatch(/DKG_AGENT_ADDRESS/);
-    expect(text).toMatch(/dkgHome/);
+    expect(text).toMatch(/agent identity/i);
+    expect(text).toMatch(/node API token/i);
   });
 
-  it('T76 — probes ensureNodePeerId on confirmed-no-keystore nodes when nodePeerId is still undefined (mirrors dkg_query WM branch)', async () => {
+  it('T76 — probes ensureNodePeerId when identity is unresolved and nodePeerId is still undefined (mirrors dkg_query WM branch)', async () => {
     // T76 — Codex flagged: pre-fix, `handleMemorySearch` returned the
     // "agent eth address not resolved" error whenever the resolver
-    // surfaced no address, even when `localKeystoreCheckedAndAbsent`
-    // was true and the only remaining gap was a missed `/api/status`
-    // peerId probe. The dkg_query WM branch already triggers
+    // surfaced no address, even when the only remaining gap was a missed
+    // `/api/status` peerId probe. The dkg_query WM branch already triggers
     // `ensureNodePeerId()` in that case; memory_search did not, so
     // it stayed falsely unavailable until the deferred probe retry
     // fired (which can be many turns later).
     //
     // After the fix, memory_search awaits both `ensureNodeAgentAddress`
-    // and (when keystore is confirmed absent) `ensureNodePeerId`
-    // before resolving the default address.
+    // and `ensureNodePeerId` before resolving the default address.
     const tool = tools.find((t) => t.name === 'memory_search')!;
     const client = (plugin as any).client;
     client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
 
-    // Set up the no-keystore-but-peerId-not-yet-probed state.
+    // Set up identity-not-yet-resolved with peerId not yet probed.
     (plugin as any).nodeAgentAddress = undefined;
     (plugin as any).nodePeerId = undefined;
-    (plugin as any).localKeystoreCheckedAndAbsent = true;
 
     // Spy on the probe methods. Make `ensureNodePeerId` resolve the
     // peerId, mirroring what a recovered /api/status call would do.
@@ -169,41 +162,39 @@ describe('memory_search tool', () => {
     expect((result as any).details?.error).toBeFalsy();
   });
 
-  it('T76 — does NOT probe ensureNodePeerId when localKeystoreCheckedAndAbsent is false (remote-daemon path)', async () => {
-    // Mirrors dkg_query's T60 guarantee: the peerId fallback is gated
-    // on `localKeystoreCheckedAndAbsent` so remote-daemon deployments
-    // (where probeNodeAgentAddressOnce intentionally skips the keystore
-    // read) don't silently route WM scope to the gateway's local peerId.
+  it('T76 — probes ensureNodePeerId when identity is unresolved, without the retired keystore-absent gate', async () => {
+    // Mirrors dkg_query's post-#324 fallback chain: the adapter first tries
+    // the daemon identity endpoint, then gives the peerId fallback a chance.
+    // The old local-keystore-absence gate is gone with the local
+    // keystore identity probe.
     const tool = tools.find((t) => t.name === 'memory_search')!;
     const client = (plugin as any).client;
     client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
 
     (plugin as any).nodeAgentAddress = undefined;
     (plugin as any).nodePeerId = undefined;
-    (plugin as any).localKeystoreCheckedAndAbsent = false; // remote-daemon: probe skipped
 
     const ensureAgentSpy = vi.fn().mockResolvedValue(undefined);
-    const ensurePeerIdSpy = vi.fn().mockResolvedValue(undefined);
+    const ensurePeerIdSpy = vi.fn(async () => {
+      (plugin as any).nodePeerId = '12D3KooWRecoveredPeerNoKeystoreGate';
+    });
     (plugin as any).ensureNodeAgentAddress = ensureAgentSpy;
     (plugin as any).ensureNodePeerId = ensurePeerIdSpy;
 
-    const result = await tool.execute('t-remote-daemon', { query: 'tatooine' });
+    const result = await tool.execute('t-peerid-fallback-no-keystore-gate', { query: 'tatooine' });
 
-    // ensureNodeAgentAddress fires (always best-effort); ensureNodePeerId
-    // does NOT — the gate prevents leaking the gateway's local peerId
-    // into a remote daemon's scope.
+    // ensureNodeAgentAddress fires first; ensureNodePeerId is no longer
+    // gated by local keystore state.
     // Called at least once — exact count varies because the resolver's
     // `getSession` and `getDefaultAgentAddress` also fire it
     // fire-and-forget. All calls are idempotent (debounced via
     // `agentAddressProbeInFlight`).
     expect(ensureAgentSpy).toHaveBeenCalled();
-    expect(ensurePeerIdSpy).not.toHaveBeenCalled();
+    expect(ensurePeerIdSpy).toHaveBeenCalled();
 
-    // Without an eth address AND without the keystore-absent flag, the
-    // tool surfaces the "not ready" error so operators see the recovery
-    // knobs (DKG_AGENT_ADDRESS, dkgHome) — NOT a silently-empty result.
     const text = (result as any).content?.[0]?.text ?? '';
-    expect(text).toMatch(/not ready/i);
+    expect(text).not.toMatch(/not ready/i);
+    expect((result as any).details?.error).toBeFalsy();
   });
 
   it('re-asserts memory-slot capability before running the search (R7.5 mode-independent anchor)', async () => {

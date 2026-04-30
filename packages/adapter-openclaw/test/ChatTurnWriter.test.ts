@@ -1158,7 +1158,9 @@ describe("ChatTurnWriter", () => {
       expect(dkw.stateDir).toBe(originalStateDir);
       expect(dkw.watermarkFilePath).toBe(originalWatermarkFilePath);
       expect(dkw.externalTurnMarkers.get(externalCursorKey)?.get(marker)).toBe(1);
-      expect(writeSpy).toHaveBeenCalledTimes(2);
+      expect(writeSpy).toHaveBeenCalledTimes(3);
+      const persistedOldPath = JSON.parse(fs.readFileSync(originalWatermarkFilePath, "utf-8"));
+      expect(persistedOldPath[externalCursorKey].m[marker]).toBe(1);
       writeSpy.mockRestore();
     } finally {
       fs.rmSync(destinationStateDir, { recursive: true, force: true });

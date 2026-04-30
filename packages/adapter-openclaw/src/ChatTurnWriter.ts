@@ -352,6 +352,12 @@ export class ChatTurnWriter {
           "[ChatTurnWriter.setStateDir] Final post-commit rewrite at new path failed; preserving old path for retry.",
           { newWatermarkFilePath },
         );
+        if (!this.writeWatermarkFile()) {
+          this.logger.warn?.(
+            "[ChatTurnWriter.setStateDir] Failed to preserve post-commit state at old path after migration rewrite failure.",
+            { oldWatermarkFilePath: this.watermarkFilePath, newWatermarkFilePath },
+          );
+        }
       }
     }
     // T45 - If the initial new-path write failed, live state is still

@@ -47,6 +47,11 @@ function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
 }
 
+function fallbackRouteInboundSessionKey(identity: string | undefined): string {
+  const rawIdentity = identity || 'owner';
+  return rawIdentity === 'owner' ? 'agent:main:main' : `agent:main:${sanitizeIdentity(rawIdentity)}`;
+}
+
 function finalizeAgentReplyText(text: string): string {
   if (text.trim().length === 0) {
     throw new Error(NO_TEXT_RESPONSE_ERROR);
@@ -1169,12 +1174,14 @@ export class DkgChannelPlugin {
       // used when `runtime.channel` is unavailable must do the same, or
       // tool calls fired during this dispatch will read an empty ALS store
       // and silently degrade recall to `agent-context` only. We don't have
-      // a resolved sessionKey on this path (routing lives in
-      // runtime.channel), so the context carries only `uiContextGraphId`
-      // and `correlationId`.
+      // runtime.channel route metadata here, so stamp a deterministic
+      // transcript key that matches the DKG UI owner transcript marker
+      // bucket used by ChatTurnWriter replay dedupe.
+      const fallbackSessionKey = fallbackRouteInboundSessionKey(identity || 'owner');
       const dispatchContext: DkgDispatchContext = {
         uiContextGraphId,
         correlationId,
+        sessionKey: fallbackSessionKey,
       };
       const reply = await this.runWithDispatchContext(dispatchContext, () =>
         api.routeInboundMessage!({
@@ -1183,9 +1190,15 @@ export class DkgChannelPlugin {
           senderIsOwner: true,
           text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
           correlationId,
-        } as any),
+          sessionKey: fallbackSessionKey,
+          SessionKey: fallbackSessionKey,
+        }),
       );
-      const { sessionKey, ...replyForCaller } = reply;
+      const { sessionKey: replySessionKey, SessionKey: replyOpenClawSessionKey, ...replyForCaller } = reply;
+      const sessionKey =
+        (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
+        || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '')
+        || fallbackSessionKey;
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
         sessionKey,

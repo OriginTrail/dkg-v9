@@ -1904,6 +1904,8 @@ describe('DkgChannelPlugin', () => {
       senderIsOwner: true,
       text: 'Hello',
       correlationId: 'corr-2',
+      sessionKey: 'agent:main:main',
+      SessionKey: 'agent:main:main',
     });
     expect(reply.text).toBe('Reply!');
     expect(reply.correlationId).toBe('corr-2');
@@ -1917,6 +1919,123 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
+  it('processInbound routeInboundMessage fallback marks direct-channel persists with a stable session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-marker',
+      text: 'Reply!',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-marker', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+    }));
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply!',
+      { turnId: 'corr-route-marker' },
+    ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      turnId: 'corr-route-marker',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback does not collapse owner-like identities into the owner marker bucket', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-ownerish',
+      text: 'Reply!',
+    }));
+    client.storeChatTurn = async () => undefined as any;
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-ownerish', 'owner!');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      senderId: 'owner!',
+      sessionKey: 'agent:main:owner',
+      SessionKey: 'agent:main:owner',
+    }));
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:owner',
+      turnId: 'corr-route-ownerish',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback marks non-owner direct-channel persists with the non-owner session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-worker',
+      text: 'Worker reply',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Work item', 'corr-route-worker', 'background-worker');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      senderId: 'background-worker',
+      sessionKey: 'agent:main:background-worker',
+      SessionKey: 'agent:main:background-worker',
+    }));
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui:background-worker',
+      'Work item',
+      'Worker reply',
+      { turnId: 'corr-route-worker' },
+    ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:background-worker',
+      turnId: 'corr-route-worker',
+      user: 'Work item',
+      assistant: 'Worker reply',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback accepts uppercase reply SessionKey for marker persistence', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-uppercase-session',
+      text: 'Reply!',
+      SessionKey: 'agent:legacy:actual',
+    }));
+    client.storeChatTurn = async () => undefined as any;
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    const reply = await plugin.processInbound('Hello', 'corr-route-uppercase-session', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect((reply as any).SessionKey).toBeUndefined();
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:legacy:actual',
+      turnId: 'corr-route-uppercase-session',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
   it('processInbound wraps the routeInboundMessage fallback in an ALS dispatch scope so slot-backed recall sees the UI-selected CG (Codex B13)', async () => {
     // B13 regression guard. When the gateway has no `runtime.channel` and
     // the adapter falls back to `api.routeInboundMessage`, the fallback
@@ -1928,9 +2047,19 @@ describe('DkgChannelPlugin', () => {
     // `plugin.getSessionProjectContextGraphId(undefined)` from inside the
     // callback (i.e. while the ALS scope is active) and asserts the
     // captured value matches the stamped `uiContextGraphId`.
-    const capture: { inScope?: string | undefined } = {};
-    const routeInboundMessage = vi.fn().mockImplementation(async () => {
+    const capture: {
+      inScope?: string | undefined;
+      sessionScope?: string | undefined;
+      mismatchedSessionScope?: string | undefined;
+      messageSessionKey?: string | undefined;
+      messageOpenClawSessionKey?: string | undefined;
+    } = {};
+    const routeInboundMessage = vi.fn().mockImplementation(async (message: any) => {
+      capture.messageSessionKey = message.sessionKey;
+      capture.messageOpenClawSessionKey = message.SessionKey;
       capture.inScope = plugin.getSessionProjectContextGraphId(undefined);
+      capture.sessionScope = plugin.getSessionProjectContextGraphId('agent:main:main');
+      capture.mismatchedSessionScope = plugin.getSessionProjectContextGraphId('agent:other:owner');
       return { correlationId: 'corr-b13', text: 'Reply from route' };
     });
     const api = makeApi({ routeInboundMessage });
@@ -1945,6 +2074,10 @@ describe('DkgChannelPlugin', () => {
 
     // While the fallback was running, the ALS scope was populated.
     expect(capture.inScope).toBe('research-b13');
+    expect(capture.sessionScope).toBe('research-b13');
+    expect(capture.mismatchedSessionScope).toBeUndefined();
+    expect(capture.messageSessionKey).toBe('agent:main:main');
+    expect(capture.messageOpenClawSessionKey).toBe('agent:main:main');
     // After the dispatch resolves, the ALS is torn down.
     expect(plugin.getSessionProjectContextGraphId(undefined)).toBeUndefined();
   });

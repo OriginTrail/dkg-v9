@@ -109,6 +109,7 @@ describe('NoChainAdapter — every write method throws with stable message [CH-9
         epochs: 1,
         tokenAmount: 0n,
         isImmutable: false,
+        merkleLeafCount: 1,
         paymaster: '0x0000000000000000000000000000000000000000',
         publisherNodeIdentityId: 0n,
         publisherSignature: zeroSig,

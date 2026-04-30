@@ -19,16 +19,17 @@
  * Every step is idempotent — re-running is safe.
  */
 
-import { execSync, spawnSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
+import { execSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { requestFaucetFunding } from '@origintrail-official/dkg-core';
+import { blueGreenSlotReady, findPackageRepoDir, requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 import { resolveDkgCli } from './resolve-dkg-cli.js';
+import { sameResolvedPath } from './state-dir-path.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,7 +123,7 @@ function isEphemeralPath(p: string): boolean {
 }
 
 function dkgDir(): string {
-  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+  return resolveDkgConfigHome({ startDir: __dirname });
 }
 
 function openclawDir(): string {
@@ -386,6 +387,57 @@ export interface DkgConfigOverrides {
   portExplicit?: boolean;
 }
 
+/**
+ * Strip fields under `existing.chain` and `existing.autoUpdate` whose values
+ * equal the corresponding network default — those are leftovers from earlier
+ * setup runs that auto-copied the whole block (the bug fixed in PR #322).
+ *
+ * Heuristic is safe: if an operator deliberately overrode a field, the value
+ * differs from the current network default and is preserved. If the value
+ * matches the default, it's either (a) an auto-copy we want to drop so future
+ * rotations propagate, or (b) a coincidence where the operator picked the same
+ * value — in which case dropping it is still functionally a no-op (the
+ * resolver will re-derive the same value at runtime). `autoUpdate.enabled` is
+ * kept regardless: status/telemetry endpoints read it directly without
+ * falling back to the network value.
+ */
+function pruneNetworkPinnedDefaults(
+  existing: Record<string, any>,
+  network: NetworkConfig,
+): void {
+  if (existing.chain && typeof existing.chain === 'object' && network.chain) {
+    for (const key of Object.keys(existing.chain) as Array<keyof NonNullable<NetworkConfig['chain']>>) {
+      if (existing.chain[key] === network.chain[key]) {
+        delete existing.chain[key];
+      }
+    }
+    if (Object.keys(existing.chain).length === 0) {
+      delete existing.chain;
+    }
+  }
+
+  if (existing.autoUpdate && typeof existing.autoUpdate === 'object' && network.autoUpdate) {
+    for (const key of Object.keys(existing.autoUpdate)) {
+      if (key === 'enabled') continue;
+      if (existing.autoUpdate[key] === (network.autoUpdate as any)[key]) {
+        delete existing.autoUpdate[key];
+      }
+    }
+    // Drop the parent if only `enabled` survived AND it matches the network
+    // default — the dedicated `enabled`-mirroring branch below will re-add it.
+    // Otherwise keep whatever the operator actually pinned (different enabled,
+    // custom field we don't know about, etc.).
+    const keys = Object.keys(existing.autoUpdate);
+    if (
+      keys.length === 0 ||
+      (keys.length === 1 && keys[0] === 'enabled'
+        && existing.autoUpdate.enabled === network.autoUpdate.enabled)
+    ) {
+      delete existing.autoUpdate;
+    }
+  }
+}
+
 function migrateLegacyOpenClawTransport(existing: Record<string, any>): void {
   const legacyTransport = existing.openclawChannel;
   if (!legacyTransport || typeof legacyTransport !== 'object') return;
@@ -445,8 +497,32 @@ export function writeDkgConfig(
   delete existing.openclawAdapter;
   delete existing.openclawChannel;
 
+  // Heal legacy configs: earlier setup runs auto-copied the entire `chain`
+  // and `autoUpdate` blocks from `network/<env>.json`. Those copies look
+  // identical to operator overrides on disk via `...existing`, so a rerun
+  // after a hub/RPC/branch rotation would NOT pick up the new defaults —
+  // exactly the failure mode we hit on the testnet relays after the hub
+  // rotated. Strip any field whose value equals the current network default
+  // (= clearly a stale auto-copy, never a deliberate override). Real
+  // operator customisations (e.g. private RPC) won't match a default and
+  // are left intact. `autoUpdate.enabled` is kept regardless because the
+  // status/telemetry consumers below depend on it being present.
+  pruneNetworkPinnedDefaults(existing, network);
+
   // Explicit CLI overrides (--name, --port) take precedence over existing config.
   // Auto-detected values only fill in when no existing value is present.
+  //
+  // We intentionally do NOT persist `chain` or `autoUpdate` from
+  // `network/<env>.json` into the user's config when they're absent —
+  // the daemon already does field-level merging at runtime via
+  // `resolveChainConfig` (cli/src/config.ts) and `resolveAutoUpdateConfig`
+  // (same file, see docstring at "dkg init intentionally omits repo/branch").
+  // Pinning the network defaults here would cement them and break future
+  // hub rotations / branch rotations / RPC swaps in `network/<env>.json`,
+  // which is exactly the failure mode we just had to fight through on the
+  // testnet relay nodes after the hub address was rotated. The `...existing`
+  // spread above still preserves any chain/autoUpdate the operator added
+  // manually (e.g. private RPC override).
   const config: Record<string, any> = {
     ...existing,
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
@@ -456,7 +532,6 @@ export function writeDkgConfig(
       ?? existing.paranets
       ?? network.defaultContextGraphs
       ?? network.defaultParanets,
-    chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
   };
 
@@ -467,9 +542,18 @@ export function writeDkgConfig(
     config.relay = existing.relay;
   }
 
-  // Preserve auto-update from network defaults if not set
-  if (!existing.autoUpdate && network.autoUpdate) {
-    config.autoUpdate = network.autoUpdate;
+  // Persist only the `enabled` flag mirrored from the network default.
+  // `repo`/`branch`/`checkIntervalMinutes`/etc. are intentionally omitted
+  // (see big comment above on the resolver contract), but the `enabled`
+  // flag has to stay because several consumers — `/api/status`,
+  // `/api/info`, the telemetry log pusher in `lifecycle.ts`, and
+  // `resolveAutoUpdateEnabled` itself — read `config.autoUpdate?.enabled`
+  // directly without falling back to `network.autoUpdate.enabled`.
+  // Dropping the whole block would make those report auto-update as
+  // disabled on fresh testnet OpenClaw installs even though the updater
+  // is in fact running.
+  if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
+    config.autoUpdate = { enabled: network.autoUpdate.enabled };
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
@@ -479,6 +563,45 @@ export function writeDkgConfig(
 // ---------------------------------------------------------------------------
 // Step 5: Start DKG daemon
 // ---------------------------------------------------------------------------
+
+const DKG_START_TIMEOUT_MS = 30_000;
+const DKG_START_MIGRATION_TIMEOUT_MS = 60 * 60_000;
+
+function hasLocalRepoForCli(cliPath: string): boolean {
+  let physicalCliPath = cliPath;
+  try {
+    physicalCliPath = realpathSync(cliPath);
+  } catch {
+    // `resolveDkgCli` surfaces missing CLI paths later; keep timeout detection conservative here.
+  }
+  const repo = findPackageRepoDir(dirname(physicalCliPath));
+  return Boolean(repo && existsSync(join(repo, '.git')));
+}
+
+function blueGreenMigrationMayRunDuringStart(cliPath: string): boolean {
+  if (process.env.DKG_NO_BLUE_GREEN) return false;
+  if (!hasLocalRepoForCli(cliPath)) return false;
+
+  const releasesPath = join(dkgDir(), 'releases');
+  const currentLink = join(releasesPath, 'current');
+
+  try {
+    if (!lstatSync(currentLink).isSymbolicLink()) return true;
+  } catch {
+    return true;
+  }
+
+  return !blueGreenSlotReady(join(releasesPath, 'a'))
+    || !blueGreenSlotReady(join(releasesPath, 'b'));
+}
+
+function daemonStartSpawnOptions(cliPath: string): SpawnSyncOptions {
+  const options: SpawnSyncOptions = { stdio: 'inherit' };
+  options.timeout = blueGreenMigrationMayRunDuringStart(cliPath)
+    ? DKG_START_MIGRATION_TIMEOUT_MS
+    : DKG_START_TIMEOUT_MS;
+  return options;
+}
 
 export async function startDaemon(apiPort: number): Promise<void> {
   // Check if already running
@@ -513,10 +636,7 @@ export async function startDaemon(apiPort: number): Promise<void> {
     // process.execPath so we don't depend on `dkg` being on PATH — which
     // `pnpm dkg openclaw setup` does not guarantee in a cloned monorepo.
     const { node, cliPath } = resolveDkgCli();
-    const result = spawnSync(node, [cliPath, 'start'], {
-      stdio: 'inherit',
-      timeout: 30_000,
-    });
+    const result = spawnSync(node, [cliPath, 'start'], daemonStartSpawnOptions(cliPath));
     if (result.error) throw result.error;
     if (result.status !== 0) {
       throw new Error(
@@ -817,7 +937,14 @@ function isAdapterLoadPath(value: string): boolean {
  * can pass any of the same sub-fields the adapter reads at load time,
  * including `channel.port` for advanced bridge-port overrides.
  */
-export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'memory' | 'channel'>;
+export type AdapterEntryConfig = Pick<
+  DkgOpenClawConfig,
+  'daemonUrl' | 'stateDir' | 'stateDirSource' | 'memory' | 'channel'
+>;
+
+function defaultStateDirForWorkspace(workspaceDir: string): string {
+  return join(workspaceDir, '.openclaw');
+}
 
 export function mergeOpenClawConfig(
   openclawConfigPath: string,
@@ -917,10 +1044,48 @@ export function mergeOpenClawConfig(
   const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
     ? existingEntryConfig.channel
     : {};
+  const trimmedNonEmpty = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  };
   const priorInstalledWorkspace =
-    typeof existingEntryConfig.installedWorkspace === 'string'
-      ? existingEntryConfig.installedWorkspace
-      : undefined;
+    trimmedNonEmpty(existingEntryConfig.installedWorkspace);
+
+  const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
+  const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
+  const incomingStateDirIsSetupDefault =
+    entryConfig.stateDirSource === 'setup-default' &&
+    !!incomingStateDir &&
+    sameResolvedPath(incomingStateDir, defaultStateDirForWorkspace(installedWorkspace));
+  const existingStateDirIsSetupOwned =
+    existingEntryConfig.stateDirSource === 'setup-default' &&
+    !!existingStateDir &&
+    !!priorInstalledWorkspace &&
+    sameResolvedPath(existingStateDir, defaultStateDirForWorkspace(priorInstalledWorkspace));
+  let preservedExistingStateDir = false;
+  if (typeof existingEntryConfig.stateDir === 'string' && !existingEntryConfig.stateDir.trim()) {
+    delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
+  } else if (
+    existingStateDir &&
+    incomingStateDir &&
+    existingStateDirIsSetupOwned
+  ) {
+    // The existing value is the setup-owned default from the previous
+    // workspace, so a workspace migration should move it alongside
+    // installedWorkspace. Any custom value remains first-wins.
+    delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
+  } else if (existingStateDir) {
+    preservedExistingStateDir = true;
+    // A preserved stateDir is user-owned unless the existing marker proves it
+    // came from setup and no replacement stateDir was supplied.
+    if (!existingStateDirIsSetupOwned || incomingStateDir) {
+      delete existingEntryConfig.stateDirSource;
+    }
+  }
+
   entryForConfig.config = {
     ...entryConfig,
     ...existingEntryConfig,
@@ -930,6 +1095,24 @@ export function mergeOpenClawConfig(
     // for the adapter-owned pointer so a re-install updates it cleanly.
     installedWorkspace,
   };
+  const finalStateDir = trimmedNonEmpty(entryForConfig.config.stateDir);
+  const preservedSetupDefault =
+    preservedExistingStateDir &&
+    existingStateDirIsSetupOwned &&
+    !incomingStateDir &&
+    !!finalStateDir &&
+    sameResolvedPath(finalStateDir, existingStateDir);
+  if (
+    incomingStateDirIsSetupDefault &&
+    !preservedExistingStateDir &&
+    finalStateDir === incomingStateDir
+  ) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else if (preservedSetupDefault) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else {
+    delete entryForConfig.config.stateDirSource;
+  }
   if (!hadConfig) {
     log(`Populated plugins.entries.${pluginId}.config`);
   }
@@ -1779,6 +1962,8 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const portExplicit = options.port != null;
   const entryConfig: AdapterEntryConfig = {
     daemonUrl: `http://127.0.0.1:${effectivePort}`,
+    stateDir: defaultStateDirForWorkspace(workspaceDir),
+    stateDirSource: 'setup-default',
     memory: { enabled: true },
     channel: { enabled: true },
   };

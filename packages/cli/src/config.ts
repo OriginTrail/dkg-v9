@@ -1,8 +1,32 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
-import { join, dirname, resolve, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  blueGreenSlotEntryPoint,
+  blueGreenSlotReady,
+  findPackageRepoDir,
+  isDkgMonorepoRoot,
+  resolveDkgConfigHome,
+} from '@origintrail-official/dkg-core';
+
+/**
+ * Per-step build timeouts (milliseconds) used by the git-based auto-update
+ * path. Slow hosts (notably ARM64 nodes compiling Solidity contracts via the
+ * WASM solc fallback) can exceed the defaults; operators set overrides via
+ * `~/.dkg/config.json` -> `autoUpdate.buildTimeoutMs`. All keys are optional;
+ * unset keys fall back through network/<env>.json -> built-in defaults.
+ */
+export interface AutoUpdateBuildTimeouts {
+  /** `pnpm install --frozen-lockfile` (default 180_000). */
+  install?: number;
+  /** `pnpm build:runtime` / `pnpm build` (default 180_000). */
+  build?: number;
+  /** `pnpm --filter dkg-evm-module build` (default 300_000; bump to 900_000 on ARM64). */
+  contracts?: number;
+  /** MarkItDown bundling step (default 900_000). */
+  markitdown?: number;
+}
 
 export interface AutoUpdateConfig {
   enabled: boolean;
@@ -16,7 +40,13 @@ export interface AutoUpdateConfig {
   sshKeyPath?: string;
   /** Optional raw GIT_SSH_COMMAND override for git-based update fetches/clones. */
   sshCommand?: string;
-  checkIntervalMinutes: number;
+  /**
+   * Optional in ~/.dkg/config.json: omit to inherit from network/project config.
+   * `resolveAutoUpdateConfig()` falls back to network -> 30 (minutes).
+   */
+  checkIntervalMinutes?: number;
+  /** Optional per-step build timeout overrides for the git-based update path. */
+  buildTimeoutMs?: AutoUpdateBuildTimeouts;
 }
 
 /**
@@ -29,6 +59,7 @@ export interface AutoUpdateConfig {
 export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
   repo: string;
   branch: string;
+  checkIntervalMinutes: number;
 };
 
 export interface NetworkConfig {
@@ -48,6 +79,7 @@ export interface NetworkConfig {
     sshKeyPath?: string;
     sshCommand?: string;
     checkIntervalMinutes: number;
+    buildTimeoutMs?: AutoUpdateBuildTimeouts;
   };
   chain?: {
     type: 'evm';
@@ -156,7 +188,15 @@ export interface DkgConfig {
   contextGraphs?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
-  chain?: ChainConfig;
+  /**
+   * Chain config. Field-merged on top of `network/<env>.json#chain` via
+   * `resolveChainConfig()`, so an operator can override individual fields
+   * (e.g. just `rpcUrl` to point at a private RPC) without having to
+   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
+   * network defaults — including future hub rotations propagated by the
+   * auto-updater pulling a fresh network/<env>.json.
+   */
+  chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
@@ -296,33 +336,6 @@ function isDkgPackageRoot(dir: string): boolean {
 }
 
 /**
- * Return true when `dir` is the DKG monorepo root.
- *
- * We combine two layers of evidence so this never matches an unrelated
- * consumer workspace (e.g. a pnpm/Nx repo that also happens to have a
- * root `project.json`):
- *
- *  1. Structural markers — `pnpm-workspace.yaml`, `packages/`, and
- *     `project.json` — which are required but not sufficient.
- *  2. A DKG-specific sub-marker — `packages/cli/package.json` whose
- *     `name` is exactly `@origintrail-official/dkg`. The package name
- *     is reserved for us on npm and cannot be spoofed by a consumer
- *     repo without colliding with our own published package.
- */
-function isDkgMonorepoRoot(dir: string): boolean {
-  try {
-    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
-    if (!existsSync(join(dir, 'packages'))) return false;
-    if (!existsSync(join(dir, 'project.json'))) return false;
-
-    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
-    if (!existsSync(cliPkgPath)) return false;
-    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
-    return cliPkg?.name === '@origintrail-official/dkg';
-  } catch { return false; }
-}
-
-/**
  * Resolve candidate directories where repo-root files (project.json,
  * network/*.json) may live, in priority order.
  *
@@ -424,6 +437,20 @@ export function resolveAutoUpdateConfig(
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
 
+  // Merge build timeouts per-key so operators can override one step (e.g.
+  // `contracts` on slow ARM hosts) without re-specifying the rest.
+  const buildTimeoutMs: AutoUpdateBuildTimeouts | undefined = (() => {
+    const c = cfg?.buildTimeoutMs;
+    const n = net?.buildTimeoutMs;
+    if (!c && !n) return undefined;
+    return {
+      ...(c?.install ?? n?.install ? { install: c?.install ?? n?.install } : {}),
+      ...(c?.build ?? n?.build ? { build: c?.build ?? n?.build } : {}),
+      ...(c?.contracts ?? n?.contracts ? { contracts: c?.contracts ?? n?.contracts } : {}),
+      ...(c?.markitdown ?? n?.markitdown ? { markitdown: c?.markitdown ?? n?.markitdown } : {}),
+    };
+  })();
+
   return {
     enabled: true,
     repo,
@@ -432,7 +459,63 @@ export function resolveAutoUpdateConfig(
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
+    ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
   };
+}
+
+/**
+ * Field-level merge of the effective chain configuration.
+ *
+ * Precedence per field: `~/.dkg/config.json#chain` → `network/<env>.json#chain`.
+ * Returns `undefined` when neither source provides a chain block.
+ *
+ * Rationale: the daemon previously read chain via `config.chain ?? network.chain`
+ * (whole-object fallback), which meant an operator who set just `rpcUrl` in their
+ * local config would lose `hubAddress` / `chainId` from the network file and
+ * crash deeper inside ethers. With per-field merge, operators can override
+ * individual fields (e.g. swap public RPC for a private one) and still inherit
+ * the rest — including future hub rotations the auto-updater pulls down.
+ *
+ * The return type is `Partial<ChainConfig>` because either source may be
+ * partial; consumers that need both `rpcUrl` and `hubAddress` (lifecycle,
+ * publisher-runner) MUST guard for those fields before passing to the agent.
+ */
+export function resolveChainConfig(
+  config: Pick<DkgConfig, 'chain'> | null | undefined,
+  network: Pick<NetworkConfig, 'chain'> | null | undefined,
+): Partial<ChainConfig> | undefined {
+  const cfg = config?.chain;
+  const net = network?.chain;
+  if (!cfg && !net) return undefined;
+
+  // Short-circuit when the operator opts in to mock mode. We strip
+  // rpcUrl/hubAddress entirely (both inherited-from-network AND any stale
+  // values left over in the operator's own config from a previous EVM
+  // setup) so no downstream consumer can hit a real chain by accident.
+  // Without this, lifecycle.ts/publisher-runner.ts/status.ts/`dkg set-ask`
+  // all gate on `rpcUrl && hubAddress` but not on `type`, so a hybrid
+  // `{ type: 'mock', rpcUrl: '<real>', hubAddress: '<real>' }` would wire
+  // up MockChainAdapter (correct) AND open a real ethers.JsonRpcProvider
+  // / EVMChainAdapter against the live network in parallel. MockChainAdapter
+  // only needs chainId; rpcUrl/hubAddress are meaningless in mock mode.
+  if (cfg?.type === 'mock') {
+    const mockMerged: Partial<ChainConfig> = { type: 'mock' };
+    if (cfg.chainId !== undefined) mockMerged.chainId = cfg.chainId;
+    if (cfg.mockIdentityId !== undefined) mockMerged.mockIdentityId = cfg.mockIdentityId;
+    return mockMerged;
+  }
+
+  const merged: Partial<ChainConfig> = {
+    type: cfg?.type ?? net?.type ?? 'evm',
+  };
+  const rpcUrl = cfg?.rpcUrl ?? net?.rpcUrl;
+  if (rpcUrl !== undefined) merged.rpcUrl = rpcUrl;
+  const hubAddress = cfg?.hubAddress ?? net?.hubAddress;
+  if (hubAddress !== undefined) merged.hubAddress = hubAddress;
+  const chainId = cfg?.chainId ?? net?.chainId;
+  if (chainId !== undefined) merged.chainId = chainId;
+  if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
+  return merged;
 }
 
 /**
@@ -471,12 +554,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 }
 
 export function dkgDir(): string {
-  if (process.env.DKG_HOME) return process.env.DKG_HOME;
-  const defaultDir = join(homedir(), '.dkg');
-  if (isDkgMonorepo() && !existsSync(join(defaultDir, 'config.json'))) {
-    return join(homedir(), '.dkg-dev');
-  }
-  return defaultDir;
+  return resolveDkgConfigHome({ isDkgMonorepo: isDkgMonorepo() });
 }
 
 let _isDkgMonorepo: boolean | null = null;
@@ -493,13 +571,7 @@ export function isDkgMonorepo(): boolean {
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
  */
 export function findRepoDir(startDir: string): string | null {
-  let dir = resolve(startDir);
-  while (true) {
-    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return findPackageRepoDir(startDir);
 }
 
 export function repoDir(): string | null {
@@ -704,9 +776,10 @@ export function isStandaloneInstall(): boolean {
  * NPM layout (node_modules/@origintrail-official/dkg/dist/cli.js).
  */
 export function slotEntryPoint(slotDir: string): string | null {
-  const gitPath = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-  if (existsSync(gitPath)) return gitPath;
-  const npmPath = join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
-  if (existsSync(npmPath)) return npmPath;
-  return null;
+  return blueGreenSlotEntryPoint(slotDir);
+}
+
+/** Return true when a blue-green slot has an entry point and install metadata. */
+export function slotReady(slotDir: string): boolean {
+  return blueGreenSlotReady(slotDir);
 }

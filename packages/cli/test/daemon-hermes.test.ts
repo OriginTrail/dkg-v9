@@ -655,7 +655,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(config.localAgentIntegrations?.hermes?.enabled).toBe(false);
   });
 
-  it('keeps Hermes enabled and records an error when UI reverse setup fails', async () => {
+  it('disables Hermes chat and records an error when UI reverse setup fails', async () => {
     const previousDkgHome = process.env.DKG_HOME;
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     process.env.DKG_HOME = dkgHome;
@@ -695,11 +695,58 @@ describe('Hermes local-agent registry lifecycle', () => {
 
     const body = JSON.parse(res.body);
     expect(res.statusCode).toBe(200);
-    expect(body.integration.enabled).toBe(true);
+    expect(body.integration.enabled).toBe(false);
     expect(body.integration.runtime.status).toBe('error');
     expect(body.integration.runtime.ready).toBe(false);
     expect(body.integration.runtime.lastError).toContain('Hermes disconnect failed: profile locked');
-    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
+    expect(body.integration.metadata.userDisabled).toBe(true);
+    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(false);
+    expect(getHermesChannelTargets(config)).toEqual([]);
+  });
+
+  it('disables Hermes chat when UI reverse setup cannot infer a profile', async () => {
+    const previousDkgHome = process.env.DKG_HOME;
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    process.env.DKG_HOME = dkgHome;
+    disconnectHermesProfileMock.mockImplementation(() => undefined);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {},
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+    const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
+      enabled: false,
+      runtime: { status: 'disconnected' },
+    });
+    const res = makeJsonResponse();
+
+    try {
+      await handleLocalAgentsRoutes({
+        req,
+        res,
+        config,
+        path: '/api/local-agent-integrations/hermes',
+      } as any);
+    } finally {
+      if (previousDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = previousDkgHome;
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+
+    const body = JSON.parse(res.body);
+    expect(res.statusCode).toBe(200);
+    expect(disconnectHermesProfileMock).not.toHaveBeenCalled();
+    expect(body.integration.enabled).toBe(false);
+    expect(body.integration.runtime.status).toBe('error');
+    expect(body.integration.runtime.ready).toBe(false);
+    expect(body.integration.runtime.lastError).toContain('Hermes profile metadata is missing');
+    expect(body.integration.metadata.userDisabled).toBe(true);
+    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(false);
+    expect(getHermesChannelTargets(config)).toEqual([]);
   });
 
   it('Hermes definition includes manifest, transport, and local chat capabilities', () => {
@@ -1010,6 +1057,15 @@ describe('Hermes daemon routes', () => {
     const storeChatExchange = vi.fn(async () => {});
     const recordChatTurnPersistenceTransition = vi.fn(async () => {});
     const importMemories = vi.fn(async () => {});
+    const attachmentRef = {
+      id: 'att-1',
+      fileName: 'notes.md',
+      contextGraphId: 'project-1',
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+      fileHash: 'keccak256:abc123',
+      extractionStatus: 'completed',
+      tripleCount: 12,
+    };
     const memoryManager = {
       hasChatTurn: vi.fn(async () => true),
       getChatTurnPersistenceState: vi.fn(async () => 'pending'),
@@ -1022,7 +1078,15 @@ describe('Hermes daemon routes', () => {
       assistantReply: 'final reply',
       turnId: 'turn-1',
       persistenceState: 'stored',
+      toolCalls: [{ name: 'lookup', args: { query: 'hello' }, result: { ok: true } }],
+      attachmentRefs: [attachmentRef],
     }, memoryManager);
+    ctx.extractionStatus.set(attachmentRef.assertionUri, {
+      status: 'completed',
+      fileName: attachmentRef.fileName,
+      fileHash: attachmentRef.fileHash,
+      tripleCount: attachmentRef.tripleCount,
+    });
     ctx.agent.importMemories = importMemories;
 
     await handleHermesRoutes(ctx);
@@ -1034,7 +1098,20 @@ describe('Hermes daemon routes', () => {
       'hermes:default',
       'turn-1',
       'stored',
-      { failureReason: null },
+      expect.objectContaining({
+        failureReason: null,
+        assistantReply: 'final reply',
+        toolCalls: [{ name: 'lookup', args: { query: 'hello' }, result: { ok: true } }],
+        attachmentRefs: expect.arrayContaining([
+          expect.objectContaining({
+            assertionUri: attachmentRef.assertionUri,
+            contextGraphId: attachmentRef.contextGraphId,
+            fileName: attachmentRef.fileName,
+            fileHash: attachmentRef.fileHash,
+            tripleCount: attachmentRef.tripleCount,
+          }),
+        ]),
+      }),
     );
     expect(storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).toHaveBeenCalledWith('final reply', 'hermes-session:hermes:default:turn:turn-1');
@@ -1088,7 +1165,10 @@ describe('Hermes daemon routes', () => {
       'hermes:default',
       'turn-1',
       'stored',
-      { failureReason: null },
+      expect.objectContaining({
+        failureReason: null,
+        assistantReply: 'final reply',
+      }),
     );
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).toHaveBeenCalledTimes(1);

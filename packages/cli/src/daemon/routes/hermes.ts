@@ -373,7 +373,7 @@ async function persistHermesTurnUnlocked(
           },
         };
       }
-      const transitioned = await recordHermesTurnPersistenceTransition(memoryManager, payload);
+      const transitioned = await recordHermesTurnPersistenceTransition(memoryManager, payload, verifiedAttachmentRefs);
       if (!transitioned) {
         return {
           statusCode: 409,
@@ -426,18 +426,27 @@ function persistenceStateRank(state: HermesTurnPersistenceState): number {
 async function recordHermesTurnPersistenceTransition(
   memoryManager: RequestContext['memoryManager'],
   payload: Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>,
+  verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<boolean> {
   const recorder = (memoryManager as unknown as {
     recordChatTurnPersistenceTransition?: (
       sessionId: string,
       turnId: string,
       persistenceState: HermesTurnPersistenceState,
-      opts?: { failureReason?: string | null },
+      opts?: {
+        failureReason?: string | null;
+        assistantReply?: string;
+        toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+        attachmentRefs?: OpenClawAttachmentRef[];
+      },
     ) => Promise<void>;
   }).recordChatTurnPersistenceTransition;
   if (typeof recorder !== 'function') return false;
   await recorder.call(memoryManager, payload.sessionId, payload.turnId, payload.persistenceState, {
     failureReason: payload.failureReason ?? null,
+    assistantReply: payload.assistantReply,
+    toolCalls: payload.toolCalls,
+    attachmentRefs: verifiedAttachmentRefs,
   });
   return true;
 }

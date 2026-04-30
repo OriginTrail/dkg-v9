@@ -462,11 +462,13 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
           await reverseHermesSetupForUi(config);
         } catch (err: any) {
           const integration = updateLocalAgentIntegration(config, id, {
+            enabled: false,
             runtime: {
               status: 'error',
               ready: false,
               lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
             },
+            metadata: { userDisabled: true },
           });
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, integration });

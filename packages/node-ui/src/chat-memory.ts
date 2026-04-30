@@ -671,7 +671,12 @@ export class ChatMemoryManager {
     sessionId: string,
     turnId: string,
     persistenceState: ChatTurnPersistenceState,
-    opts?: { failureReason?: string | null },
+    opts?: {
+      failureReason?: string | null;
+      assistantReply?: string;
+      toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+      attachmentRefs?: ChatAttachmentRef[];
+    },
   ): Promise<void> {
     await this.ensureInitialized();
     const trimmedTurnId = turnId.trim();
@@ -695,6 +700,31 @@ export class ChatMemoryManager {
         subject: transitionUri,
         predicate: `${DKG_ONT}failureReason`,
         object: JSON.stringify(failureReason),
+        graph: '',
+      });
+    }
+    if (typeof opts?.assistantReply === 'string') {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}assistantReply`,
+        object: JSON.stringify(opts.assistantReply),
+        graph: '',
+      });
+    }
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
+    }
+    if (opts?.toolCalls?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}toolCalls`,
+        object: JSON.stringify(JSON.stringify(opts.toolCalls)),
         graph: '',
       });
     }
@@ -968,7 +998,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -986,6 +1016,8 @@ export class ChatMemoryManager {
               ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
               ?transition <${DKG_ONT}persistenceState> ?transitionState .
               OPTIONAL { ?transition <${DKG_ONT}failureReason> ?transitionFailureReason }
+              OPTIONAL { ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply }
+              OPTIONAL { ?transition <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?transitionAttachmentRefs }
             }
           }
         } ORDER BY ${order}(?ts) LIMIT ${limit}`,
@@ -1019,6 +1051,14 @@ export class ChatMemoryManager {
           messagesByUri.set(key, message);
         }
         const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
+        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
+          message.text = stripRdfLiteral(transitionAssistantReply);
+        }
+        const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
+        if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
+          message.attachmentRefs = transitionAttachmentRefs;
+        }
         message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
         const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
         if (candidateStatus === 'failed' && candidateReason) {

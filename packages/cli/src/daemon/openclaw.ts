@@ -111,12 +111,17 @@ function classifyExplicitOpenClawHealthUrl(
   gatewayBase: string | undefined,
 ): 'bridge' | 'gateway' | undefined {
   if (!healthUrl) return undefined;
-  if (standaloneBridgeBase && healthUrlMatchesBase(healthUrl, standaloneBridgeBase)) {
-    return 'bridge';
+  const bridgeMatch = standaloneBridgeBase && healthUrlMatchesBase(healthUrl, standaloneBridgeBase)
+    ? trimTrailingSlashes(standaloneBridgeBase)
+    : undefined;
+  const gatewayMatch = gatewayBase && healthUrlMatchesBase(healthUrl, gatewayBase)
+    ? trimTrailingSlashes(gatewayBase)
+    : undefined;
+  if (bridgeMatch && gatewayMatch) {
+    return gatewayMatch.length >= bridgeMatch.length ? 'gateway' : 'bridge';
   }
-  if (gatewayBase && healthUrlMatchesBase(healthUrl, gatewayBase)) {
-    return 'gateway';
-  }
+  if (gatewayMatch) return 'gateway';
+  if (bridgeMatch) return 'bridge';
   return undefined;
 }
 

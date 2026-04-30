@@ -513,7 +513,7 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isListening).toBe(false);
   });
 
-  it('cancels a pending same-account lifecycle from a fresh stop context without stopping the active bridge', async () => {
+  it('stops the active lifecycle for a fresh same-account stop during a replacement window', async () => {
     const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
     plugin.register(api);
@@ -555,17 +555,14 @@ describe('DkgChannelPlugin', () => {
     });
 
     await replacementLifecycle;
-    expect(plugin.isListening).toBe(true);
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(false);
     expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
-    expect(stopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(stopStatus).toHaveBeenCalledWith(expect.objectContaining({
       running: false,
       connected: false,
       restartPending: false,
     }));
-
-    await registeredPlugin.gateway.stopAccount(firstCtx);
-    await firstLifecycle;
-    expect(plugin.isListening).toBe(false);
   });
 
   it('stops the registered gateway lifecycle bridge when OpenClaw stops the channel', async () => {

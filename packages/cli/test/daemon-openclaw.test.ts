@@ -220,6 +220,34 @@ describe('OpenClaw channel routing helpers', () => {
     ]);
   });
 
+  it('prefers a nested gateway health URL over a broader bridge base', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://localhost:9301',
+            gatewayUrl: 'http://localhost:9301/api/dkg-channel',
+            healthUrl: 'http://localhost:9301/api/dkg-channel/health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://localhost:9301/inbound',
+        streamUrl: 'http://localhost:9301/inbound/stream',
+        healthUrl: 'http://localhost:9301/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://localhost:9301/api/dkg-channel/inbound',
+        healthUrl: 'http://localhost:9301/api/dkg-channel/health',
+      },
+    ]);
+  });
+
   it('uses an explicit gateway health URL when only gateway transport is configured', () => {
     expect(getOpenClawChannelTargets(makeConfig({
       localAgentIntegrations: {

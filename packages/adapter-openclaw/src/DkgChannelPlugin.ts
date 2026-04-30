@@ -743,8 +743,8 @@ export class DkgChannelPlugin {
     const lifecycleOwner =
       (ctx && typeof ctx === 'object' ? this.gatewayLifecycleOwnersByContext.get(ctx) : undefined) ??
       (signal ? this.gatewayLifecycleOwnersBySignal.get(signal) : undefined) ??
-      this.gatewayLifecyclePendingOwnersByAccount.get(accountId) ??
-      this.gatewayLifecycleOwnersByAccount.get(accountId);
+      this.gatewayLifecycleOwnersByAccount.get(accountId) ??
+      this.gatewayLifecyclePendingOwnersByAccount.get(accountId);
     const activeOwner = this.gatewayLifecycleOwner;
     const pendingOwner = this.gatewayLifecyclePendingOwner;
     if ((activeOwner || pendingOwner) && lifecycleOwner !== activeOwner && lifecycleOwner !== pendingOwner) {

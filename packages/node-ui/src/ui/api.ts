@@ -396,6 +396,27 @@ export const publishTriples = async (contextGraphId: string, quads: any[]) => {
   return post<any>('/api/shared-memory/publish', { contextGraphId, selection: 'all', clearAfter: true });
 };
 
+export const writeSharedMemory = (
+  contextGraphId: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+  opts: { subGraphName?: string; localOnly?: boolean } = {},
+) =>
+  post<any>('/api/shared-memory/write', {
+    contextGraphId,
+    quads,
+    ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    ...(opts.localOnly !== undefined ? { localOnly: opts.localOnly } : {}),
+  });
+
+export const writeProfileQueryCatalog = (
+  contextGraphId: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+) =>
+  post<any>('/api/profile/query-catalog/write', {
+    contextGraphId,
+    quads,
+  });
+
 // --- Assertions (WM objects) ---
 
 export interface AssertionInfo {

@@ -644,7 +644,6 @@ export async function runDaemonInner(
   });
 
   await agent.start();
-  await agent.publishProfile();
 
   const publisherChainBase = chainBase?.rpcUrl && chainBase?.hubAddress
     ? {
@@ -653,38 +652,56 @@ export async function runDaemonInner(
         chainId: chainBase.chainId,
       }
     : undefined;
-  publisherRuntime = await startPublisherRuntimeIfEnabled({
-    dataDir: dkgDir(),
-    config,
-    store: agent.store,
-    keypair: agent.wallet.keypair,
-    chainBase: publisherChainBase,
-    ackTransportFactory: () => ({
-      publisherPeerId: agent.peerId,
-      gossipPublish: async (topic: string, data: Uint8Array) => {
-        await agent.gossip.publish(topic, data);
-      },
-      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        return agent.router.send(peerId, protocol, data);
-      },
-      getConnectedCorePeers: () => {
-        const allPeers = agent.node.libp2p
-          .getPeers()
-          .map((p) => p.toString())
-          .filter((id) => id !== agent.peerId);
-        const knownCorePeerIds = (agent as any).knownCorePeerIds as
-          | Set<string>
-          | undefined;
-        if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-          const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
-          if (filtered.length > 0) return filtered;
-        }
-        return allPeers;
-      },
-      log,
-    }),
-    log,
-  });
+  const startPostApiPublishing = () => {
+    const profileTimer = setTimeout(() => {
+      void agent.publishProfile().catch((err: any) => {
+        log(`Agent profile publish failed: ${err?.message ?? String(err)}`);
+      });
+    }, 0);
+    if (profileTimer.unref) profileTimer.unref();
+
+    const publisherTimer = setTimeout(() => {
+      void startPublisherRuntimeIfEnabled({
+        dataDir: dkgDir(),
+        config,
+        store: agent.store,
+        keypair: agent.wallet.keypair,
+        chainBase: publisherChainBase,
+        ackTransportFactory: () => ({
+          publisherPeerId: agent.peerId,
+          gossipPublish: async (topic: string, data: Uint8Array) => {
+            await agent.gossip.publish(topic, data);
+          },
+          sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+            return agent.router.send(peerId, protocol, data);
+          },
+          getConnectedCorePeers: () => {
+            const allPeers = agent.node.libp2p
+              .getPeers()
+              .map((p) => p.toString())
+              .filter((id) => id !== agent.peerId);
+            const knownCorePeerIds = (agent as any).knownCorePeerIds as
+              | Set<string>
+              | undefined;
+            if (knownCorePeerIds && knownCorePeerIds.size > 0) {
+              const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
+              if (filtered.length > 0) return filtered;
+            }
+            return allPeers;
+          },
+          log,
+        }),
+        log,
+      })
+        .then((runtime) => {
+          publisherRuntime = runtime;
+        })
+        .catch((err: any) => {
+          log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
+        });
+    }, 0);
+    if (publisherTimer.unref) publisherTimer.unref();
+  };
 
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
@@ -1632,6 +1649,7 @@ export async function runDaemonInner(
   log(`API listening on http://${apiHost}:${boundPort}`);
   log(`Node UI: http://${apiHost}:${boundPort}/ui`);
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
+  startPostApiPublishing();
 
   // Graceful shutdown
   let shuttingDown = false;

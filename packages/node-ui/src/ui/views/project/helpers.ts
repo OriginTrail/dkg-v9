@@ -10,7 +10,7 @@ import {
   VIZ_PRED_ANCHORED_IN, VIZ_PRED_SIGNED_BY, VIZ_PRED_CONSENSUS,
 } from '../../hooks/useVerifiedMemoryAnchors.js';
 
-export type LayerView = 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm';
+export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 export const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',

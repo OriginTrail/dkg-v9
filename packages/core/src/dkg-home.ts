@@ -131,13 +131,13 @@ export function findDkgMonorepoRoot(
  *      daemonUrl, or both/neither home matches the port), pick the dir
  *      whose `api.port` was most recently modified. This is overwhelmingly
  *      the dir the user is about to start the daemon in again.
- *   5. Fresh-install fallback (no daemon signals at all): mirrors
+ *   5. Fresh-install fallback (no daemon signals at all): delegates to
  *      `resolveDkgConfigHome()` — `~/.dkg-dev` in a monorepo checkout
  *      without an existing `~/.dkg/config.json`, otherwise `~/.dkg`.
- *      Keeps the runtime resolver in sync with the setup-time resolver
- *      so a cold-start gateway in a fresh monorepo install doesn't cache
- *      `~/.dkg` while setup writes the daemon config to `~/.dkg-dev`
- *      (Codex T75).
+ *      Single source of truth keeps the runtime resolver in lockstep
+ *      with the setup-time resolver so a cold-start gateway in a fresh
+ *      monorepo install doesn't cache `~/.dkg` while setup writes the
+ *      daemon config to `~/.dkg-dev` (Codex T75).
  *
  * Cost: a handful of sync filesystem reads plus 1–2 `process.kill(_, 0)`
  * calls. Sub-millisecond. Called once at adapter `register()` time.
@@ -251,22 +251,24 @@ export function resolveDkgHome(opts?: ResolveDkgHomeOptions): string {
   if (dkgDevMtime != null && (dkgMtime == null || dkgDevMtime > dkgMtime)) return dkgDev;
   if (dkgMtime != null) return dkg;
 
-  // (4) No daemon signals at all (fresh install, gateway started before the
-  //     first daemon run). Mirror `resolveDkgConfigHome()`'s monorepo
-  //     heuristic so the runtime resolver agrees with the setup-time
-  //     resolver: in a monorepo checkout where `~/.dkg/config.json` does
-  //     not exist, prefer `~/.dkg-dev` (where setup will write the daemon's
-  //     config). Without this, a cold-start gateway in a fresh monorepo
-  //     install would cache `~/.dkg` while setup wrote the daemon to
-  //     `~/.dkg-dev`, and the adapter would read auth.token /
+  // (4) No daemon signals at all (fresh install, gateway started before
+  //     the first daemon run). Delegate to `resolveDkgConfigHome` so the
+  //     two resolvers stay in lockstep — any future change to monorepo /
+  //     global-config rules updates both call paths from a single source
+  //     of truth. Without this delegation, a cold-start gateway in a
+  //     fresh monorepo install would cache `~/.dkg` while setup wrote the
+  //     daemon to `~/.dkg-dev`, and the adapter would read auth.token /
   //     agent-keystore.json from the wrong dir for its plugin lifetime
   //     (Codex T75 — surfaced after PR #337 introduced
   //     `resolveDkgConfigHome` without backporting the monorepo knowledge
   //     here).
-  const isMonorepo = opts?.isDkgMonorepo ?? findDkgMonorepoRoot() !== null;
-  const dkgConfigExists = existsSync(join(dkg, 'config.json'));
-  if (isMonorepo && !dkgConfigExists) return dkgDev;
-  return dkg;
+  //
+  //     The `isDkgMonorepo` opt forwards through so test callers can
+  //     control monorepo detection symmetrically; `process.env.DKG_HOME`
+  //     was already short-circuited at the top of this function, so the
+  //     redundant env re-check inside `resolveDkgConfigHome` is a no-op
+  //     here.
+  return resolveDkgConfigHome({ isDkgMonorepo: opts?.isDkgMonorepo });
 }
 
 /** Sync variant of `readDaemonPid` for use in `resolveDkgHome` (called from sync constructors). */

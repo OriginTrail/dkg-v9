@@ -22,6 +22,7 @@
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-random-sampling": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "ethers": "^6",
     "js-yaml": "^4.1.1",

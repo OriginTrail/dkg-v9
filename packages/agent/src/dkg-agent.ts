@@ -41,6 +41,7 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
@@ -278,6 +279,26 @@ export interface DKGAgentConfig {
   storeConfig?: TripleStoreConfig;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /**
+   * Path to the V10 Random Sampling prover write-ahead log. Core
+   * nodes only; ignored on edge. When omitted, an in-memory WAL is
+   * used (loses crash-recovery context on restart). Production
+   * deployments SHOULD set this to a persistent path under `dataDir`.
+   */
+  randomSamplingWalPath?: string;
+  /**
+   * If true (default on core), run the V10 Merkle proof build on a
+   * `worker_threads` worker so a 100k-leaf KC does not block the
+   * agent's event loop. Set false to keep the build on the main
+   * thread (test ergonomics, deterministic profiling).
+   */
+  randomSamplingUseWorkerThread?: boolean;
+  /**
+   * Tick cadence for the prover loop (ms). Default 30s. The
+   * orchestrator is idempotent under double-ticks; a tighter cadence
+   * is safe but yields more chain reads.
+   */
+  randomSamplingTickIntervalMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
@@ -337,6 +358,7 @@ export class DKGAgent {
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
   private swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private randomSamplingHandle: RandomSamplingHandle | null = null;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -979,6 +1001,45 @@ export class DKGAgent {
         this.cleanupExpiredSharedMemory().catch(() => {});
       }, SWM_CLEANUP_INTERVAL_MS);
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
+    }
+
+    // Wire V10 Random Sampling prover. The bind layer is a no-op for
+    // edge nodes (and for core nodes that haven't yet provisioned an
+    // on-chain identity — those will be retried on the next start).
+    // Failures during bind are logged and swallowed so a missing
+    // RandomSampling deployment never blocks agent startup.
+    try {
+      const rsRole: 'core' | 'edge' = effectiveRole === 'core' ? 'core' : 'edge';
+      let rsIdentityId = 0n;
+      if (this.chain.chainId !== 'none' && rsRole === 'core') {
+        try { rsIdentityId = await this.chain.getIdentityId(); } catch { /* ignore */ }
+      }
+      const rsLog = {
+        info: (event: string, fields: Record<string, unknown>) =>
+          this.log.info(ctx, `[${event}] ${JSON.stringify(fields)}`),
+        warn: (event: string, fields: Record<string, unknown>) =>
+          this.log.warn(ctx, `[${event}] ${JSON.stringify(fields)}`),
+        error: (event: string, fields: Record<string, unknown>) =>
+          this.log.error(ctx, `[${event}] ${JSON.stringify(fields)}`),
+      };
+      this.randomSamplingHandle = await bindRandomSampling({
+        role: rsRole,
+        chain: this.chain,
+        store: this.store,
+        identityId: rsIdentityId,
+        walPath: this.config.randomSamplingWalPath,
+        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
+        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
+        log: rsLog,
+      });
+      if (this.randomSamplingHandle.enabled) {
+        this.randomSamplingHandle.start();
+        this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
+      } else if (rsRole === 'core') {
+        this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -6691,6 +6752,23 @@ export class DKGAgent {
     return discovered;
   }
 
+  /**
+   * Snapshot of the V10 Random Sampling prover's recent activity.
+   * Returns a disabled-handle status when the prover never started
+   * (edge node, no identity, missing chain methods). Used by the
+   * daemon's `/api/random-sampling/status` route + the CLI's
+   * `random-sampling status` subcommand.
+   */
+  getRandomSamplingStatus(): RandomSamplingStatus {
+    if (this.randomSamplingHandle) return this.randomSamplingHandle.getStatus();
+    return {
+      enabled: false,
+      role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
+      identityId: '0',
+      loop: null,
+    };
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     if (this.chainPoller) {
@@ -6700,6 +6778,10 @@ export class DKGAgent {
     if (this.swmCleanupTimer) {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
+    }
+    if (this.randomSamplingHandle) {
+      try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
+      this.randomSamplingHandle = null;
     }
     await this.node.stop();
     if (this.syncVerifyWorker) {
@@ -6810,6 +6892,7 @@ export class DKGAgent {
       tokenAmount?: bigint,
       swmGraphId?: string,
       subGraphName?: string,
+      merkleLeafCount?: number,
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
@@ -6866,6 +6949,7 @@ export class DKGAgent {
         tokenAmount,
         swmGraphId,
         subGraphName,
+        merkleLeafCount: merkleLeafCount ?? 1,
       });
       return result.acks;
     };

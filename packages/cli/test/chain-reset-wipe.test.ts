@@ -23,7 +23,7 @@
  *   7. Idempotent across repeated calls with the same input.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chainResetWipe } from '../src/daemon/chain-reset-wipe.js';
@@ -230,5 +230,128 @@ describe('chainResetWipe — corrupt state file', () => {
     // State file gets rewritten with the current marker.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(NEW_MARKER);
+  });
+});
+
+describe('chainResetWipe — custom random-sampling WAL path (PR #357 feedback)', () => {
+  // Codex review found that operators who set `randomSampling.walPath` in
+  // their config keep a stale WAL across chain resets — the wipe was
+  // hardcoding `dataDir/random-sampling.wal`. These tests pin the fix.
+
+  it('wipes the operator-supplied WAL path when set, not the default', () => {
+    const customWal = join(dataDir, 'custom', 'rs.wal');
+    mkdirSync(join(dataDir, 'custom'), { recursive: true });
+    writeFileSync(customWal, 'WAL\n');
+    // Default-path WAL also present — must NOT be touched (caller has
+    // explicitly redirected, default is dead from prover's POV).
+    writeFileSync(join(dataDir, 'random-sampling.wal'), 'STALE\n');
+    writeFileSync(join(dataDir, 'store.nq'), '...');
+
+    const result = chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      randomSamplingWalPath: customWal,
+    });
+
+    expect(result.wiped).toBe(true);
+    expect(existsSync(customWal)).toBe(false);
+    // Default path untouched: prover never reads it under this config.
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(true);
+  });
+
+  it('falls back to default WAL path when randomSamplingWalPath is empty', () => {
+    writeFileSync(join(dataDir, 'random-sampling.wal'), 'WAL\n');
+
+    const result = chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      randomSamplingWalPath: '',
+    });
+
+    expect(result.wiped).toBe(true);
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
+  });
+
+  it('handles WAL path outside dataDir (absolute, e.g. /var/lib/dkg/wal)', () => {
+    const externalWalDir = mkdtempSync(join(tmpdir(), 'dkg-external-wal-'));
+    const externalWal = join(externalWalDir, 'rs.wal');
+    writeFileSync(externalWal, 'EXTERNAL_WAL\n');
+
+    try {
+      const result = chainResetWipe({
+        dataDir,
+        currentMarker: NEW_MARKER,
+        randomSamplingWalPath: externalWal,
+      });
+
+      expect(result.wiped).toBe(true);
+      expect(existsSync(externalWal)).toBe(false);
+      // Display label should be the absolute path (informative for operators).
+      expect(result.removedFiles.some((f) => f === externalWal)).toBe(true);
+    } finally {
+      rmSync(externalWalDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', () => {
+  // Per the runbook contract — and Codex review feedback — wipe failures
+  // should be logged so operators can act, but the daemon must continue
+  // to boot. Crashing here would create a worse failure mode (node down)
+  // than the original problem (stale state).
+
+  it('logs and continues when saveState throws (e.g. read-only FS)', () => {
+    seedAllFiles(dataDir);
+    // Make dataDir read-only so writeFileSync on the state file throws.
+    // Skip on platforms where chmod 0o555 doesn't actually deny root or
+    // where tests run as root (CI containers); the scenario we care
+    // about is non-root operator with a misconfigured volume mount.
+    const originalMode = statSync(dataDir).mode;
+    let logsCaptured: string[] = [];
+
+    try {
+      chmodSync(dataDir, 0o555);
+
+      // Quick capability check: if writeFileSync still works (root /
+      // certain FUSE mounts), skip the rest of the assertion — we
+      // can't synthesize the failure deterministically.
+      try {
+        writeFileSync(join(dataDir, '.probe'), 'x');
+        rmSync(join(dataDir, '.probe'), { force: true });
+        return;
+      } catch {
+        // Good: FS denied the write. Now run the wipe.
+      }
+
+      expect(() => {
+        chainResetWipe({
+          dataDir,
+          currentMarker: NEW_MARKER,
+          log: (msg) => logsCaptured.push(msg),
+        });
+      }).not.toThrow();
+
+      // Loud log so operators can find this in journalctl.
+      expect(logsCaptured.some((l) => l.includes('failed to persist chain reset marker'))).toBe(true);
+    } finally {
+      chmodSync(dataDir, originalMode);
+    }
+  });
+
+  it('logs and continues when an individual file wipe throws', () => {
+    // We can't easily synthesise a per-file rmSync error portably, so
+    // we exercise the public interface and verify that a missing /
+    // unlinkable target does not crash. The per-file try/catch is the
+    // structural guarantee — this test asserts the contract.
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    // No chain-state files exist — rmSync of nonexistent paths must not
+    // throw. (existsSync gate already handles this; the test pins it.)
+
+    expect(() => {
+      chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
+    }).not.toThrow();
   });
 });

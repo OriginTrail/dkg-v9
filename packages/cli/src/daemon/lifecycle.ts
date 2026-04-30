@@ -478,6 +478,10 @@ export async function runDaemonInner(
   const wipeResult = chainResetWipe({
     dataDir: dkgDir(),
     currentMarker: network?.chainResetMarker,
+    // Honour operator's `randomSampling.walPath` override; the prover
+    // writes its WAL there, so a fresh chain reset must wipe that file
+    // (not the default ~/.dkg/random-sampling.wal which would be empty).
+    randomSamplingWalPath: config.randomSampling?.walPath,
     log,
   });
   if (wipeResult.wiped) {

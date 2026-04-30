@@ -80,6 +80,15 @@ export interface ChainResetWipeOptions {
    * a no-op (no state file written, no wipe).
    */
   currentMarker: string | undefined;
+  /**
+   * Resolved runtime path of the random-sampling WAL. When the operator
+   * sets `randomSampling.walPath` in their config, the prover writes to
+   * that path instead of the default `dataDir/random-sampling.wal`. We
+   * have to wipe whichever path is actually in use; the default-path
+   * wipe alone would leave a stale WAL under operator-supplied paths.
+   * Falsy → fall back to `dataDir/random-sampling.wal` (the default).
+   */
+  randomSamplingWalPath?: string;
   /** Optional logger. Defaults to no-op so the function is silent in tests by default. */
   log?: (msg: string) => void;
 }
@@ -106,26 +115,55 @@ function saveState(dataDir: string, marker: string | null): void {
   );
 }
 
-function performWipe(dataDir: string, log: (msg: string) => void): string[] {
+function performWipe(
+  dataDir: string,
+  walPath: string | undefined,
+  log: (msg: string) => void,
+): string[] {
   const removedFiles: string[] = [];
 
-  const wipeFixed = (relPath: string) => {
-    const abs = join(dataDir, relPath);
-    if (existsSync(abs)) {
-      rmSync(abs, { recursive: true, force: true });
-      removedFiles.push(relPath);
+  // wipeAbs: wipe an absolute path, log under a display label. We log the
+  // display label (relative when inside dataDir, absolute when not) so
+  // operator-readable runbook output stays consistent regardless of
+  // whether the WAL lives inside or outside the data dir.
+  const wipeAbs = (abs: string, displayLabel: string) => {
+    try {
+      if (existsSync(abs)) {
+        rmSync(abs, { recursive: true, force: true });
+        removedFiles.push(displayLabel);
+      }
+    } catch (err) {
+      // Per the runbook contract: log + continue. Crashing here would
+      // stop the daemon entirely, which is worse than booting on stale
+      // state (the operator can re-run with elevated perms / fix FS).
+      log(`  WARN: failed to wipe ${displayLabel}: ${(err as Error).message}`);
     }
   };
 
-  wipeFixed('store.nq');
-  wipeFixed('store.nq.tmp');
-  wipeFixed('random-sampling.wal');
+  wipeAbs(join(dataDir, 'store.nq'), 'store.nq');
+  wipeAbs(join(dataDir, 'store.nq.tmp'), 'store.nq.tmp');
+
+  // Random sampling WAL: wipe the resolved runtime path (which the
+  // operator may have moved out of dataDir via `randomSampling.walPath`).
+  // Defaulting to dataDir/random-sampling.wal keeps the historical
+  // behaviour for operators who never set the config knob.
+  const walAbs = walPath && walPath.length > 0
+    ? walPath
+    : join(dataDir, 'random-sampling.wal');
+  const walLabel = walAbs.startsWith(dataDir)
+    ? walAbs.slice(dataDir.length).replace(/^\/+/, '')
+    : walAbs;
+  wipeAbs(walAbs, walLabel || 'random-sampling.wal');
 
   try {
     for (const f of readdirSync(dataDir)) {
       if (f.startsWith('publish-journal.')) {
-        rmSync(join(dataDir, f), { force: true });
-        removedFiles.push(f);
+        try {
+          rmSync(join(dataDir, f), { force: true });
+          removedFiles.push(f);
+        } catch (err) {
+          log(`  WARN: failed to wipe ${f}: ${(err as Error).message}`);
+        }
       }
     }
   } catch {
@@ -168,8 +206,30 @@ export function chainResetWipe(opts: ChainResetWipeOptions): ChainResetWipeResul
     );
   }
 
-  const removedFiles = performWipe(opts.dataDir, log);
-  saveState(opts.dataDir, opts.currentMarker);
+  // Both performWipe and saveState are best-effort: per the runbook
+  // contract, wipe failures should be logged so the operator can act,
+  // but boot must continue. Crashing the daemon on a stale chain reset
+  // marker file would be worse than booting with stale state — the
+  // operator's instinct is "node won't come back up, must roll back",
+  // when the actual right answer is "fix FS perms, the wipe will retry
+  // next boot". performWipe already swallows per-file FS errors; this
+  // outer try is a defence-in-depth against unexpected exceptions
+  // (e.g. EACCES on readdirSync, JSON serialization throwing, etc).
+  let removedFiles: string[] = [];
+  try {
+    removedFiles = performWipe(opts.dataDir, opts.randomSamplingWalPath, log);
+  } catch (err) {
+    log(
+      `WARN: chain-state wipe encountered unexpected error: ${(err as Error).message}. Continuing boot on stale state.`,
+    );
+  }
+  try {
+    saveState(opts.dataDir, opts.currentMarker);
+  } catch (err) {
+    log(
+      `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${(err as Error).message}. Wipe will retry on next boot.`,
+    );
+  }
   log('Chain-state wipe complete. Continuing boot.');
 
   return { wiped: true, prevMarker, removedFiles };

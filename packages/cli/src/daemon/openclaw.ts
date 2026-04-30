@@ -117,8 +117,6 @@ function classifyExplicitOpenClawHealthUrl(
   if (gatewayBase && healthUrlMatchesBase(healthUrl, gatewayBase)) {
     return 'gateway';
   }
-  if (standaloneBridgeBase && !gatewayBase) return 'bridge';
-  if (!standaloneBridgeBase && gatewayBase) return 'gateway';
   return undefined;
 }
 

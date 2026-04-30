@@ -678,14 +678,68 @@ export class DkgChannelPlugin {
     }
   }
 
+  private getGatewayAccountId(ctx: any): string {
+    const accountId = typeof ctx?.accountId === 'string' ? ctx.accountId.trim() : '';
+    return accountId || DEFAULT_CHANNEL_ACCOUNT_ID;
+  }
+
+  private reportUnsupportedGatewayAccount(ctx: any, message: string): void {
+    ctx?.setStatus?.({
+      accountId: this.getGatewayAccountId(ctx),
+      enabled: false,
+      configured: false,
+      linked: false,
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastError: message,
+      lastStopAt: Date.now(),
+    });
+  }
+
+  private ensureSupportedGatewayAccount(ctx: any): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return;
+    const message = `DKG UI channel only supports the "${DEFAULT_CHANNEL_ACCOUNT_ID}" gateway account`;
+    this.reportUnsupportedGatewayAccount(ctx, message);
+    throw new Error(message);
+  }
+
+  private ignoreUnsupportedGatewayStop(ctx: any): boolean {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return false;
+    this.reportUnsupportedGatewayAccount(ctx, `DKG UI channel does not run gateway account "${accountId}"`);
+    return true;
+  }
+
+  private cancelPendingGatewayLifecycle(ctx: any, lifecycleOwner: object): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = null;
+    }
+    if (this.gatewayLifecycleOwner && this.gatewayLifecycleOwner !== lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = this.gatewayLifecycleOwner;
+    }
+    if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+    }
+    if (ctx && typeof ctx === 'object' && this.gatewayLifecycleOwnersByContext.get(ctx) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersByContext.delete(ctx);
+    }
+    if (signal && this.gatewayLifecycleOwnersBySignal.get(signal) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersBySignal.delete(signal);
+    }
+  }
+
   private async stopAbortedGatewayLifecycle(ctx: any, lifecycleOwner?: object): Promise<void> {
     await this.stop({ updateGatewayStatus: false });
     this.reportGatewayLifecycleStopped(ctx, lifecycleOwner);
   }
 
   private async stopCurrentGatewayLifecycle(ctx: any): Promise<void> {
-    const accountId = ctx.accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID;
-    const signal = ctx.abortSignal as AbortSignal | undefined;
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
     const lifecycleOwner =
       (ctx && typeof ctx === 'object' ? this.gatewayLifecycleOwnersByContext.get(ctx) : undefined) ??
       (signal ? this.gatewayLifecycleOwnersBySignal.get(signal) : undefined) ??
@@ -696,16 +750,27 @@ export class DkgChannelPlugin {
     if ((activeOwner || pendingOwner) && lifecycleOwner !== activeOwner && lifecycleOwner !== pendingOwner) {
       return;
     }
+    if (
+      lifecycleOwner === pendingOwner &&
+      activeOwner &&
+      activeOwner !== pendingOwner &&
+      this.server?.listening === true &&
+      !this.serverStop &&
+      !this.stopping
+    ) {
+      this.cancelPendingGatewayLifecycle(ctx, lifecycleOwner);
+      return;
+    }
     await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
   }
 
   private async runGatewayLifecycle(ctx: any): Promise<void> {
-    if (ctx.abortSignal?.aborted) {
+    if (ctx?.abortSignal?.aborted) {
       return;
     }
 
-    const accountId = ctx.accountId ?? DEFAULT_CHANNEL_ACCOUNT_ID;
-    const signal = ctx.abortSignal as AbortSignal | undefined;
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
     const lifecycleOwner = {};
     this.gatewayLifecyclePendingOwner = lifecycleOwner;
     this.gatewayLifecyclePendingOwnersByAccount.set(accountId, lifecycleOwner);
@@ -725,7 +790,7 @@ export class DkgChannelPlugin {
       if (this.gatewayLifecyclePendingOwner !== lifecycleOwner) {
         return;
       }
-      if (ctx.abortSignal?.aborted) {
+      if (ctx?.abortSignal?.aborted) {
         if (!hadStableBridgeBeforeStart) {
           await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
         }
@@ -757,12 +822,12 @@ export class DkgChannelPlugin {
         port: this.bridgePort || this.port,
       });
 
-      await this.waitForGatewayLifecycleStop(ctx.abortSignal);
+      await this.waitForGatewayLifecycleStop(ctx?.abortSignal);
     } finally {
       const ownsActiveLifecycle =
         this.gatewayLifecycleOwner === lifecycleOwner &&
         this.gatewayLifecyclePendingOwner === lifecycleOwner;
-      if (ctx.abortSignal?.aborted && ownsActiveLifecycle) {
+      if (ctx?.abortSignal?.aborted && ownsActiveLifecycle) {
         await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
       }
       if (this.gatewayLifecycleOwnersByAccount.get(accountId) === lifecycleOwner) {
@@ -922,9 +987,11 @@ export class DkgChannelPlugin {
       },
       gateway: {
         startAccount: async (ctx: any) => {
+          this.ensureSupportedGatewayAccount(ctx);
           await this.runGatewayLifecycle(ctx);
         },
         stopAccount: async (ctx: any) => {
+          if (this.ignoreUnsupportedGatewayStop(ctx)) return;
           await this.stopCurrentGatewayLifecycle(ctx);
         },
       },

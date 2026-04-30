@@ -279,6 +279,64 @@ describe('DkgChannelPlugin', () => {
     expect(registeredPlugin.gateway.stopAccount).toBeTypeOf('function');
   });
 
+  it('rejects non-default gateway accounts without preempting the default lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const defaultController = new AbortController();
+    const defaultStatus = vi.fn();
+    const defaultLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: defaultController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: defaultStatus,
+    });
+    await vi.waitFor(() => {
+      expect(defaultStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const otherStatus = vi.fn();
+    await expect(registeredPlugin.gateway.startAccount({
+      accountId: 'other',
+      account: { accountId: 'other' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'other' }),
+      setStatus: otherStatus,
+    })).rejects.toThrow(/only supports the "default" gateway account/);
+
+    expect(plugin.isListening).toBe(true);
+    expect(otherStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'other',
+      running: false,
+      connected: false,
+      linked: false,
+    }));
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'other',
+      account: { accountId: 'other' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'other' }),
+      setStatus: otherStatus,
+    });
+    expect(plugin.isListening).toBe(true);
+
+    defaultController.abort();
+    await defaultLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
   it('keeps the registered gateway lifecycle running until OpenClaw aborts it', async () => {
     const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
@@ -410,17 +468,19 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isListening).toBe(false);
   });
 
-  it('stops a pending replacement lifecycle before it reports running', async () => {
+  it('cancels a pending replacement lifecycle without stopping the active bridge', async () => {
     const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
     plugin.register(api);
 
     const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
     const firstCtx = {
       accountId: 'default',
       account: { accountId: 'default' },
       cfg: {},
       runtime: {},
+      abortSignal: firstController.signal,
       getStatus: () => ({ accountId: 'default' }),
       setStatus: vi.fn(),
     };
@@ -443,18 +503,17 @@ describe('DkgChannelPlugin', () => {
     const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
     await registeredPlugin.gateway.stopAccount(replacementCtx);
 
-    await firstLifecycle;
     await replacementLifecycle;
-    expect(plugin.isListening).toBe(false);
+    expect(plugin.isListening).toBe(true);
     expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
-    expect(replacementCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
-      running: false,
-      connected: false,
-      restartPending: false,
-    }));
+    expect(firstCtx.setStatus.mock.calls.some(([status]) => status.running === false)).toBe(false);
+
+    firstController.abort();
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(false);
   });
 
-  it('stops a pending same-account lifecycle from a fresh stop context', async () => {
+  it('cancels a pending same-account lifecycle from a fresh stop context without stopping the active bridge', async () => {
     const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
     plugin.register(api);
@@ -495,15 +554,18 @@ describe('DkgChannelPlugin', () => {
       setStatus: stopStatus,
     });
 
-    await firstLifecycle;
     await replacementLifecycle;
-    expect(plugin.isListening).toBe(false);
+    expect(plugin.isListening).toBe(true);
     expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
-    expect(stopStatus).toHaveBeenCalledWith(expect.objectContaining({
+    expect(stopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
       running: false,
       connected: false,
       restartPending: false,
     }));
+
+    await registeredPlugin.gateway.stopAccount(firstCtx);
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(false);
   });
 
   it('stops the registered gateway lifecycle bridge when OpenClaw stops the channel', async () => {
@@ -765,8 +827,10 @@ describe('DkgChannelPlugin', () => {
         getStatus: () => ({ accountId: 'other' }),
         setStatus: unrelatedStopStatus,
       });
-      expect(unrelatedStopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+      expect(unrelatedStopStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'other',
         running: false,
+        connected: false,
       }));
 
       closeNow?.();

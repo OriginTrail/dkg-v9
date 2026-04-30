@@ -67,3 +67,5 @@ export {
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';
+export * from './source-worker.js';
+export * from './source-registry.js';

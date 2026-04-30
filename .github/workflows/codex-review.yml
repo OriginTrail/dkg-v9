@@ -151,11 +151,13 @@ jobs:
               review = JSON.parse(raw);
             } catch (e) {
               console.error('Failed to parse Codex output:', e.message);
+              // Transient failure: do NOT embed the hash marker, so the next
+              // run on this same diff retries instead of silently skipping.
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.issue.number,
-                body: `${hashMarker}\nCodex review failed to produce valid JSON output. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`,
+                body: `Codex review failed to produce valid JSON output. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`,
                 event: 'COMMENT',
                 comments: [],
               });

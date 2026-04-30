@@ -524,6 +524,37 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T100 - sync watermark writes include unrelated pending debounce snapshots", async () => {
+    const pendingSession = "openclaw:tg:::pending";
+    const syncSession = "openclaw:tg:::sync";
+    (writer as any).saveWatermark(pendingSession, 4);
+    (writer as any).saveWatermark(syncSession, 2);
+    (writer as any).w4bSessionCounts.set(syncSession, 1);
+
+    expect((writer as any).debounceTimers.has(pendingSession)).toBe(true);
+    expect((writer as any).debounceTimers.has(syncSession)).toBe(true);
+    expect((writer as any).cachedWatermarks.has(pendingSession)).toBe(false);
+    expect((writer as any).commitWatermarkStateSync(syncSession)).toBe(true);
+
+    const persisted = JSON.parse(fs.readFileSync(
+      path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json"),
+      "utf-8",
+    ));
+    expect(persisted[pendingSession].w).toBe(4);
+    expect(persisted[syncSession].w).toBe(2);
+    expect(persisted[syncSession].b).toBe(1);
+    expect((writer as any).debounceTimers.has(pendingSession)).toBe(true);
+    expect((writer as any).debounceTimers.has(syncSession)).toBe(false);
+    expect((writer as any).cachedWatermarks.has(pendingSession)).toBe(false);
+    expect((writer as any).cachedWatermarks.get(syncSession)).toBe(2);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((restarted as any).cachedWatermarks.get(pendingSession)).toBe(4);
+    expect((restarted as any).cachedWatermarks.get(syncSession)).toBe(2);
+    expect((restarted as any).w4bSessionCounts.get(syncSession)).toBe(1);
+    restarted.flushSync();
+  });
+
   it("T81 — before_reset can use event payload identity and clears stale W4b state", async () => {
     writer.onMessageReceived({
       sessionKey: "sk",

@@ -1262,6 +1262,14 @@ export class ChatTurnWriter {
     return this.writeWatermarkFile();
   }
 
+  private snapshotWatermarksForWrite(): Map<string, number> {
+    const wm = new Map(this.cachedWatermarks);
+    for (const [key, entry] of this.debounceTimers.entries()) {
+      wm.set(key, entry.pendingIndex);
+    }
+    return wm;
+  }
+
   private snapshotWatermarkState(sessionId: string): WatermarkStateSnapshot {
     return {
       cachedHad: this.cachedWatermarks.has(sessionId),
@@ -2132,7 +2140,11 @@ export class ChatTurnWriter {
       // concurrent persist arriving during the merge+write window
       // doesn't get wiped on write failure, and the merged values
       // only become "the source of truth" once the write succeeded.
-      const wm = overrideMaps?.wm ?? this.cachedWatermarks;
+      // T100 - Normal writes serialize every pending debounce watermark
+      // into the durable snapshot without clearing unrelated timers. A
+      // scoped sync commit for one session must not write a stale cached
+      // watermark for another session that is still waiting on debounce.
+      const wm = overrideMaps?.wm ?? this.snapshotWatermarksForWrite();
       const bc = overrideMaps?.bc ?? this.w4bSessionCounts;
       const markersByKey = overrideMaps?.markers ?? this.externalTurnMarkers;
       const allKeys = new Set<string>([

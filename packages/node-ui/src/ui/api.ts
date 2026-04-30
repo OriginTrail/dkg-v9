@@ -620,6 +620,7 @@ export interface MemorySession {
     persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
     failureReason?: string | null;
     attachmentRefs?: LocalAgentChatAttachmentRef[];
+    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
   }>;
 }
 export interface MemorySessionGraphDeltaWatermark {

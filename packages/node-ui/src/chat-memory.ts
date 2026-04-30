@@ -199,6 +199,12 @@ interface ChatAttachmentRef {
   rootEntity?: string;
 }
 
+interface ChatToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  result: unknown;
+}
+
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
@@ -261,6 +267,27 @@ function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefi
   return refs.length > 0 ? refs : undefined;
 }
 
+function normalizeChatToolCall(raw: unknown): ChatToolCall | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim() : 'unknown';
+  return {
+    name,
+    args: record.args && typeof record.args === 'object' && !Array.isArray(record.args)
+      ? record.args as Record<string, unknown>
+      : {},
+    result: record.result,
+  };
+}
+
+function normalizeChatToolCalls(raw: unknown): ChatToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw
+    .map((entry) => normalizeChatToolCall(entry))
+    .filter((entry): entry is ChatToolCall => entry != null);
+  return calls.length > 0 ? calls : undefined;
+}
+
 function parseNestedJsonLiteral(value: string): unknown {
   let current: unknown = value;
   for (let depth = 0; depth < 4; depth += 1) {
@@ -284,6 +311,19 @@ function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefi
   for (const candidate of candidates) {
     const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
     const normalized = normalizeChatAttachmentRefs(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
+}
+
+function parseToolCallsLiteral(value: string): ChatToolCall[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatToolCalls(parsed);
     if (normalized?.length) return normalized;
   }
   return undefined;
@@ -522,7 +562,7 @@ export class ChatMemoryManager {
     sessionId: string,
     userMessage: string,
     assistantReply: string,
-    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
+    toolCalls?: ChatToolCall[],
     opts?: {
       turnId?: string;
       persistenceState?: ChatTurnPersistenceState;
@@ -674,7 +714,7 @@ export class ChatMemoryManager {
     opts?: {
       failureReason?: string | null;
       assistantReply?: string;
-      toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+      toolCalls?: ChatToolCall[];
       attachmentRefs?: ChatAttachmentRef[];
     },
   ): Promise<void> {
@@ -985,6 +1025,7 @@ export class ChatMemoryManager {
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
       failureReason?: string | null;
       attachmentRefs?: ChatAttachmentRef[];
+      toolCalls?: ChatToolCall[];
     }>;
   } | null> {
     await this.ensureInitialized();
@@ -998,7 +1039,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -1018,6 +1059,7 @@ export class ChatMemoryManager {
               OPTIONAL { ?transition <${DKG_ONT}failureReason> ?transitionFailureReason }
               OPTIONAL { ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply }
               OPTIONAL { ?transition <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?transitionAttachmentRefs }
+              OPTIONAL { ?transition <${DKG_ONT}toolCalls> ?transitionToolCalls }
             }
           }
         } ORDER BY ${order}(?ts) LIMIT ${limit}`,
@@ -1034,6 +1076,7 @@ export class ChatMemoryManager {
         persistStatus?: ChatTurnPersistenceDisplayState;
         failureReason?: string | null;
         attachmentRefs?: ChatAttachmentRef[];
+        toolCalls?: ChatToolCall[];
       }>();
       for (const mb of bindings) {
         const uri = String(mb.m ?? '').replace(/[<>]/g, '');
@@ -1058,6 +1101,10 @@ export class ChatMemoryManager {
         const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
         if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
           message.attachmentRefs = transitionAttachmentRefs;
+        }
+        const transitionToolCalls = parseToolCallsLiteral(String(mb.transitionToolCalls ?? ''));
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionToolCalls?.length) {
+          message.toolCalls = transitionToolCalls;
         }
         message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
         const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();

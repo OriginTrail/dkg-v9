@@ -395,7 +395,7 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 
@@ -501,6 +501,9 @@ describe('ChatMemoryManager', () => {
       extractionStatus: 'completed',
       tripleCount: 12,
     }]));
+    const transitionToolCalls = JSON.stringify(JSON.stringify([
+      { name: 'lookup', args: { query: 'hello' }, result: { ok: true } },
+    ]));
     mockQuery.returns.push(
       { bindings: [] },
       {
@@ -524,6 +527,7 @@ describe('ChatMemoryManager', () => {
             persistenceState: '"pending"',
             transitionState: '"stored"',
             transitionAssistantReply: '"Final reply"',
+            transitionToolCalls,
           },
         ],
       },
@@ -535,6 +539,7 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages).toHaveLength(2);
     expect(session!.messages[0].attachmentRefs?.[0]).toEqual(expect.objectContaining({ id: 'att-1' }));
     expect(session!.messages[1].text).toBe('Final reply');
+    expect(session!.messages[1].toolCalls?.[0]).toEqual(expect.objectContaining({ name: 'lookup' }));
     expect(session!.messages[1].persistStatus).toBe('stored');
   });
 

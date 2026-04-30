@@ -90,12 +90,34 @@ state wipe in Phase C.
    install mode — they're all on the new build (and the new marker)
    within minutes.
 
-## Phase B — Contracts deploy (deployer + multisig)
+## Phase B — Contracts deploy (deployer)
 
 The deploy helper at `packages/evm-module/utils/helpers.ts:148-162`
 short-circuits on contracts whose `deployed: true` flag is set in the
 network deployments JSON. To force a fresh deploy of every contract
 except `Hub` and `Token`, edit the snapshot before running.
+
+**Prerequisites — deployer environment:**
+- `RPC_BASE_SEPOLIA_V10` — Base Sepolia RPC URL (only needed if the
+  default `https://sepolia.base.org` is rate-limited / unhealthy).
+- `EVM_PRIVATE_KEY_BASE_SEPOLIA_V10` — private key of the deployer EOA.
+  Must hold the Base Sepolia ETH for ~45 deployment txs.
+
+**Hub ownership:** `Hub.setAndReinitializeContracts` (the call that
+registers all the new addresses in a single batch — see
+`deploy/998_initialize_contracts.ts`) is gated by
+`onlyOwnerOrMultiSigOwner`. Two paths:
+- **Deployer EOA == Hub owner (or a MultiSig owner):** the deploy
+  pipeline calls `setAndReinitializeContracts` directly at the end and
+  you're done.
+- **Deployer EOA is neither:** the deploy pipeline still emits the
+  `newContracts` array to the console + saves the new addresses to
+  the deployments JSON, but the final `setAndReinitializeContracts`
+  tx will revert. Capture the JSON, hand it to whoever holds Hub
+  ownership, and have them call `setAndReinitializeContracts` from
+  their wallet (or queue it through the MultiSig UI).
+
+**Deploy procedure:**
 
 1. Open `packages/evm-module/deployments/base_sepolia_v10_contracts.json`.
 2. For every entry **except** `Hub` and `Token`, set `deployed: false`:
@@ -110,26 +132,37 @@ except `Hub` and `Token`, edit the snapshot before running.
      fs.writeFileSync(path, JSON.stringify(j, null, 4));
    '
    ```
-3. Run hardhat-deploy on Base Sepolia:
+   Do **not** commit this edit yet — it's a one-shot scratch state for
+   the deploy run. The deploy pipeline rewrites the file with the new
+   addresses + `deployed: true` flips back on each contract via
+   `999_save_deployments.ts`, and *that* is the file you commit after
+   the deploy lands successfully.
+3. Run hardhat-deploy on Base Sepolia. **The hardhat network name is
+   `base_sepolia_v10`** (matches the deployments JSON filename):
    ```bash
    pnpm --filter @origintrail-official/dkg-evm-module \
-     exec hardhat deploy --network base_sepolia
+     exec hardhat deploy --network base_sepolia_v10
    ```
-   For non-development networks the helper does NOT call
-   `Hub.setContractAddress` directly (Hub is multisig-owned). Instead
-   it queues the new addresses for the multisig to execute as a batch.
-4. Multisig (Hub owner) executes the queued
-   `Hub.setContractAddress(name, newAddr)` batch. After this lands,
-   every node — even ones still running the old release — re-resolves
-   the new addresses on its next contract call (per-call resolution for
-   V10 staking contracts) or after its next restart (boot-cached
-   contracts; auto-update will trigger this within ≤ 5 min anyway).
-5. One-shot bootstrap, same multisig:
+   The pipeline:
+   - Skips `Hub` and `Token` (still `deployed: true`).
+   - Deploys the other ~45 contracts (steps `003_*` → `055_*`).
+   - Calls `Hub.setAndReinitializeContracts(newContracts, newAssetStorageContracts, contractsToReinitialize, [])` at the end (`998_initialize_contracts.ts`).
+     If the deployer doesn't own Hub, this final tx reverts — see
+     above for the manual fallback.
+   - Writes the updated deployments JSON via `999_save_deployments.ts`.
+4. After the addresses land in Hub, every node — even ones still
+   running the old release — re-resolves the new addresses on its
+   next contract call (per-call resolution for V10 staking contracts)
+   or after its next restart (boot-cached contracts; auto-update will
+   trigger this within ≤ 5 min anyway).
+5. One-shot bootstrap from the Hub owner / MultiSig owner:
    - `DKGStakingConvictionNFT.finalizeMigrationBatch(currentEpoch)` to
      set the `v10LaunchEpoch` marker on `ConvictionStakingStorage`.
    - **No** `Hub.transferTokens(StakingStorage, newCSS)` is needed on a
      true reset — there is no V8 TRAC to drain (the V8 staking
      contracts are unregistered, the testnet starts empty).
+6. Commit the rewritten `base_sepolia_v10_contracts.json` to `main` so
+   subsequent operator clones / CI builds embed the correct addresses.
 
 ## Phase C — Per-node state wipe (automatic, no operator action)
 

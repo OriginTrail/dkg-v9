@@ -1089,7 +1089,7 @@ function SessionsTab(props: {
     <div className="v10-agent-content">
       <div className="v10-sessions-list">
         <div className="v10-local-agent-copy" style={{ marginBottom: 12 }}>
-          Sessions track DKG-persisted conversations for your integrated agents. The current OpenClaw flow keeps one node-linked session, and separate session threads will expand later.
+          Sessions track DKG-persisted conversations for your integrated agents.
         </div>
         {sessions.length === 0 ? (
           <p className="v10-agent-empty-state">No integrated-agent sessions yet.</p>

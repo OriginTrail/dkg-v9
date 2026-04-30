@@ -598,7 +598,14 @@ describe('OpenClaw bridge behavioral tests', () => {
       json: async () => ({
         session: 'openclaw:dkg-ui:worker-1',
         messages: [
-          { uri: 'urn:dkg:chat:msg:worker-agent-2', text: 'worker reply', author: 'agent', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          {
+            uri: 'urn:dkg:chat:msg:worker-agent-2',
+            text: 'worker reply',
+            author: 'agent',
+            ts: '2026-03-11T10:01:00Z',
+            turnId: 'turn-2',
+            toolCalls: [{ name: 'dkg_query', args: { sparql: 'ASK {}' }, result: { ok: true } }],
+          },
           { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
         ],
       }),
@@ -616,6 +623,9 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(history).toHaveLength(2);
       expect(history[0].text).toBe('worker hello');
       expect(history[1].text).toBe('worker reply');
+      expect(history[1].toolCalls).toEqual([
+        { name: 'dkg_query', args: { sparql: 'ASK {}' }, result: { ok: true } },
+      ]);
     } finally {
       globalThis.fetch = original;
     }

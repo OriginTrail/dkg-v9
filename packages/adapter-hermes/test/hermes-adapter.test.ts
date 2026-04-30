@@ -910,6 +910,30 @@ assert config["allow_context_graph_admin_tools"] is True, config
     });
   });
 
+  it('registers tools-only profiles without provider-owned memory capabilities', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    await runSetup({
+      hermesHome,
+      verify: false,
+      memoryMode: 'tools-only',
+    });
+
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.metadata.memoryMode).toBe('tools-only');
+    expect(body.capabilities.dkgPrimaryMemory).toBe(false);
+    expect(body.capabilities.wmImportPipeline).toBe(false);
+    expect(body.capabilities.localChat).toBe(true);
+  });
+
   it('rejects bridge health URLs without a matching transport base', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
 
@@ -1625,6 +1649,11 @@ for tool_name, args in [
     ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),
     ("dkg_share", {"content": "alpha", "context_graph": "legacy"}),
     ("dkg_shared_memory_publish", {"context_graph": "legacy"}),
+    ("dkg_assertion_write", {
+        "context_graph": "legacy",
+        "name": "notes",
+        "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
+    }),
 ]:
     result = json.loads(provider.handle_tool_call(tool_name, args))
     assert "context_graph" in result["error"], (tool_name, result)
@@ -1709,6 +1738,92 @@ result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
 }))
 assert result["success"] is True and provider._client.published is True, result
 assert "registration" in result, result
+
+class PublishClient:
+    def __init__(self):
+        self.shared = None
+        self.published = None
+
+    def share(self, context_graph_id, quads, sub_graph_name=None):
+        self.shared = (context_graph_id, quads, sub_graph_name)
+        return {"success": True}
+
+    def publish(self, context_graph_id, **kwargs):
+        self.published = (context_graph_id, kwargs)
+        return {"success": True}
+
+provider._client = PublishClient()
+result = json.loads(provider.handle_tool_call("dkg_publish", {
+    "context_graph_id": "cg:test",
+    "quads": [
+        {"subject": "urn:root:1", "predicate": "urn:p", "object": "one"},
+        {"subject": "urn:root:2", "predicate": "urn:p", "object": "two"},
+        {"subject": "urn:root:1", "predicate": "urn:p2", "object": "three"},
+    ],
+}))
+assert result["success"] is True, result
+assert result["rootEntities"] == ["urn:root:1", "urn:root:2"], result
+assert provider._client.published == (
+    "cg:test",
+    {"selection": ["urn:root:1", "urn:root:2"], "clear_after": True, "sub_graph_name": ""},
+), provider._client.published
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('keeps generated Hermes DKG session IDs within the Node UI reader limit', () => {
+    const script = String.raw`
+import importlib.util
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-session-id-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+registry.tool_error = lambda message: message
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+session_id = module._scoped_session_id(
+    "session-" + ("x" * 200),
+    {"profile_name": "Profile " + ("y" * 200)},
+)
+assert session_id.startswith("hermes:dkg:profile-profile-"), session_id
+assert len(session_id) <= 128, (len(session_id), session_id)
+assert module._scoped_session_id("hermes:dkg:already-scoped", {"profile_name": "ignored"}) == "hermes:dkg:already-scoped"
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),
@@ -1813,6 +1928,76 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
     ("project-cg", {"view": "verified-memory", "agent_address": None}),
 ], provider._client.calls
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('does not return stale cache hits for online DKG memory_search no-hit responses', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-memory-search-empty-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+registry.tool_error = lambda message: json.dumps({"error": message})
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class EmptyClient:
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        return {"result": {"bindings": []}}
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = EmptyClient()
+provider._context_graph = "project-cg"
+provider._cache = {"memory": [{"target": "memory", "content": "alpha stale cache"}]}
+
+online = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha", "limit": 5}))
+assert online == {"query": "alpha", "count": 0, "scope": "project-cg", "hits": []}, online
+
+provider._offline = True
+offline = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha", "limit": 5}))
+assert offline["offline"] is True and offline["count"] == 1, offline
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

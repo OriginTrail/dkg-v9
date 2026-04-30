@@ -216,11 +216,15 @@ export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, u
 export function mergeLocalAgentIntegrationConfig(
   base: LocalAgentIntegrationConfig | undefined,
   patch: LocalAgentIntegrationConfig,
+  options: { mergeTransport?: boolean } = {},
 ): LocalAgentIntegrationConfig {
   return {
     ...(base ?? {}),
     ...patch,
-    transport: patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined),
+    transport: patch.transport !== undefined && options.mergeTransport ? {
+      ...(base?.transport ?? {}),
+      ...patch.transport,
+    } : (patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined)),
     capabilities: {
       ...(base?.capabilities ?? {}),
       ...(patch.capabilities ?? {}),
@@ -346,7 +350,11 @@ export function connectLocalAgentIntegration(
     updatedAt: now.toISOString(),
     runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
   };
-  const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  const next = mergeLocalAgentIntegrationConfig(
+    mergeLocalAgentIntegrationConfig(existing, base),
+    patch,
+    { mergeTransport: id === 'hermes' },
+  );
   if (next.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
     next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
   }
@@ -366,7 +374,7 @@ export function updateLocalAgentIntegration(
   if (!normalizedId) throw new Error('Missing integration id');
   const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
-  const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  const next = mergeLocalAgentIntegrationConfig(existing, patch, { mergeTransport: normalizedId === 'hermes' });
   if (isExplicitLocalAgentDisconnectPatch(patch)) {
     next.enabled = false;
     next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };

@@ -462,6 +462,10 @@ async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string 
         memoryMode: plan.profile.memoryMode,
         setupState: plan.state.status,
       },
+      capabilities: {
+        dkgPrimaryMemory: plan.profile.memoryMode === 'provider',
+        wmImportPipeline: plan.profile.memoryMode === 'provider',
+      },
       transport,
       runtime: {
         status: plan.state.status === 'degraded' ? 'degraded' : 'configured',

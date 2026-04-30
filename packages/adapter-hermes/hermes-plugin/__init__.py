@@ -137,12 +137,18 @@ def _stable_scope_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
-def _session_segment(value: str) -> str:
+def _session_segment(value: str, max_length: int = 48) -> str:
     cleaned = []
     for char in value.strip():
         cleaned.append(char.lower() if char.isalnum() or char in "._-" else "-")
     segment = "-".join(part for part in "".join(cleaned).split("-") if part)
-    return segment or _stable_scope_hash(value)
+    if not segment:
+        return _stable_scope_hash(value)
+    if len(segment) <= max_length:
+        return segment
+    suffix = _stable_scope_hash(value)
+    prefix = segment[: max(1, max_length - len(suffix) - 1)].rstrip("._-")
+    return f"{prefix}-{suffix}"
 
 
 def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> str:
@@ -150,6 +156,8 @@ def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> st
     session_id = str(raw_session_id or "default")
     if session_id.startswith("hermes:dkg:") or session_id.startswith("hermes:dkg-ui:"):
         return session_id
+    if len(session_id) > 48:
+        session_id = _session_segment(session_id, 48)
 
     from hermes_constants import get_hermes_home
 
@@ -160,7 +168,7 @@ def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> st
     if not profile_name:
         profile_name = Path(hermes_home).name or "default"
 
-    scope = f"profile-{_session_segment(profile_name)}:home-{_stable_scope_hash(hermes_home)}"
+    scope = f"profile-{_session_segment(profile_name, 32)}:home-{_stable_scope_hash(hermes_home)}"
     return f"hermes:dkg:{scope}:{session_id}"
 
 
@@ -1239,6 +1247,7 @@ class DKGMemoryProvider(MemoryProvider):
                 context_graphs.append(cg)
 
         hits: List[Dict[str, Any]] = []
+        successful_queries = 0
         for cg in context_graphs:
             for view, weight in (
                 ("working-memory", 1.0),
@@ -1255,6 +1264,7 @@ class DKGMemoryProvider(MemoryProvider):
                 )
                 if _client_result_failed(result):
                     continue
+                successful_queries += 1
                 for binding in _extract_query_bindings(result):
                     text = _binding_value(binding.get("text") or binding.get("o"))
                     uri = _binding_value(binding.get("uri") or binding.get("s"))
@@ -1274,10 +1284,17 @@ class DKGMemoryProvider(MemoryProvider):
                         "predicate": pred,
                     })
 
-        if not hits:
+        if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
             fallback["scope"] = project_context_graph if project_context_graph != "agent-context" else None
             return json.dumps(fallback)
+        if not hits:
+            return json.dumps({
+                "query": query,
+                "count": 0,
+                "scope": project_context_graph if project_context_graph != "agent-context" else None,
+                "hits": [],
+            })
 
         trust_order = {
             "agent-context-vm": 3,
@@ -1347,8 +1364,15 @@ class DKGMemoryProvider(MemoryProvider):
         share_result = self._client.share(cg, quads, sub_graph_name=_first_text(args, "sub_graph_name"))
         if share_result.get("success") is False:
             return json.dumps(share_result)
-        result = self._client.publish(cg, sub_graph_name=_first_text(args, "sub_graph_name"))
+        roots = _quad_root_entities(quads)
+        result = self._client.publish(
+            cg,
+            selection=roots,
+            clear_after=True,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        )
         result["quadsPublished"] = len(quads)
+        result["rootEntities"] = roots
         return json.dumps(result)
 
     def _handle_shared_memory_publish(self, args: Dict[str, Any]) -> str:
@@ -1970,7 +1994,7 @@ def _normalize_wm_agent_address(agent_address: str) -> str:
 
 
 def _required_cg_and_name(args: Dict[str, Any]) -> tuple[str, str]:
-    return _first_text(args, "context_graph_id", "context_graph"), _first_text(args, "name")
+    return _first_text(args, "context_graph_id"), _first_text(args, "name")
 
 
 def _quote_literal(value: str) -> str:
@@ -1998,6 +2022,15 @@ def _normalize_quads(raw_quads: Any) -> List[Dict[str, str]]:
             quad["graph"] = str(raw.get("graph", ""))
         quads.append(quad)
     return quads
+
+
+def _quad_root_entities(quads: List[Dict[str, str]]) -> List[str]:
+    roots: List[str] = []
+    for quad in quads:
+        subject = str(quad.get("subject", "")).strip()
+        if subject and subject not in roots:
+            roots.append(subject)
+    return roots
 
 
 def _coerce_limit(value: Any, default: int, maximum: int) -> int:

@@ -121,11 +121,11 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (err.name === 'TimeoutError') {
-          return jsonResponse(res, 504, {
-            error: 'Agent response timeout',
-            code: 'AGENT_TIMEOUT',
-            correlationId: payload.correlationId,
-          });
+          lastFailure = {
+            details: `${target.name} response timeout`,
+            offline: true,
+          };
+          continue;
         }
         lastFailure = { details: err.message, offline: true };
       }
@@ -248,11 +248,11 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (err.name === 'TimeoutError') {
-          return jsonResponse(res, 504, {
-            error: 'Agent response timeout',
-            code: 'AGENT_TIMEOUT',
-            correlationId: payload.correlationId,
-          });
+          lastFailure = {
+            details: `${target.name} response timeout`,
+            offline: true,
+          };
+          continue;
         }
         lastFailure = { details: err.message, offline: true };
       }

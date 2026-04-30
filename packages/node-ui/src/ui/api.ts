@@ -1106,6 +1106,7 @@ export interface LocalAgentHistoryMessage {
   turnId?: string;
   failureReason?: string | null;
   attachmentRefs?: LocalAgentChatAttachmentRef[];
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }
 
 interface LocalAgentSurface {
@@ -1202,6 +1203,7 @@ async function fetchLocalAgentHistoryBySessionId(
         turnId: message.turnId,
         failureReason: message.failureReason,
         attachmentRefs: message.attachmentRefs,
+        toolCalls: message.toolCalls,
       }));
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {

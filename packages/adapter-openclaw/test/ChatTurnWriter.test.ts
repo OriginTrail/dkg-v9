@@ -584,6 +584,35 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("after reset");
   });
 
+  it("T101 - reset awaits only pre-gate W4a chains", async () => {
+    const sessionId = "openclaw:tg:::sk";
+    const chains = (writer as any).w4aSessionChains as Map<string, Promise<void>>;
+    const originalGet = chains.get.bind(chains);
+    let lookedUpPostGateChain = false;
+    (chains as any).get = (key: string) => {
+      if (key === sessionId && (writer as any).pendingResets.has(sessionId)) {
+        lookedUpPostGateChain = true;
+        const reset = (writer as any).pendingResets.get(sessionId) as Promise<void>;
+        const postGateChain = reset.then(() => undefined);
+        chains.set(sessionId, postGateChain);
+        return postGateChain;
+      }
+      return originalGet(key);
+    };
+
+    try {
+      const result = await Promise.race([
+        (writer as any).runReset({ sessionId }).then(() => "done"),
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 80)),
+      ]);
+
+      expect(result).toBe("done");
+      expect(lookedUpPostGateChain).toBe(false);
+    } finally {
+      delete (chains as any).get;
+    }
+  });
+
   it("T95 — partial reset identity does not clear sibling thread state", async () => {
     writer.onMessageReceived({
       sessionKey: "sk",

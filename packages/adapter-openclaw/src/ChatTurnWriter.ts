@@ -711,6 +711,11 @@ export class ChatTurnWriter {
   }): Promise<void> {
     const sessionIds = this.collectResetSessionIds(identity);
     if (sessionIds.length === 0) return;
+    const preResetChains = new Map<string, Promise<void>>();
+    for (const sessionId of sessionIds) {
+      const chain = this.w4aSessionChains.get(sessionId);
+      if (chain) preResetChains.set(sessionId, chain);
+    }
     let startReset!: () => void;
     const reset = new Promise<void>((resolve, reject) => {
       startReset = () => {
@@ -720,8 +725,10 @@ export class ChatTurnWriter {
           // scheduling time, so chain entries queued before this reset do
           // not wait on themselves, while new W4a/W4b/internal-hook work
           // that arrives after the gate is installed waits or replays.
+          // T101 - Await the pre-gate snapshot only; post-gate W4a work
+          // waits on this reset and must not become something reset awaits.
           for (const sessionId of sessionIds) {
-            const chain = this.w4aSessionChains.get(sessionId);
+            const chain = preResetChains.get(sessionId);
             if (chain) {
               await chain.catch(() => undefined);
             }
@@ -1591,6 +1598,9 @@ export class ChatTurnWriter {
     for (const turnId of turnIds) {
       const marker = this.externalTurnMarkerId(turnId);
       if (marker && this.hasExternalTurnMarker(sessionKeyCursor, marker)) {
+        // Exact external markers are durable daemon-success facts, not
+        // one-shot tickets. Keep them for later reset/compaction replays
+        // until a future transcript-retention cursor can prove safe GC.
         return { skip: true, markers: [marker], rollbackMarkers: [] };
       }
     }

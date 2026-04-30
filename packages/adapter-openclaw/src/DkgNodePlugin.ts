@@ -778,10 +778,10 @@ export class DkgNodePlugin {
           // re-assert anchor. Without the wrapper, turn persistence would
           // recover but slot ownership wouldn't bounce back per-message.
           if (internalNeedsRetry('message:received')) {
-            this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
+            this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler(), { rareFireExpected: true });
           }
           if (internalNeedsRetry('message:sent')) {
-            this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
+            this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler(), { rareFireExpected: true });
           }
           // T6 — Typed hook retries for setup-runtime → full upgrades on
           // the SAME api object. Without these, `before_prompt_build` and
@@ -808,7 +808,7 @@ export class DkgNodePlugin {
         // circuit (R21.1) prevents double-fires when the previous install
         // succeeded.
         if (legacyNeedsRetry('session_end')) {
-          this.hookSurface.install('legacy', 'session_end', () => this.stop());
+          this.hookSurface.install('legacy', 'session_end', () => this.stop(), { rareFireExpected: true });
         }
         // T11 — Re-evaluate prompt-section install on same-api re-register.
         // The first call under setup-runtime had `isFullMode === false` and
@@ -853,7 +853,7 @@ export class DkgNodePlugin {
     // Routing through `HookSurface.install('legacy', ...)` gives the
     // wrapper the soft-destroyed gate (R21.1) so old wrappers
     // short-circuit after `stop()` has already torn the surface down.
-    this.hookSurface.install('legacy', 'session_end', () => this.stop());
+    this.hookSurface.install('legacy', 'session_end', () => this.stop(), { rareFireExpected: true });
 
     // T52 — Runtime-only hooks (W3 auto-recall, W4a LLM turn capture,
     // W4b non-LLM channel capture) gate on `runtimeHooks`. In setup-
@@ -893,8 +893,8 @@ export class DkgNodePlugin {
     // install (globalThis hook map not yet created at first-register time)
     // still gets retried on the next surface.
     if (!internalHooksAlreadyLive) {
-      this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
-      this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
+      this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler(), { rareFireExpected: true });
+      this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler(), { rareFireExpected: true });
     }
 
     // I8 — tool-selection guidance injected into the system prompt every turn.

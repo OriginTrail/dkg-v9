@@ -1776,6 +1776,67 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
+  it('stop should drain an in-flight initial ChatTurnWriter marker write', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveInitialMarker!: () => void;
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockImplementation(() => new Promise<void>((resolve) => { resolveInitialMarker = resolve; }));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-initial-hang', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      const markerJob = (plugin as any).pendingMarkerPersistence.get('corr-marker-initial-hang');
+      expect(markerJob).toMatchObject({
+        attempt: 1,
+        timer: null,
+        allowDuringShutdown: true,
+      });
+      expect(typeof markerJob.inFlight.then).toBe('function');
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      resolveInitialMarker();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenLastCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-marker-initial-hang',
+        user: 'Already stored',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stop should force one final ChatTurnWriter marker flush before dropping timed-out marker jobs', async () => {
     vi.useFakeTimers();
     try {

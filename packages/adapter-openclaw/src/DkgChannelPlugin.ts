@@ -1939,8 +1939,16 @@ export class DkgChannelPlugin {
   ): Promise<void> {
     if (!this.chatTurnWriter) return;
     if (!opts.sessionKey) return;
+    const markerWrite = this.writeExternalTurnMarker(opts);
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt: 1,
+      timer: null,
+      allowDuringShutdown,
+      opts,
+      inFlight: markerWrite,
+    });
     try {
-      await this.writeExternalTurnMarker(opts);
+      await markerWrite;
       this.deletePendingMarkerPersistence(opts.correlationId);
     } catch (err: any) {
       this.scheduleExternalTurnMarkerRetry(opts, 1, allowDuringShutdown, err);

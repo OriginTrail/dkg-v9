@@ -242,6 +242,7 @@ import {
   performNpmUpdate,
   checkForUpdate,
 } from './auto-update.js';
+import { chainResetWipe } from './chain-reset-wipe.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -465,6 +466,26 @@ export async function runDaemonInner(
       ...resolveNetworkDefaultContextGraphs(network),
     ]),
   ];
+
+  // Auto-wipe per-node chain-state derived files (oxigraph store, publish
+  // journal, random-sampling WAL) when the maintainer bumps
+  // network/<env>.json#chainResetMarker. This makes future testnet resets
+  // zero-touch for operators: the maintainer bumps the marker in the
+  // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
+  // detects the change and wipes the now-orphaned chain state.
+  // Operator's keystore + dashboard DB + uploaded files are preserved.
+  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  const wipeResult = chainResetWipe({
+    dataDir: dkgDir(),
+    currentMarker: network?.chainResetMarker,
+    log,
+  });
+  if (wipeResult.wiped) {
+    log(
+      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed ` +
+      `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
+    );
+  }
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());

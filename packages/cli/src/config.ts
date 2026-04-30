@@ -91,6 +91,23 @@ export interface NetworkConfig {
     url: string;
     mode: string;
   };
+  /**
+   * Maintainer-controlled marker bumped on every chain reset (e.g. testnet
+   * V10 staking consolidation, fresh contract redeploy with state wipe).
+   * The daemon's chain-reset-wipe hook compares this against the last value
+   * persisted in `<dataDir>/.network-state.json`; on mismatch it auto-wipes
+   * `store.nq` + `publish-journal.*` + `random-sampling.wal` so the node
+   * boots clean against the new chain. Operators do nothing.
+   *
+   * Distinct from `networkId` which is a SHA256 of the bundled genesis
+   * TriG and only changes when the genesis itself does — chain redeploys
+   * happen far more often than that, so they need a separate marker.
+   *
+   * Free-form string, suggested format: `<purpose>-<yyyy-mm-dd>` (e.g.
+   * `v10-rs-staking-consolidation-2026-04-30`). Maintainer bumps in the
+   * same commit that captures the post-deploy state.
+   */
+  chainResetMarker?: string;
 }
 
 export interface ChainConfig {

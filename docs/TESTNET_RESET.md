@@ -68,9 +68,14 @@ state wipe in Phase C.
 
 ## Phase A — Maintainer release (one-shot)
 
-1. **Merge PR #357 to `main`**. That's the trigger for monorepo-install
-   operators — their daemons will swap slots within ≤ 5 min.
-2. (Optional but recommended) Tag the merge commit and publish to npm
+1. Make sure `network/<env>.json#chainResetMarker` is bumped to a fresh
+   value in the PR that you're about to merge (suggested format:
+   `<purpose>-<yyyy-mm-dd>`, e.g. `v10-rs-staking-consolidation-2026-04-30`).
+   This is what triggers Phase C's auto-wipe on every operator's daemon.
+2. **Merge the PR to `main`**. That's the trigger for monorepo-install
+   operators — their daemons will swap slots within ≤ 5 min and pick up
+   both the new code and the new marker.
+3. (Optional but recommended) Tag the merge commit and publish to npm
    so standalone-install operators (the majority on testnet) also get
    the new code:
    ```bash
@@ -81,8 +86,9 @@ state wipe in Phase C.
    Release; npm publish is a manual step per `docs/RELEASE.md`. Once
    the new npm version is up, standalone daemons pick it up on their
    next 5-min poll.
-3. From this point on, no operator code-update action needed for any
-   install mode — they're all on the new build within minutes.
+4. From this point on, no operator code-update action needed for any
+   install mode — they're all on the new build (and the new marker)
+   within minutes.
 
 ## Phase B — Contracts deploy (deployer + multisig)
 
@@ -125,47 +131,60 @@ except `Hub` and `Token`, edit the snapshot before running.
      true reset — there is no V8 TRAC to drain (the V8 staking
      contracts are unregistered, the testnet starts empty).
 
-## Phase C — Per-node state wipe (one-time, each operator)
+## Phase C — Per-node state wipe (automatic, no operator action)
 
-This is the only thing testnet operators have to do manually, and only
-because the chain reset orphans state — the auto-update doesn't know
-that the underlying chain has been replaced wholesale.
+**As of PR #357 this is fully automatic for every operator on a current
+release.** The maintainer's `chainResetMarker` bump in Phase A is the
+trigger.
 
-The `<dataDir>` defaults to `~/.dkg` for standalone installs. Override
-with `DKG_HOME` if your operator uses a non-default path.
+What runs:
+
+1. Operator's daemon picks up the new commit via auto-update (≤ 5 min).
+2. Daemon respawns into the new code.
+3. On boot, before the agent opens its store, the chain-reset hook
+   (`packages/cli/src/daemon/chain-reset-wipe.ts`) compares the bundled
+   `network.chainResetMarker` against the one persisted in
+   `<dataDir>/.network-state.json`.
+4. If they differ (or no marker is persisted yet — the rollout case) →
+   wipe `store.nq` + `store.nq.tmp` + `random-sampling.wal` + every
+   `publish-journal.*` file. Save the new marker. Continue boot.
+5. Agent runs as normal — calls `hub.getContractAddress(...)` for every
+   contract, finds no identity for this wallet on the fresh chain,
+   auto-creates a profile via `Profile.createProfile`, auto-stakes 50k
+   TRAC via `DKGStakingConvictionNFT.createConviction(identityId, 50_000e18, lockTier=1)`,
+   mounts the RandomSampling prover bind (cores only), resumes auto-update polling.
+
+What's preserved across the wipe:
+
+- `wallets.json` (operator keystore — same wallet, same private key)
+- `auth.token` (local API token)
+- `config.json` (operator preferences)
+- `node-ui.db` (dashboard chat history, notifications, slot history)
+- `files/` (uploaded files queued for publishing)
+- Auto-update markers (`.current-version`, `.update-pending.json`, etc.)
+
+**Operators do nothing.** If you used to wipe state by hand on previous
+testnet resets, you don't need to anymore — and doing so anyway is
+harmless (the hook is idempotent).
+
+**Manual escape hatch (rarely needed):** if the auto-wipe ever fails
+(e.g. exotic data dir, permission denied), the daemon will log the
+error and continue to boot with stale state. Operator can fall back to
+the legacy procedure:
 
 ```bash
-# 1. Stop the running daemon. The CLI's supervisor will not restart it
-#    after a clean stop — only after DAEMON_EXIT_CODE_RESTART (which is
-#    what auto-update uses).
 dkg stop
-# Or SIGTERM the daemon process; the supervisor will exit cleanly.
-
-# 2. Wipe per-node chain-state-derived files.
-#    KEEP the keystore so the wallet stays the same and ensureProfile
-#    re-derives a fresh identityId on the new chain cleanly.
 NODE_DATA_DIR="${DKG_HOME:-$HOME/.dkg}"
 rm -rf \
   "$NODE_DATA_DIR/store.nq" \
   "$NODE_DATA_DIR/store.nq.tmp" \
   "$NODE_DATA_DIR/publish-journal."* \
-  "$NODE_DATA_DIR/random-sampling.wal"
-
-# 3. Start the daemon. It will:
-#      - load the existing keystore (same wallet)
-#      - call hub.getContractAddress(...) for each new contract address
-#      - find no on-chain identity for this wallet on the new chain
-#      - auto-create a profile via Profile.createProfile
-#      - auto-stake 50,000 TRAC via DKGStakingConvictionNFT.createConviction
-#        with lockTier=1 (1-month tier, cheapest non-zero multiplier)
-#      - register the StorageACK handler (cores only)
-#      - mount the RandomSampling prover bind (cores only)
-#      - resume the auto-update polling loop (no further manual action
-#        needed after this — future releases land via auto-update again)
+  "$NODE_DATA_DIR/random-sampling.wal" \
+  "$NODE_DATA_DIR/.network-state.json"
 dkg start
 ```
 
-**Why the wipe is needed even with auto-update:**
+**Why the wipe is needed at all** (whether auto or manual):
 - Old `store.nq` references CG IDs and KC merkle roots that don't exist
   on the new chain. The agent will gossip them to peers; peers will
   attempt on-chain validation; validation fails; entries get dropped
@@ -216,18 +235,10 @@ isn't really one. The conservative mitigation is to walk through Phase B
 on a stage testnet first if there's any doubt; the smoke pins the V10
 staking + RS pipeline in under a minute.
 
-## Followup — make future resets zero-touch for operators
-
-Right now Phase C is the one operator-facing step. To make future chain
-resets fully zero-touch we'd need a "chain-reset migration step" baked
-into the network config (e.g. a `network/base_sepolia.json` field like
-`migration: { wipeChainCacheBeforeEpoch: <N> }`) and a hook in the
-agent's startup that detects the marker and runs the wipe automatically
-on first boot after the chain reset. Tracked as a separate followup —
-out of scope for PR #357.
-
 ## Cross-references
 
+- `packages/cli/src/daemon/chain-reset-wipe.ts` — the auto-wipe hook
+  invoked in Phase C (no operator action needed).
 - `packages/cli/src/daemon/auto-update.ts` — the polling auto-updater.
 - `packages/cli/src/daemon/lifecycle.ts:735-781` — the
   `setInterval(runCheck, checkIntervalMs)` loop.

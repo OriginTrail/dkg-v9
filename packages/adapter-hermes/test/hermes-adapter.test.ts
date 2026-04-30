@@ -463,9 +463,31 @@ assert config["allow_context_graph_admin_tools"] is True, config
     await expect(runDoctor({ hermesHome, memoryMode: 'provider' })).rejects.toThrow('mem0');
 
     disconnectHermesProfile({ hermesHome });
+    const disconnectedVerify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+    expect(disconnectedVerify.ok).toBe(true);
+    expect(disconnectedVerify.status).toBe('disconnected');
+    expect(disconnectedVerify.errors).toHaveLength(0);
+    expect(disconnectedVerify.warnings[0]).toContain('disconnected');
+
     uninstallHermesProfile({ hermesHome });
 
     expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: mem0');
+  });
+
+  it('allows user-owned provider config after disconnecting provider mode', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+    disconnectHermesProfile({ hermesHome });
+    writeFileSync(join(hermesHome, 'config.yaml'), 'memory:\n  provider: mem0\n');
+
+    const verify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    expect(verify.ok).toBe(true);
+    expect(verify.status).toBe('disconnected');
+    expect(verify.errors).toHaveLength(0);
+    expect(verify.warnings[0]).toContain('disconnected');
+    await expect(runVerify({ hermesHome, memoryMode: 'provider' })).resolves.toBeUndefined();
+    await expect(runDoctor({ hermesHome, memoryMode: 'provider' })).resolves.toBeUndefined();
   });
 
   it('detects provider conflicts when the top-level memory block has an inline comment', () => {

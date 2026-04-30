@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { DkgConfig } from '../src/config.js';
 import {
@@ -15,8 +18,15 @@ import {
   connectLocalAgentIntegrationFromUi,
   getLocalAgentIntegration,
   refreshLocalAgentIntegrationFromUi,
+  reverseHermesSetupForUi,
 } from '../src/daemon/local-agents.js';
 import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
+import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
+
+const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
+vi.mock('@origintrail-official/dkg-adapter-hermes', () => ({
+  disconnectHermesProfile: disconnectHermesProfileMock,
+}));
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -106,6 +116,7 @@ function makeHermesRouteContext(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  disconnectHermesProfileMock.mockReset();
 });
 
 describe('Hermes channel helpers', () => {
@@ -551,6 +562,144 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(integration.runtime.status).toBe('degraded');
     expect(integration.runtime.ready).toBe(false);
     expect(integration.runtime.lastError).toBe('warming up');
+  });
+
+  it('runs Hermes reverse setup from UI disconnect with stored profile metadata', async () => {
+    const calls: Array<{ profileName?: string; hermesHome?: string }> = [];
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            profileName: 'research',
+            hermesHome: 'C:\\Hermes\\research',
+          },
+        },
+      },
+    });
+
+    await reverseHermesSetupForUi(config, {
+      disconnectHermesProfile: (options) => {
+        calls.push(options);
+      },
+    });
+
+    expect(calls).toEqual([{
+      profileName: 'research',
+      hermesHome: 'C:\\Hermes\\research',
+    }]);
+  });
+
+  it('fails closed instead of disconnecting the default Hermes profile without metadata', async () => {
+    const disconnectHermesProfile = vi.fn();
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {},
+        },
+      },
+    });
+
+    await expect(reverseHermesSetupForUi(config, {
+      disconnectHermesProfile,
+    })).rejects.toThrow('Hermes profile metadata is missing');
+
+    expect(disconnectHermesProfile).not.toHaveBeenCalled();
+  });
+
+  it('runs Hermes reverse setup before marking UI disconnect disconnected', async () => {
+    const previousDkgHome = process.env.DKG_HOME;
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    process.env.DKG_HOME = dkgHome;
+    disconnectHermesProfileMock.mockImplementation(() => undefined);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            profileName: 'research',
+            hermesHome: 'C:\\Hermes\\research',
+          },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+    const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
+      enabled: false,
+      runtime: { status: 'disconnected' },
+    });
+    const res = makeJsonResponse();
+
+    try {
+      await handleLocalAgentsRoutes({
+        req,
+        res,
+        config,
+        path: '/api/local-agent-integrations/hermes',
+      } as any);
+    } finally {
+      if (previousDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = previousDkgHome;
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+
+    expect(disconnectHermesProfileMock).toHaveBeenCalledWith({
+      profileName: 'research',
+      hermesHome: 'C:\\Hermes\\research',
+    });
+    const body = JSON.parse(res.body);
+    expect(res.statusCode).toBe(200);
+    expect(body.integration.enabled).toBe(false);
+    expect(body.integration.runtime.status).toBe('disconnected');
+    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(false);
+  });
+
+  it('keeps Hermes enabled and records an error when UI reverse setup fails', async () => {
+    const previousDkgHome = process.env.DKG_HOME;
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    process.env.DKG_HOME = dkgHome;
+    disconnectHermesProfileMock.mockImplementation(() => {
+      throw new Error('profile locked');
+    });
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            profileName: 'research',
+            hermesHome: 'C:\\Hermes\\research',
+          },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+    const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
+      enabled: false,
+      runtime: { status: 'disconnected' },
+    });
+    const res = makeJsonResponse();
+
+    try {
+      await handleLocalAgentsRoutes({
+        req,
+        res,
+        config,
+        path: '/api/local-agent-integrations/hermes',
+      } as any);
+    } finally {
+      if (previousDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = previousDkgHome;
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+
+    const body = JSON.parse(res.body);
+    expect(res.statusCode).toBe(200);
+    expect(body.integration.enabled).toBe(true);
+    expect(body.integration.runtime.status).toBe('error');
+    expect(body.integration.runtime.ready).toBe(false);
+    expect(body.integration.runtime.lastError).toContain('Hermes disconnect failed: profile locked');
+    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
   });
 
   it('Hermes definition includes manifest, transport, and local chat capabilities', () => {

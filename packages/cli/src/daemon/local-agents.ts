@@ -607,6 +607,34 @@ export type ReverseLocalAgentSetupDeps = {
   verifySkillRemoved?: (installedWorkspace: string) => string | null;
 };
 
+export type ReverseHermesSetupDeps = {
+  disconnectHermesProfile?: (options: { profileName?: string; hermesHome?: string }) => unknown;
+};
+
+function stringMetadataValue(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export async function reverseHermesSetupForUi(
+  config: DkgConfig,
+  deps: ReverseHermesSetupDeps = {},
+): Promise<void> {
+  const stored = getStoredLocalAgentIntegrations(config).hermes;
+  const metadata = isPlainRecord(stored?.metadata) ? stored.metadata : {};
+  const options = {
+    profileName: stringMetadataValue(metadata, 'profileName'),
+    hermesHome: stringMetadataValue(metadata, 'hermesHome'),
+  };
+  if (!options.profileName && !options.hermesHome) {
+    throw new Error('Hermes profile metadata is missing; run dkg hermes disconnect for the target profile.');
+  }
+  const adapter = deps.disconnectHermesProfile
+    ? { disconnectHermesProfile: deps.disconnectHermesProfile }
+    : await import('@origintrail-official/dkg-adapter-hermes');
+  await adapter.disconnectHermesProfile(options);
+}
+
 export async function reverseLocalAgentSetupForUi(
   _config: DkgConfig,
   openclawConfigPath?: string,

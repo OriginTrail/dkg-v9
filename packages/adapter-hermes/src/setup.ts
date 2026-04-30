@@ -197,7 +197,9 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
   const effectiveProfile = { ...profile, memoryMode: effectiveMemoryMode };
   const warnings: string[] = [];
   const disconnected = state?.status === 'disconnected';
-  const providerConflicts = detectProviderConflict(effectiveProfile, effectiveMemoryMode);
+  const providerConflicts = disconnected
+    ? []
+    : detectProviderConflict(effectiveProfile, effectiveMemoryMode);
   errors.push(...providerConflicts);
 
   if (!existsSync(profile.hermesHome)) {

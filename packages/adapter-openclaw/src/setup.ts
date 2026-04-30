@@ -19,14 +19,14 @@
  * Every step is idempotent — re-running is safe.
  */
 
-import { execSync, spawnSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
+import { execSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
+import { blueGreenSlotReady, findPackageRepoDir, requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 import { resolveDkgCli } from './resolve-dkg-cli.js';
 import { sameResolvedPath } from './state-dir-path.js';
@@ -564,6 +564,45 @@ export function writeDkgConfig(
 // Step 5: Start DKG daemon
 // ---------------------------------------------------------------------------
 
+const DKG_START_TIMEOUT_MS = 30_000;
+const DKG_START_MIGRATION_TIMEOUT_MS = 60 * 60_000;
+
+function hasLocalRepoForCli(cliPath: string): boolean {
+  let physicalCliPath = cliPath;
+  try {
+    physicalCliPath = realpathSync(cliPath);
+  } catch {
+    // `resolveDkgCli` surfaces missing CLI paths later; keep timeout detection conservative here.
+  }
+  const repo = findPackageRepoDir(dirname(physicalCliPath));
+  return Boolean(repo && existsSync(join(repo, '.git')));
+}
+
+function blueGreenMigrationMayRunDuringStart(cliPath: string): boolean {
+  if (process.env.DKG_NO_BLUE_GREEN) return false;
+  if (!hasLocalRepoForCli(cliPath)) return false;
+
+  const releasesPath = join(dkgDir(), 'releases');
+  const currentLink = join(releasesPath, 'current');
+
+  try {
+    if (!lstatSync(currentLink).isSymbolicLink()) return true;
+  } catch {
+    return true;
+  }
+
+  return !blueGreenSlotReady(join(releasesPath, 'a'))
+    || !blueGreenSlotReady(join(releasesPath, 'b'));
+}
+
+function daemonStartSpawnOptions(cliPath: string): SpawnSyncOptions {
+  const options: SpawnSyncOptions = { stdio: 'inherit' };
+  options.timeout = blueGreenMigrationMayRunDuringStart(cliPath)
+    ? DKG_START_MIGRATION_TIMEOUT_MS
+    : DKG_START_TIMEOUT_MS;
+  return options;
+}
+
 export async function startDaemon(apiPort: number): Promise<void> {
   // Check if already running
   const pidPath = join(dkgDir(), 'daemon.pid');
@@ -597,10 +636,7 @@ export async function startDaemon(apiPort: number): Promise<void> {
     // process.execPath so we don't depend on `dkg` being on PATH — which
     // `pnpm dkg openclaw setup` does not guarantee in a cloned monorepo.
     const { node, cliPath } = resolveDkgCli();
-    const result = spawnSync(node, [cliPath, 'start'], {
-      stdio: 'inherit',
-      timeout: 30_000,
-    });
+    const result = spawnSync(node, [cliPath, 'start'], daemonStartSpawnOptions(cliPath));
     if (result.error) throw result.error;
     if (result.status !== 0) {
       throw new Error(

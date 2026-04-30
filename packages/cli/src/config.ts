@@ -1,8 +1,14 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
-import { join, dirname, resolve, basename } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { isDkgMonorepoRoot, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
+import {
+  blueGreenSlotEntryPoint,
+  blueGreenSlotReady,
+  findPackageRepoDir,
+  isDkgMonorepoRoot,
+  resolveDkgConfigHome,
+} from '@origintrail-official/dkg-core';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -536,13 +542,7 @@ export function isDkgMonorepo(): boolean {
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
  */
 export function findRepoDir(startDir: string): string | null {
-  let dir = resolve(startDir);
-  while (true) {
-    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return findPackageRepoDir(startDir);
 }
 
 export function repoDir(): string | null {
@@ -747,9 +747,10 @@ export function isStandaloneInstall(): boolean {
  * NPM layout (node_modules/@origintrail-official/dkg/dist/cli.js).
  */
 export function slotEntryPoint(slotDir: string): string | null {
-  const gitPath = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-  if (existsSync(gitPath)) return gitPath;
-  const npmPath = join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
-  if (existsSync(npmPath)) return npmPath;
-  return null;
+  return blueGreenSlotEntryPoint(slotDir);
+}
+
+/** Return true when a blue-green slot has an entry point and install metadata. */
+export function slotReady(slotDir: string): boolean {
+  return blueGreenSlotReady(slotDir);
 }

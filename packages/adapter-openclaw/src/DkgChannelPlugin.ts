@@ -361,6 +361,11 @@ export class DkgChannelPlugin {
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
   }>();
+  private readonly pendingMarkerPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+  }>();
   /**
    * Per-dispatch AsyncLocalStorage holding the UI-selected project
    * context graph for the currently-running turn. Populated by
@@ -634,6 +639,12 @@ export class DkgChannelPlugin {
         clearTimeout(job.timer);
         this.deletePendingTurnPersistence(id);
       }
+      for (const [id, job] of this.pendingMarkerPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingMarkerPersistence(id);
+      }
 
       if (this.serverStart) {
         await this.serverStart.catch(() => {});
@@ -652,6 +663,7 @@ export class DkgChannelPlugin {
           `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
         );
         this.clearPendingTurnPersistence();
+        this.clearPendingMarkerPersistence();
       }
       this.stopDrainDeadlineAt = null;
       if (updateGatewayStatus) {
@@ -895,15 +907,39 @@ export class DkgChannelPlugin {
     this.notifyStopIdle();
   }
 
+  private deletePendingMarkerPersistence(correlationId: string): void {
+    const job = this.pendingMarkerPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingMarkerPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private clearPendingMarkerPersistence(): void {
+    for (const job of this.pendingMarkerPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingMarkerPersistence.clear();
+    this.notifyStopIdle();
+  }
+
   private notifyStopIdle(): void {
-    if (!this.stopping || this.inFlight > 0 || this.pendingTurnPersistence.size > 0) return;
+    if (
+      !this.stopping
+      || this.inFlight > 0
+      || this.pendingTurnPersistence.size > 0
+      || this.pendingMarkerPersistence.size > 0
+    ) return;
     while (this.stopWaiters.length > 0) {
       this.stopWaiters.shift()?.();
     }
   }
 
   private waitForStopDrain(timeoutMs: number): Promise<boolean> {
-    if (this.inFlight === 0 && this.pendingTurnPersistence.size === 0) {
+    if (
+      this.inFlight === 0
+      && this.pendingTurnPersistence.size === 0
+      && this.pendingMarkerPersistence.size === 0
+    ) {
       return Promise.resolve(true);
     }
     return new Promise((resolve) => {
@@ -1777,6 +1813,7 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
     opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
   ): Promise<void> {
     // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
@@ -1800,7 +1837,7 @@ export class DkgChannelPlugin {
       user: userMessage,
       assistant: assistantReply,
       correlationId,
-    });
+    }, allowDuringShutdown);
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
 
@@ -1810,27 +1847,68 @@ export class DkgChannelPlugin {
     user: string;
     assistant: string;
     correlationId: string;
-  }): Promise<void> {
+  }, allowDuringShutdown: boolean): Promise<void> {
     if (!this.chatTurnWriter) return;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await this.chatTurnWriter.markExternalTurnPersistedDurable({
-          sessionKey: opts.sessionKey,
-          turnId: opts.turnId,
-          user: opts.user,
-          assistant: opts.assistant,
-        });
-        return;
-      } catch (err: any) {
-        if (attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, TURN_PERSIST_RETRY_DELAYS_MS[0]));
-          continue;
-        }
-        this.api?.logger.warn?.(
-          `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}: ${err?.message ?? err}`,
-        );
-      }
+    try {
+      await this.writeExternalTurnMarker(opts);
+      this.deletePendingMarkerPersistence(opts.correlationId);
+    } catch (err: any) {
+      this.scheduleExternalTurnMarkerRetry(opts, 1, allowDuringShutdown, err);
     }
+  }
+
+  private async writeExternalTurnMarker(opts: {
+    sessionKey?: string;
+    turnId: string;
+    user: string;
+    assistant: string;
+  }): Promise<void> {
+    await this.chatTurnWriter?.markExternalTurnPersistedDurable({
+      sessionKey: opts.sessionKey,
+      turnId: opts.turnId,
+      user: opts.user,
+      assistant: opts.assistant,
+    });
+  }
+
+  private scheduleExternalTurnMarkerRetry(
+    opts: {
+      sessionKey?: string;
+      turnId: string;
+      user: string;
+      assistant: string;
+      correlationId: string;
+    },
+    attempt: number,
+    allowDuringShutdown: boolean,
+    err: any,
+  ): void {
+    if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      return;
+    }
+    const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[Math.min(attempt - 1, TURN_PERSIST_RETRY_DELAYS_MS.length - 1)];
+    this.api?.logger.warn?.(
+      `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}; retrying marker in ${retryDelayMs}ms: ${err?.message ?? err}`,
+    );
+    const existing = this.pendingMarkerPersistence.get(opts.correlationId);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+        this.deletePendingMarkerPersistence(opts.correlationId);
+        return;
+      }
+      this.pendingMarkerPersistence.set(opts.correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
+      void this.writeExternalTurnMarker(opts)
+        .then(() => {
+          this.deletePendingMarkerPersistence(opts.correlationId);
+        })
+        .catch((nextErr: any) => {
+          this.scheduleExternalTurnMarkerRetry(opts, attempt + 1, allowDuringShutdown, nextErr);
+        });
+    }, retryDelayMs);
+    this.pendingMarkerPersistence.set(opts.correlationId, { attempt, timer, allowDuringShutdown });
+    this.notifyStopIdle();
   }
 
   private queueTurnPersistence(
@@ -1850,7 +1928,7 @@ export class DkgChannelPlugin {
     const attemptPersist = (attempt: number): void => {
       if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
       this.pendingTurnPersistence.set(correlationId, { attempt, timer: null, allowDuringShutdown });
-      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
+      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts, allowDuringShutdown)
         .then(() => {
           this.deletePendingTurnPersistence(correlationId);
         })

@@ -1688,7 +1688,7 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
-  it('processInbound should not retry the daemon write when only the ChatTurnWriter marker fails', async () => {
+  it('processInbound should retry only the ChatTurnWriter marker after daemon write succeeds', async () => {
     vi.useFakeTimers();
     try {
       const { runtime } = makeMockRuntime({
@@ -1705,19 +1705,30 @@ describe('DkgChannelPlugin', () => {
       api.cfg = mockCfg;
       const storeCalls: unknown[][] = [];
       client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
-      const markExternalTurnPersistedDurable = vi.fn().mockRejectedValue(new Error('marker disk outage'));
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockRejectedValueOnce(new Error('marker disk outage again'))
+        .mockRejectedValueOnce(new Error('marker disk outage third'))
+        .mockResolvedValueOnce(undefined);
       plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
       plugin.register(api);
 
       await plugin.processInbound('Already stored', 'corr-marker-fail', 'owner');
       await vi.advanceTimersByTimeAsync(10);
       expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(250);
       expect(storeCalls).toHaveLength(1);
       expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(4);
       expect(api.logger.warn.calls.some((call: unknown[]) =>
-        String(call[0]).includes('Turn persisted but ChatTurnWriter marker failed for corr-marker-fail'),
+        String(call[0]).includes('retrying marker'),
       )).toBe(true);
     } finally {
       vi.useRealTimers();

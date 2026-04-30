@@ -609,6 +609,41 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  for (const hookName of ["onBeforeReset", "onBeforeCompaction"] as const) {
+    it(`T99 - ${hookName} preserves durable external markers for replay dedupe`, async () => {
+      const turnId = `node-ui-corr-${hookName}`;
+      await writer.markExternalTurnPersistedDurable({
+        sessionKey: "agent:main:main",
+        turnId,
+        user: "reset ui question",
+        assistant: "reset ui answer",
+      });
+      await writer[hookName]({ channelId: "telegram", sessionKey: "agent:main:main" });
+
+      const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+      const marker = (writer as any).externalTurnMarkerId(turnId);
+      const persisted = JSON.parse(fs.readFileSync(
+        path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json"),
+        "utf-8",
+      ));
+      expect(persisted[externalCursorKey].m[marker]).toBe(1);
+
+      const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+      mockClient.storeChatTurn.mockClear();
+      restarted.onAgentEnd({
+        sessionId: "test",
+        messages: [
+          { role: "user", content: "reset ui question", context: { Provider: "dkg-ui", DkgTurnId: turnId } },
+          { role: "assistant", content: "reset ui answer" },
+        ],
+      }, { channelId: "telegram", sessionKey: "agent:main:main" });
+      await flushMicrotasks();
+
+      expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+      restarted.flushSync();
+    });
+  }
+
   it("T83 — external marker write failure rolls back counts before retry", async () => {
     const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile")
       .mockReturnValueOnce(false)

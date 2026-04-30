@@ -716,7 +716,7 @@ export class ChatTurnWriter {
     externalCursorKey?: string;
   }): Promise<void> {
     const sessionIds = this.collectResetSessionIds(identity);
-    if (sessionIds.length === 0 && !identity.externalCursorKey) return;
+    if (sessionIds.length === 0) return;
     let startReset!: () => void;
     const reset = new Promise<void>((resolve, reject) => {
       startReset = () => {
@@ -732,7 +732,7 @@ export class ChatTurnWriter {
               await chain.catch(() => undefined);
             }
           }
-          await this.resetSessionState(sessionIds, identity.externalCursorKey);
+          await this.resetSessionState(sessionIds);
         })().then(resolve, reject);
       };
     });
@@ -763,9 +763,9 @@ export class ChatTurnWriter {
    * `persistOne` calls `saveWatermark(0)`, leaving stale state for the next
    * `agent_end` against a smaller post-compaction array.
    */
-  private async resetSessionState(sessionIds: string[] | string, externalCursorKey?: string): Promise<void> {
+  private async resetSessionState(sessionIds: string[] | string): Promise<void> {
     const ids = Array.isArray(sessionIds) ? sessionIds : [sessionIds].filter(Boolean);
-    if (ids.length === 0 && !externalCursorKey) return;
+    if (ids.length === 0) return;
     for (const sessionId of ids) {
       const inFlight = this.inFlightPersists.get(sessionId);
       if (inFlight && inFlight.size > 0) {
@@ -798,9 +798,9 @@ export class ChatTurnWriter {
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
     }
-    if (externalCursorKey) {
-      this.externalTurnMarkers.delete(externalCursorKey);
-    }
+    // External markers record daemon-success facts from direct-channel
+    // persists. Preserve them across reset/compaction so the reset W4a replay
+    // can still consume the marker instead of duplicating the stored UI turn.
     this.writeWatermarkFile();
   }
 

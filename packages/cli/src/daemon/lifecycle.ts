@@ -537,6 +537,9 @@ export async function runDaemonInner(
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    randomSamplingWalPath: config.randomSampling?.walPath,
+    randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
+    randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
   });
 
   let publisherRuntime: PublisherRuntime | null = null;

@@ -311,6 +311,7 @@ function createV10ACKProviderForPublisher(
     tokenAmount,
     swmGraphId,
     subGraphName,
+    merkleLeafCount,
   ) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
@@ -360,6 +361,7 @@ function createV10ACKProviderForPublisher(
       tokenAmount,
       swmGraphId,
       subGraphName,
+      merkleLeafCount: merkleLeafCount ?? 1,
     });
     return result.acks;
   };

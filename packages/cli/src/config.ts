@@ -193,6 +193,35 @@ export interface DkgConfig {
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
+  /**
+   * V10 Random Sampling prover (core-only). When the node is `core`
+   * AND has an on-chain identity, the agent automatically schedules
+   * `RandomSamplingProver.tick()` on `tickIntervalMs`. Edge nodes
+   * ignore this block. See `dkg-random-sampling` for the prover
+   * itself; the bind layer is in `dkg-agent/random-sampling-bind.ts`.
+   */
+  randomSampling?: {
+    /**
+     * Persistent WAL path. When set, prover state transitions are
+     * appended to this file (JSONL, fsync per write) for crash
+     * recovery + `dkg rs wal-tail`. When unset, the prover uses an
+     * in-memory WAL (test/dev only — production SHOULD set this).
+     */
+    walPath?: string;
+    /**
+     * Tick cadence in ms. Default 30_000. Set lower (e.g. 5_000) for
+     * devnet smoke tests where you want the prover to react quickly
+     * after a publish lands. The orchestrator is idempotent under
+     * fast double-ticks (already-solved short-circuit).
+     */
+    tickIntervalMs?: number;
+    /**
+     * Default true on core. When false, the V10 Merkle build runs on
+     * the agent's main thread. Useful in tests where spawning a
+     * worker is undesirable.
+     */
+    useWorkerThread?: boolean;
+  };
 }
 
 /**

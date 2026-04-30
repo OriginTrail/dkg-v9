@@ -1068,7 +1068,7 @@ export class ChatMemoryManager {
               OPTIONAL { ?transition <${DKG_ONT}toolCalls> ?transitionToolCalls }
             }
           }
-        } ORDER BY ${order}(?ts) LIMIT ${limit}`,
+        } ORDER BY ${order}(?ts)`,
         this.wmReadOpts(),
       );
       const bindings = msgsResult.bindings ?? [];

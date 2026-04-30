@@ -398,6 +398,7 @@ describe('ChatMemoryManager', () => {
     expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls');
     expect(queryText).toContain('SELECT ?m ?ts WHERE');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
+    expect(queryText.match(/LIMIT 3/g)).toHaveLength(1);
   });
 
   it('getSession returns null when session has no messages', async () => {

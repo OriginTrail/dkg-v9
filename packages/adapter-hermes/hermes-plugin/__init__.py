@@ -256,7 +256,7 @@ DKG_SHARE_SCHEMA = {
                 "type": "string",
                 "description": "Knowledge to share with the team.",
             },
-            "context_graph": {
+            "context_graph_id": {
                 "type": "string",
                 "description": "Target Context Graph (default: current project).",
             },
@@ -289,6 +289,7 @@ DKG_PUBLISH_SCHEMA = {
                         "subject": {"type": "string", "description": "Subject URI (e.g. 'https://example.org/finding/001')"},
                         "predicate": {"type": "string", "description": "Predicate URI (e.g. 'https://schema.org/name')"},
                         "object": {"type": "string", "description": "Object — URI or literal (e.g. 'Warfarin interaction' or 'https://schema.org/MedicalEntity')"},
+                        "graph": {"type": "string", "description": "Optional named graph URI."},
                     },
                     "required": ["subject", "predicate", "object"],
                 },
@@ -641,7 +642,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "Free-text search query."},
             "limit": {"type": "integer", "description": "Max results, default 20, capped at 100."},
-            "context_graph": {"type": "string", "description": "Optional context graph override."},
+            "context_graph_id": {"type": "string", "description": "Optional context graph override."},
         },
         "required": ["query"],
     },
@@ -1229,7 +1230,9 @@ class DKGMemoryProvider(MemoryProvider):
 
         sparql = _build_memory_search_sparql(keywords, limit)
         agent_address = self._client._resolve_agent_address()
-        project_context_graph = _first_text(args, "context_graph", "context_graph_id") or self._context_graph
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
+        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
         context_graphs: List[str] = []
         for cg in ("agent-context", project_context_graph):
             if cg and cg not in context_graphs:
@@ -1316,7 +1319,9 @@ class DKGMemoryProvider(MemoryProvider):
         content = args.get("content", "")
         if not content:
             return tool_error("Content is required.")
-        cg = _first_text(args, "context_graph_id", "context_graph") or self._context_graph
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on dkg_share. Use "context_graph_id".')
+        cg = _first_text(args, "context_graph_id") or self._context_graph
         quads = [{
             "subject": f"urn:hermes:{self._agent_name}:shared",
             "predicate": "urn:hermes:sharedContent",
@@ -1354,7 +1359,9 @@ class DKGMemoryProvider(MemoryProvider):
             )
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot publish to chain.")
-        cg = _first_text(args, "context_graph_id", "context_graph")
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on dkg_shared_memory_publish. Use "context_graph_id".')
+        cg = _first_text(args, "context_graph_id")
         if not cg:
             return tool_error("context_graph_id is required.")
         root_entities = args.get("root_entities")
@@ -1514,7 +1521,25 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("context_graph_id is required.")
         if not peer_id:
             return tool_error("peer_id is required.")
-        return json.dumps(self._client.invite_to_context_graph(cg, peer_id))
+        result = self._client.invite_to_context_graph(cg, peer_id)
+        if not isinstance(result, dict):
+            result = {"result": result}
+        status: Dict[str, Any] = {}
+        try:
+            status_result = self._client.status()
+            if isinstance(status_result, dict):
+                status = status_result
+        except Exception:
+            status = {}
+        multiaddrs = [value for value in status.get("multiaddrs", []) if isinstance(value, str)]
+        curator_multiaddr = _pick_shareable_multiaddr(multiaddrs)
+        enriched = {
+            **result,
+            "peerId": peer_id,
+            "curatorMultiaddr": curator_multiaddr,
+            "inviteCode": f"{cg}\n{curator_multiaddr}" if curator_multiaddr else cg,
+        }
+        return json.dumps(enriched)
 
     def _handle_participant_add(self, args: Dict[str, Any]) -> str:
         return self._participant_tool(args, "add")
@@ -2047,6 +2072,43 @@ def _cache_memory_search(query: str, cache: Dict[str, Any], limit: int) -> Dict[
             })
     ranked = sorted(hits, key=lambda h: float(h.get("score", 0)), reverse=True)[:limit]
     return {"query": query, "count": len(ranked), "scope": None, "hits": ranked, "offline": True}
+
+
+def _pick_shareable_multiaddr(addrs: List[str]) -> Optional[str]:
+    if not addrs:
+        return None
+    return sorted(addrs, key=_score_multiaddr, reverse=True)[0]
+
+
+def _score_multiaddr(addr: str) -> int:
+    if "/p2p-circuit/" in addr:
+        return 100
+    parts = addr.split("/")
+    ipv4 = ""
+    for index, part in enumerate(parts):
+        if part == "ip4" and index + 1 < len(parts):
+            ipv4 = parts[index + 1]
+            break
+    if not ipv4:
+        return 50
+    if ipv4.startswith("127."):
+        return 0
+    if _is_private_ipv4(ipv4):
+        return 10
+    return 80
+
+
+def _is_private_ipv4(ip: str) -> bool:
+    if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("169.254."):
+        return True
+    parts = ip.split(".")
+    if len(parts) >= 2 and parts[0] == "172":
+        try:
+            second = int(parts[1])
+        except ValueError:
+            return False
+        return 16 <= second <= 31
+    return False
 
 
 def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:

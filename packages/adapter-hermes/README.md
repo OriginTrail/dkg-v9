@@ -130,9 +130,19 @@ When active as `memory.provider: dkg`, the Python provider:
   unavailable
 
 Direct Verified Memory publishing is guarded by default. The `dkg_publish`
-tool is not exposed unless direct publish is explicitly enabled through the
-adapter publish guard or `DKG_ALLOW_DIRECT_PUBLISH=true`. By default, publish
-flows should remain operator-reviewed.
+and `dkg_shared_memory_publish` tools are not exposed unless direct publish is
+explicitly enabled through the adapter publish guard or
+`DKG_ALLOW_DIRECT_PUBLISH=true`. Context-graph admin mutation tools such as
+`dkg_context_graph_invite`, `dkg_participant_add`, `dkg_participant_remove`,
+`dkg_join_request_approve`, and `dkg_join_request_reject` are also hidden by
+default unless `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=true`. By default, publish
+and admin flows should remain operator-reviewed.
+
+`dkg_assertion_import_file` requires an operator-approved import root. Configure
+`DKG_HERMES_IMPORT_ROOTS`, `HERMES_DKG_IMPORT_ROOTS`, `DKG_IMPORT_ROOTS`, or the
+adapter `import_roots` setting before exposing file import to agents. Imports
+outside those roots, symlink escapes, oversized files, and obvious
+credential/wallet/DKG private-state paths are rejected.
 
 ## Local-Agent Routes
 
@@ -173,8 +183,11 @@ provenance before forwarding them to Hermes.
   turns even when UI chat registration is unavailable.
 - The default bridge host is loopback. Treat non-loopback gateway URLs as an
   explicit trust decision and require normal network hardening.
-- Verified Memory publishing is permanent and may cost TRAC; direct publish is
-  disabled by default.
+- Verified Memory publishing is permanent and may cost TRAC; direct publish and
+  context-graph admin mutation tools are disabled by default.
+- Assertion file import is model-callable only inside configured safe roots;
+  use `DKG_HERMES_IMPORT_ROOTS` or adapter `import_roots` to approve document
+  locations explicitly.
 
 ## Verification Status
 

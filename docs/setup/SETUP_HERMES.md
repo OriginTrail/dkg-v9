@@ -148,8 +148,16 @@ but the UI should show a degraded/offline bridge state.
   `persist-turn` remains bearer-authenticated for provider persistence even
   when UI chat registration is unavailable.
 - Adapter setup stores non-secret settings in `dkg.json`.
-- Direct `dkg_publish` is guarded by default and should remain
-  operator-reviewed unless explicitly enabled.
+- Direct `dkg_publish` and `dkg_shared_memory_publish` are guarded by default
+  and should remain operator-reviewed unless explicitly enabled.
+- Context-graph admin mutation tools such as `dkg_context_graph_invite`,
+  `dkg_participant_add`, `dkg_participant_remove`,
+  `dkg_join_request_approve`, and `dkg_join_request_reject` are hidden by
+  default unless explicitly enabled by the operator.
+- `dkg_assertion_import_file` requires a configured safe root through
+  `DKG_HERMES_IMPORT_ROOTS`, `HERMES_DKG_IMPORT_ROOTS`, `DKG_IMPORT_ROOTS`, or
+  adapter `import_roots`; imports outside those roots, symlink escapes, and
+  obvious credential/wallet/DKG private-state paths are rejected.
 
 ## Troubleshooting
 

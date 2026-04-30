@@ -1299,6 +1299,12 @@ assert "dkg_publish" not in names, names
 assert "dkg_shared_memory_publish" not in names, names
 subscribe_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_subscribe")
 assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], subscribe_schema
+search_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "memory_search")
+assert "context_graph_id" in search_schema["parameters"]["properties"], search_schema
+assert "context_graph" not in search_schema["parameters"]["properties"], search_schema
+share_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_share")
+assert "context_graph_id" in share_schema["parameters"]["properties"], share_schema
+assert "context_graph" not in share_schema["parameters"]["properties"], share_schema
 
 guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
 assert "disabled by the adapter publish guard" in guarded, guarded
@@ -1306,9 +1312,13 @@ admin_guarded = provider.handle_tool_call("dkg_participant_add", {"context_graph
 assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
 
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
-direct_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
+direct_schemas = provider.get_tool_schemas()
+direct_names = sorted(schema["name"] for schema in direct_schemas)
 for name in ["dkg_publish", "dkg_shared_memory_publish"]:
     assert name in direct_names, direct_names
+publish_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_publish")
+quad_props = publish_schema["parameters"]["properties"]["quads"]["items"]["properties"]
+assert "graph" in quad_props, publish_schema
 
 provider._config = {
     "publish_tool": "direct",
@@ -1610,6 +1620,14 @@ result = json.loads(provider.handle_tool_call("dkg_query", {
 }))
 assert result["ok"] is True, result
 assert provider._client.queries[-1][2]["agent_address"] == "peer-default", provider._client.queries
+provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
+for tool_name, args in [
+    ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),
+    ("dkg_share", {"content": "alpha", "context_graph": "legacy"}),
+    ("dkg_shared_memory_publish", {"context_graph": "legacy"}),
+]:
+    result = json.loads(provider.handle_tool_call(tool_name, args))
+    assert "context_graph" in result["error"], (tool_name, result)
 
 class MessageClient:
     def __init__(self):
@@ -1627,6 +1645,34 @@ result = json.loads(provider.handle_tool_call("dkg_read_messages", {
 }))
 assert result["ok"] is True, result
 assert provider._client.paths == ["/api/messages?peer=peer+one&limit=10&since=123"], provider._client.paths
+
+class InviteClient:
+    def invite_to_context_graph(self, context_graph_id, peer_id):
+        return {"success": True, "contextGraphId": context_graph_id}
+
+    def status(self):
+        return {
+            "multiaddrs": [
+                "/ip4/127.0.0.1/tcp/8900/p2p/peer-local",
+                "/ip4/203.0.113.10/tcp/8900/p2p/peer-public",
+                "/ip4/10.0.0.5/tcp/8900/p2p/peer-private",
+            ]
+        }
+
+provider._config = {
+    "publish_tool": "direct",
+    "allow_direct_publish": True,
+    "allow_context_graph_admin_tools": True,
+}
+provider._client = InviteClient()
+result = json.loads(provider.handle_tool_call("dkg_context_graph_invite", {
+    "context_graph_id": "cg:test",
+    "peer_id": "peer-friend",
+}))
+assert result["success"] is True, result
+assert result["peerId"] == "peer-friend", result
+assert result["curatorMultiaddr"] == "/ip4/203.0.113.10/tcp/8900/p2p/peer-public", result
+assert result["inviteCode"] == "cg:test\n/ip4/203.0.113.10/tcp/8900/p2p/peer-public", result
 
 class RegisterFailClient:
     def __init__(self):

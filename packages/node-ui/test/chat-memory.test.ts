@@ -120,6 +120,22 @@ describe('ChatMemoryManager', () => {
     expect(turnQuery).toContain('LIMIT 1');
   });
 
+  it('records chat turn persistence transitions without appending messages', async () => {
+    mockQuery.returns.push({ bindings: [] });
+
+    await manager.recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
+
+    const quads = mockWriteAssertion.calls[0][2] as any[];
+    expect(quads.find((q: any) => q.object === 'http://dkg.io/ontology/ChatTurnPersistenceTransition')).toBeDefined();
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/updatesTurn')?.object)
+      .toBe('urn:dkg:chat:turn:turn-1');
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/persistenceState')?.object)
+      .toBe('"stored"');
+    expect(quads.some((q: any) => q.object === 'http://schema.org/Message')).toBe(false);
+    expect(quads.some((q: any) => q.predicate === 'http://dkg.io/ontology/hasUserMessage')).toBe(false);
+    expect(quads.some((q: any) => q.predicate === 'http://dkg.io/ontology/hasAssistantMessage')).toBe(false);
+  });
+
   it('stores attachment refs inline on the user message when provided', async () => {
     mockQuery.returns.push({ bindings: [] });
     await manager.storeChatExchange(
@@ -363,7 +379,7 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 

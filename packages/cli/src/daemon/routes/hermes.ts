@@ -15,8 +15,8 @@ import {
   HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
   buildHermesChannelHeaders,
   ensureHermesBridgeAvailable,
+  getPersistedHermesTurnState,
   getHermesChannelTargets,
-  hasPersistedHermesTurn,
   hermesPersistTurnKey,
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
@@ -24,6 +24,7 @@ import {
   probeHermesChannelHealth,
   shouldTryNextHermesTarget,
   verifyHermesAttachmentRefsProvenance,
+  type HermesTurnPersistenceState,
 } from '../hermes.js';
 
 type HermesPersistRouteResult = {
@@ -342,18 +343,54 @@ async function persistHermesTurnUnlocked(
 ): Promise<HermesPersistRouteResult> {
   const { agent, memoryManager } = ctx;
   try {
-    let duplicate = false;
+    let existingState: HermesTurnPersistenceState | null = null;
     try {
-      duplicate = await hasPersistedHermesTurn(memoryManager, payload.sessionId, payload.turnId);
+      existingState = await getPersistedHermesTurnState(memoryManager, payload.sessionId, payload.turnId);
     } catch {
-      duplicate = false;
+      existingState = null;
     }
-    if (duplicate) {
+    if (existingState === 'stored') {
       return {
         statusCode: 200,
         body: {
           ok: true,
           duplicate: true,
+          turnId: payload.turnId,
+        },
+      };
+    }
+    if (existingState) {
+      if (
+        existingState === payload.persistenceState
+        || persistenceStateRank(payload.persistenceState) < persistenceStateRank(existingState)
+      ) {
+        return {
+          statusCode: 200,
+          body: {
+            ok: true,
+            duplicate: true,
+            turnId: payload.turnId,
+          },
+        };
+      }
+      const transitioned = await recordHermesTurnPersistenceTransition(memoryManager, payload);
+      if (!transitioned) {
+        return {
+          statusCode: 409,
+          body: {
+            error: 'Existing Hermes turn requires a persistence-state transition path',
+            turnId: payload.turnId,
+          },
+        };
+      }
+      if (payload.persistenceState === 'stored') {
+        await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+      }
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          transitioned: true,
           turnId: payload.turnId,
         },
       };
@@ -378,6 +415,31 @@ async function persistHermesTurnUnlocked(
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }
+}
+
+function persistenceStateRank(state: HermesTurnPersistenceState): number {
+  if (state === 'stored') return 3;
+  if (state === 'failed') return 2;
+  return 1;
+}
+
+async function recordHermesTurnPersistenceTransition(
+  memoryManager: RequestContext['memoryManager'],
+  payload: Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>,
+): Promise<boolean> {
+  const recorder = (memoryManager as unknown as {
+    recordChatTurnPersistenceTransition?: (
+      sessionId: string,
+      turnId: string,
+      persistenceState: HermesTurnPersistenceState,
+      opts?: { failureReason?: string | null },
+    ) => Promise<void>;
+  }).recordChatTurnPersistenceTransition;
+  if (typeof recorder !== 'function') return false;
+  await recorder.call(memoryManager, payload.sessionId, payload.turnId, payload.persistenceState, {
+    failureReason: payload.failureReason ?? null,
+  });
+  return true;
 }
 
 async function importHermesAssistantReply(

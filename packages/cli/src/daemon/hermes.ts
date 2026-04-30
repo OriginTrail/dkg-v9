@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
@@ -76,6 +77,8 @@ export interface HermesPersistTurnPayload {
   metadata?: Record<string, unknown>;
 }
 
+export type HermesTurnPersistenceState = HermesPersistTurnPayload['persistenceState'];
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -110,7 +113,10 @@ export function isHermesLoopbackUrl(value: string | undefined): boolean {
   try {
     const parsed = new URL(value);
     const host = parsed.hostname.toLowerCase();
-    return host === 'localhost' || host === '[::1]' || host === '::1' || host.startsWith('127.');
+    return host === 'localhost'
+      || host === '[::1]'
+      || host === '::1'
+      || (isIP(host) === 4 && host.startsWith('127.'));
   } catch {
     return false;
   }
@@ -420,10 +426,18 @@ export async function hasPersistedHermesTurn(
   sessionId: string,
   turnId: string,
 ): Promise<boolean> {
+  return (await getPersistedHermesTurnState(memoryManager, sessionId, turnId)) === 'stored';
+}
+
+export async function getPersistedHermesTurnState(
+  memoryManager: Pick<ChatMemoryManager, 'hasChatTurn'> & Partial<Pick<ChatMemoryManager, 'getChatTurnPersistenceState'>>,
+  sessionId: string,
+  turnId: string,
+): Promise<HermesTurnPersistenceState | null> {
   if (typeof memoryManager.getChatTurnPersistenceState === 'function') {
-    return (await memoryManager.getChatTurnPersistenceState(sessionId, turnId)) === 'stored';
+    return await memoryManager.getChatTurnPersistenceState(sessionId, turnId);
   }
-  return memoryManager.hasChatTurn(sessionId, turnId);
+  return await memoryManager.hasChatTurn(sessionId, turnId) ? 'stored' : null;
 }
 
 export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTurnPayload | { error: string } {

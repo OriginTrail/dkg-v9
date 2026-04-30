@@ -6,6 +6,7 @@ import {
   buildStableHermesTurnId,
   ensureHermesBridgeAvailable,
   getHermesChannelTargets,
+  isHermesLoopbackUrl,
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   probeHermesChannelHealth,
@@ -245,6 +246,19 @@ describe('Hermes channel helpers', () => {
         },
       },
     }))).toEqual([]);
+
+    expect(getHermesChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.example.com:9202',
+            healthUrl: 'http://127.example.com:9202/health',
+          },
+        },
+      },
+    }))).toEqual([]);
   });
 
   it('uses gatewayUrl rather than the local bridge when a remote Hermes transport is configured', () => {
@@ -297,6 +311,16 @@ describe('Hermes channel helpers', () => {
       'Content-Type': 'application/json',
       'x-dkg-bridge-token': 'secret-token',
     });
+    expect(isHermesLoopbackUrl('http://127.0.0.1:9202/send')).toBe(true);
+    expect(isHermesLoopbackUrl('http://127.255.255.255:9202/send')).toBe(true);
+    expect(isHermesLoopbackUrl('http://localhost:9202/send')).toBe(true);
+    expect(isHermesLoopbackUrl('http://[::1]:9202/send')).toBe(true);
+    expect(isHermesLoopbackUrl('http://127.example.com:9202/send')).toBe(false);
+    expect(buildHermesChannelHeaders(
+      { name: 'bridge', inboundUrl: 'http://127.example.com:9202/send' },
+      'secret-token',
+      { 'Content-Type': 'application/json' },
+    )).toEqual({ 'Content-Type': 'application/json' });
 
     expect(buildHermesChannelHeaders(
       { name: 'gateway', inboundUrl: 'http://gateway.local/api/hermes-channel/send' },
@@ -811,10 +835,12 @@ describe('Hermes daemon routes', () => {
 
   it('allows stored Hermes retries to replace provisional turn state', async () => {
     const storeChatExchange = vi.fn(async () => {});
+    const recordChatTurnPersistenceTransition = vi.fn(async () => {});
     const importMemories = vi.fn(async () => {});
     const memoryManager = {
       hasChatTurn: vi.fn(async () => true),
       getChatTurnPersistenceState: vi.fn(async () => 'pending'),
+      recordChatTurnPersistenceTransition,
       storeChatExchange,
     };
     const { ctx, res } = makeHermesRouteContext({
@@ -829,19 +855,70 @@ describe('Hermes daemon routes', () => {
     await handleHermesRoutes(ctx);
 
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(JSON.parse(res.body)).toEqual({ ok: true, transitioned: true, turnId: 'turn-1' });
     expect(memoryManager.getChatTurnPersistenceState).toHaveBeenCalledWith('hermes:default', 'turn-1');
-    expect(storeChatExchange).toHaveBeenCalledWith(
+    expect(recordChatTurnPersistenceTransition).toHaveBeenCalledWith(
       'hermes:default',
-      'hello',
-      'final reply',
-      undefined,
-      expect.objectContaining({
-        turnId: 'turn-1',
-        persistenceState: 'stored',
-      }),
+      'turn-1',
+      'stored',
+      { failureReason: null },
     );
+    expect(storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).toHaveBeenCalledWith('final reply', 'hermes-session:hermes:default:turn:turn-1');
+  });
+
+  it('does not replay provisional Hermes retries through full chat persistence', async () => {
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => true),
+      getChatTurnPersistenceState: vi.fn(async () => 'pending'),
+      recordChatTurnPersistenceTransition: vi.fn(async () => {}),
+      storeChatExchange: vi.fn(async () => {}),
+    };
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'still pending',
+      turnId: 'turn-1',
+      persistenceState: 'pending',
+    }, memoryManager);
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
+    expect(memoryManager.recordChatTurnPersistenceTransition).not.toHaveBeenCalled();
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+  });
+
+  it('transitions failed Hermes retries to stored without appending chat messages', async () => {
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => true),
+      getChatTurnPersistenceState: vi.fn(async () => 'failed'),
+      recordChatTurnPersistenceTransition: vi.fn(async () => {}),
+      storeChatExchange: vi.fn(async () => {}),
+    };
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'final reply',
+      turnId: 'turn-1',
+      persistenceState: 'stored',
+    }, memoryManager);
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, transitioned: true, turnId: 'turn-1' });
+    expect(memoryManager.recordChatTurnPersistenceTransition).toHaveBeenCalledWith(
+      'hermes:default',
+      'turn-1',
+      'stored',
+      { failureReason: null },
+    );
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    expect(importMemories).toHaveBeenCalledTimes(1);
   });
 
   it('serializes concurrent persist-turn retries for the same turn id', async () => {

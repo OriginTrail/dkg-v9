@@ -124,6 +124,8 @@ export interface SessionGraphDeltaResult {
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 
+export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
+
 const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
 
@@ -173,6 +175,8 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
 
 interface ChatAttachmentRef {
   id?: string;
@@ -496,7 +500,7 @@ export class ChatMemoryManager {
     toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
     opts?: {
       turnId?: string;
-      persistenceState?: 'stored' | 'failed' | 'pending';
+      persistenceState?: ChatTurnPersistenceState;
       failureReason?: string | null;
       attachmentRefs?: ChatAttachmentRef[];
     },
@@ -608,26 +612,68 @@ export class ChatMemoryManager {
     return (result.bindings ?? []).length > 0;
   }
 
-  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<'stored' | 'failed' | 'pending' | null> {
+  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<ChatTurnPersistenceState | null> {
     await this.ensureInitialized();
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return null;
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?persistenceState WHERE {
+      `SELECT ?persistenceState ?transitionState WHERE {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
         ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
-        ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+        OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
+        OPTIONAL {
+          ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+          ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+          ?transition <${DKG_ONT}persistenceState> ?transitionState .
+        }
       }`,
       this.wmReadOpts(),
     );
     const states = (result.bindings ?? [])
-      .map((binding: Record<string, string>) => stripRdfLiteral(binding.persistenceState ?? '').trim());
+      .flatMap((binding: Record<string, string>) => [
+        stripRdfLiteral(binding.transitionState ?? '').trim(),
+        stripRdfLiteral(binding.persistenceState ?? '').trim(),
+      ]);
     if (states.includes('stored')) return 'stored';
     if (states.includes('failed')) return 'failed';
     if (states.includes('pending')) return 'pending';
     return null;
+  }
+
+  async recordChatTurnPersistenceTransition(
+    sessionId: string,
+    turnId: string,
+    persistenceState: ChatTurnPersistenceState,
+    opts?: { failureReason?: string | null },
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return;
+    const transitionId = crypto.randomUUID().slice(0, 8);
+    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
+    const now = new Date().toISOString();
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
+      { subject: transitionUri, predicate: RDF_TYPE, object: CHAT_TURN_PERSISTENCE_TRANSITION_TYPE, graph: '' },
+      { subject: transitionUri, predicate: CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE, object: turnUri, graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(trimmedTurnId), graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+      { subject: transitionUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
+    ];
+    if (persistenceState === 'failed' && failureReason) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}failureReason`,
+        object: JSON.stringify(failureReason),
+        graph: '',
+      });
+    }
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
   }
 
   private async extractAndWriteMentions(
@@ -897,7 +943,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -908,8 +954,14 @@ export class ChatMemoryManager {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
             ?turn <${DKG_ONT}turnId> ?turnId .
-            ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+            OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
             OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
+            OPTIONAL {
+              ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+              ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+              ?transition <${DKG_ONT}persistenceState> ?transitionState .
+              OPTIONAL { ?transition <${DKG_ONT}failureReason> ?transitionFailureReason }
+            }
           }
         } ORDER BY ${order}(?ts) LIMIT ${limit}`,
         this.wmReadOpts(),
@@ -926,14 +978,14 @@ export class ChatMemoryManager {
           turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
           attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
           persistStatus: (() => {
-            const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
+            const status = stripRdfLiteral(mb.transitionState ?? mb.persistenceState ?? '').trim();
             if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
               return status;
             }
             return undefined;
           })(),
           failureReason: (() => {
-            const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
+            const reason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
             return reason.length > 0 ? reason : undefined;
           })(),
         })),

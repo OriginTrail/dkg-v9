@@ -1135,6 +1135,276 @@ assert "Needle fact from DKG" in text, text
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('exposes the DKG V10 tool names from OpenClaw and the node skill to Hermes agents', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-tools-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+provider = module.DKGMemoryProvider()
+provider._config = {"publish_tool": "request-only", "allow_direct_publish": False}
+names = sorted(schema["name"] for schema in provider.get_tool_schemas())
+expected_default = [
+    "dkg_assertion_create",
+    "dkg_assertion_discard",
+    "dkg_assertion_history",
+    "dkg_assertion_import_file",
+    "dkg_assertion_promote",
+    "dkg_assertion_query",
+    "dkg_assertion_write",
+    "dkg_context_graph_create",
+    "dkg_find_agents",
+    "dkg_invoke_skill",
+    "dkg_join_request_list",
+    "dkg_list_context_graphs",
+    "dkg_participant_list",
+    "dkg_query",
+    "dkg_read_messages",
+    "dkg_send_message",
+    "dkg_status",
+    "dkg_sub_graph_create",
+    "dkg_sub_graph_list",
+    "dkg_subscribe",
+    "dkg_wallet_balances",
+    "memory_search",
+]
+missing = [name for name in expected_default if name not in names]
+assert missing == [], missing
+assert "dkg_publish" not in names, names
+assert "dkg_shared_memory_publish" not in names, names
+
+guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
+assert "disabled by the adapter publish guard" in guarded, guarded
+admin_guarded = provider.handle_tool_call("dkg_participant_add", {"context_graph_id": "cg:test", "agent_address": "0xabc"})
+assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
+
+provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
+direct_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
+for name in ["dkg_publish", "dkg_shared_memory_publish"]:
+    assert name in direct_names, direct_names
+
+provider._config = {
+    "publish_tool": "direct",
+    "allow_direct_publish": True,
+    "allow_context_graph_admin_tools": True,
+}
+operator_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
+for name in [
+    "dkg_context_graph_invite",
+    "dkg_participant_add",
+    "dkg_participant_remove",
+    "dkg_join_request_approve",
+    "dkg_join_request_reject",
+]:
+    assert name in operator_names, operator_names
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('routes Hermes parity tools to DKG V10 daemon endpoints', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-tool-routes-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+client_spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg.client",
+    plugin_dir / "client.py",
+)
+client_module = importlib.util.module_from_spec(client_spec)
+sys.modules["plugins.memory.dkg.client"] = client_module
+client_spec.loader.exec_module(client_module)
+
+client = client_module.DKGClient("http://127.0.0.1:9200")
+calls = []
+client._post = lambda path, data=None: calls.append(("POST", path, data or {})) or {"ok": True}
+client._get = lambda path: calls.append(("GET", path, {})) or {"ok": True}
+
+bad_cg = client.create_context_graph("Bad", cg_id="Bad:Id")
+assert bad_cg["success"] is False, bad_cg
+client.create_context_graph("My Project", "desc")
+client.write_assertion("a b", "cg:test", [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "sub")
+client.discard_assertion("a b", "cg:test")
+client.assertion_history("a b", "cg:test", agent_address="agent", sub_graph_name="sub")
+client.create_sub_graph("cg:test", "notes")
+client.list_sub_graphs("cg:test")
+client.invite_to_context_graph("cg:test", "peer")
+client.add_participant("cg:test", "agent")
+client.list_join_requests("cg:test")
+client.publish("cg:test", selection=["urn:root"], clear_after=False, sub_graph_name="sub")
+
+assert calls == [
+    ("POST", "/api/context-graph/create", {"id": "my-project", "name": "My Project", "description": "desc"}),
+    ("POST", "/api/assertion/a%20b/write", {"contextGraphId": "cg:test", "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "subGraphName": "sub"}),
+    ("POST", "/api/assertion/a%20b/discard", {"contextGraphId": "cg:test"}),
+    ("GET", "/api/assertion/a%20b/history?contextGraphId=cg%3Atest&agentAddress=agent&subGraphName=sub", {}),
+    ("POST", "/api/sub-graph/create", {"contextGraphId": "cg:test", "subGraphName": "notes"}),
+    ("GET", "/api/sub-graph/list?contextGraphId=cg%3Atest", {}),
+    ("POST", "/api/context-graph/invite", {"contextGraphId": "cg:test", "peerId": "peer"}),
+    ("POST", "/api/context-graph/cg%3Atest/add-participant", {"agentAddress": "agent"}),
+    ("GET", "/api/context-graph/cg%3Atest/join-requests", {}),
+    ("POST", "/api/shared-memory/publish", {"contextGraphId": "cg:test", "selection": ["urn:root"], "clearAfter": False, "subGraphName": "sub"}),
+], calls
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('uploads Hermes assertion imports as safe multipart requests', () => {
+    const script = String.raw`
+import importlib.util
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-import-"))
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+client_spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg.client",
+    plugin_dir / "client.py",
+)
+client_module = importlib.util.module_from_spec(client_spec)
+sys.modules["plugins.memory.dkg.client"] = client_module
+client_spec.loader.exec_module(client_module)
+
+safe_file = home / "notes.md"
+safe_file.write_text("# Notes", encoding="utf-8")
+blocked_dir = home / ".dkg"
+blocked_dir.mkdir()
+blocked_file = blocked_dir / "auth.token"
+blocked_file.write_text("secret", encoding="utf-8")
+ssh_dir = home / ".ssh"
+ssh_dir.mkdir()
+ssh_key = ssh_dir / "id_rsa"
+ssh_key.write_text("secret", encoding="utf-8")
+
+calls = []
+class FakeResponse:
+    def raise_for_status(self):
+        pass
+    def json(self):
+        return {"success": True}
+
+def fake_post(url, data=None, files=None, headers=None, timeout=None):
+    calls.append({
+        "url": url,
+        "data": data,
+        "files": files,
+        "headers": headers,
+        "timeout": timeout,
+    })
+    return FakeResponse()
+
+requests_module = types.ModuleType("requests")
+requests_module.post = fake_post
+sys.modules["requests"] = requests_module
+
+client = client_module.DKGClient("http://127.0.0.1:9200")
+client._token = "secret-token"
+result = client.import_assertion_file("assertion name", "cg:test", str(safe_file), sub_graph_name="sub")
+assert result == {"success": True}, result
+assert len(calls) == 1, calls
+call = calls[0]
+assert call["url"].endswith("/api/assertion/assertion%20name/import-file"), call
+assert call["data"] == {"contextGraphId": "cg:test", "subGraphName": "sub"}, call
+assert call["headers"] == {"Accept": "application/json", "Authorization": "Bearer secret-token"}, call
+file_tuple = call["files"]["file"]
+assert file_tuple[0] == "notes.md", file_tuple
+assert file_tuple[2] == "text/markdown", file_tuple
+
+blocked = client.import_assertion_file("assertion", "cg:test", str(blocked_file))
+assert blocked["success"] is False, blocked
+assert "Refusing to import" in blocked["error"], blocked
+blocked_ssh = client.import_assertion_file("assertion", "cg:test", str(ssh_key))
+assert blocked_ssh["success"] is False, blocked_ssh
+assert "Refusing to import" in blocked_ssh["error"], blocked_ssh
+assert len(calls) == 1, calls
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('flushes queued memory writes without reapplying them to the local cache', () => {
     const script = String.raw`
 import importlib.util

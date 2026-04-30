@@ -5,6 +5,7 @@ import * as path from 'path';
 import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
+import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
 describe('DkgNodePlugin', () => {
@@ -3396,6 +3397,49 @@ describe('DkgNodePlugin', () => {
     expect(typedEvents).toContain('agent_end');
     expect(typedEvents).toContain('before_compaction');
     expect(typedEvents).toContain('before_reset');
+  });
+
+  it('marks session_end and internal message hooks as rare-fire so startup timeout diagnostics stay quiet', async () => {
+    vi.useFakeTimers();
+    const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: vi.fn(),
+      on: vi.fn(),
+      logger,
+    };
+
+    try {
+      plugin.register(mockApi);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const debugMessages = logger.debug.mock.calls.map((args) => String(args[0]));
+      const warnMessages = logger.warn.mock.calls.map((args) => String(args[0]));
+      expect(debugMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:received"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(true);
+      expect(warnMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:received"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
+    } finally {
+      await plugin.stop();
+      if (previousHookMap === undefined) {
+        delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      } else {
+        (globalThis as any)[INTERNAL_HOOK_SYMBOL] = previousHookMap;
+      }
+      vi.useRealTimers();
+    }
   });
 
   it('R14.2 — handleBeforePromptBuild returns undefined when memoryPlugin exists but is not registered (slot owned by another plugin)', async () => {

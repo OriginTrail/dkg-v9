@@ -690,7 +690,7 @@ export class ChatTurnWriter {
     for (const marker of markers) {
       this.restoreExternalTurnMarker(externalCursorKey, marker);
     }
-    if (!this.commitWatermarkStateSync()) {
+    if (!this.commitWatermarkStateSync(externalCursorKey)) {
       for (const marker of markers) {
         this.consumeExternalTurnMarker(externalCursorKey, marker);
       }
@@ -1923,14 +1923,13 @@ export class ChatTurnWriter {
     const ids = new Set<string>();
     if (identity.sessionId) ids.add(identity.sessionId);
     if (!identity.channelId || !identity.sessionKey) return Array.from(ids);
+    if (typeof identity.accountId !== "string" || typeof identity.conversationId !== "string") {
+      return Array.from(ids);
+    }
     const expected = {
       channelId: this.encodeIdField(this.sanitize(identity.channelId)),
-      accountId: typeof identity.accountId === "string"
-        ? this.encodeIdField(this.sanitize(identity.accountId))
-        : undefined,
-      conversationId: typeof identity.conversationId === "string"
-        ? this.encodeIdField(this.sanitize(identity.conversationId))
-        : undefined,
+      accountId: this.encodeIdField(this.sanitize(identity.accountId)),
+      conversationId: this.encodeIdField(this.sanitize(identity.conversationId)),
       sessionKey: this.encodeIdField(this.sanitize(identity.sessionKey)),
     };
     for (const candidate of this.collectKnownSessionIds()) {
@@ -1938,8 +1937,8 @@ export class ChatTurnWriter {
       if (!parsed) continue;
       if (parsed.channelId !== expected.channelId) continue;
       if (parsed.sessionKey !== expected.sessionKey) continue;
-      if (expected.accountId !== undefined && parsed.accountId !== expected.accountId) continue;
-      if (expected.conversationId !== undefined && parsed.conversationId !== expected.conversationId) continue;
+      if (parsed.accountId !== expected.accountId) continue;
+      if (parsed.conversationId !== expected.conversationId) continue;
       ids.add(candidate);
     }
     return Array.from(ids);

@@ -504,6 +504,36 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("after reset");
   });
 
+  it("T95 — partial reset identity does not clear sibling thread state", async () => {
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: {
+        channelId: "tg",
+        accountId: "acct",
+        conversationId: "thread-2",
+        content: "sibling question",
+        messageId: "sibling-in",
+      },
+    } as any);
+
+    await writer.onBeforeReset({ channelId: "tg", sessionKey: "sk" });
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: {
+        channelId: "tg",
+        accountId: "acct",
+        conversationId: "thread-2",
+        content: "sibling answer",
+        success: true,
+        messageId: "sibling-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("sibling question");
+  });
+
   it("T82 — durable external direct-channel marker prevents restart backfill by W4a", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
@@ -552,6 +582,31 @@ describe("ChatTurnWriter", () => {
     const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
     const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
     expect(Array.from(bucket?.values() ?? [])).toEqual([1, 1]);
+    writeSpy.mockRestore();
+  });
+
+  it("T94 — external marker write failure preserves unrelated debounce timers", async () => {
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "pending question" },
+        { role: "assistant", content: "pending answer" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const sessionId = (writer as any).deriveSessionId({ channelId: "tg", sessionKey: "sk" });
+    expect((writer as any).debounceTimers.has(sessionId)).toBe(true);
+
+    const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile").mockReturnValueOnce(false);
+    await expect(writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-debounce",
+      user: "external question",
+      assistant: "external answer",
+    })).rejects.toThrow("Failed to write external chat-turn marker");
+
+    expect((writer as any).debounceTimers.has(sessionId)).toBe(true);
     writeSpy.mockRestore();
   });
 

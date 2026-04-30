@@ -43,6 +43,7 @@ interface ComputedChatTurnPair {
 interface ExternalMarkerAction {
   skip: boolean;
   markers: string[];
+  rollbackMarkers: string[];
 }
 
 interface WatermarkStateSnapshot {
@@ -505,28 +506,21 @@ export class ChatTurnWriter {
       // point. Without sequencing, a failed middle pair could be skipped
       // when the tail succeeds.
       const lastIdx = pairs.length - 1;
-      const externalContentMatchCounts = externalCursorKey
-        ? this.externalContentMatchCounts(externalCursorKey, pairs)
-        : new Map<string, number>();
       const job = this.trackPersistJob(sessionId, async () => {
         for (let i = 0; i < pairs.length; i++) {
-          const { user, assistant, pairIndex, externalTurnIds, externalDirect } = pairs[i];
+          const { user, assistant, pairIndex, externalTurnIds } = pairs[i];
           if (!user && !assistant) continue;
           const externalMarkerAction = externalCursorKey
             ? this.consumeExternalTurnMarkersForPair(
               externalCursorKey,
-              user,
-              assistant,
               externalTurnIds,
-              externalDirect,
-              externalContentMatchCounts,
             )
-            : { skip: false, markers: [] };
+            : { skip: false, markers: [], rollbackMarkers: [] };
           if (externalCursorKey && externalMarkerAction.markers.length > 0) {
             const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
             if (externalMarkerAction.skip) this.bumpWatermark(sessionId, pairIndex);
             if (!this.commitWatermarkStateSync(sessionId)) {
-              for (const marker of externalMarkerAction.markers) {
+              for (const marker of externalMarkerAction.rollbackMarkers) {
                 this.restoreExternalTurnMarker(externalCursorKey, marker);
               }
               this.restoreWatermarkState(sessionId, watermarkSnapshot);
@@ -1582,75 +1576,22 @@ export class ChatTurnWriter {
     return `external-id::${createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16)}`;
   }
 
-  private externalTurnContentMarkerKey(user: string, assistant: string): string {
-    if (!user && !assistant) return "";
-    return `external-content::${this.contentHash(user, assistant)}`;
-  }
-
-  private externalContentMatchCounts(
-    sessionKeyCursor: string,
-    pairs: ComputedChatTurnPair[],
-  ): Map<string, number> {
-    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
-    const counts = new Map<string, number>();
-    if (!bucket) return counts;
-    for (const pair of pairs) {
-      if (!pair.externalDirect) continue;
-      const marker = this.externalTurnContentMarkerKey(pair.user, pair.assistant);
-      if (marker && bucket.has(marker)) {
-        counts.set(marker, (counts.get(marker) ?? 0) + 1);
-      }
-    }
-    return counts;
-  }
-
   private consumeExternalTurnMarkersForPair(
     sessionKeyCursor: string,
-    user: string,
-    assistant: string,
     turnIds: string[],
-    externalDirect: boolean,
-    contentMatchCounts: Map<string, number>,
   ): ExternalMarkerAction {
-    const consumed: string[] = [];
     for (const turnId of turnIds) {
       const marker = this.externalTurnMarkerId(turnId);
-      if (marker && this.consumeExternalTurnMarker(sessionKeyCursor, marker)) {
-        consumed.push(marker);
-        const contentMarker = this.externalTurnContentMarkerKey(user, assistant);
-        if (contentMarker && this.consumeExternalTurnMarker(sessionKeyCursor, contentMarker)) {
-          consumed.push(contentMarker);
-        }
-        return { skip: true, markers: consumed };
+      if (marker && this.hasExternalTurnMarker(sessionKeyCursor, marker)) {
+        return { skip: true, markers: [marker], rollbackMarkers: [] };
       }
     }
-
-    const contentMarker = this.externalTurnContentMarkerKey(user, assistant);
-    if (
-      this.allowsExternalContentFallback(sessionKeyCursor)
-      && externalDirect
-      && turnIds.length === 0
-      && contentMarker
-      && contentMatchCounts.get(contentMarker) === 1
-      && this.consumeExternalTurnMarker(sessionKeyCursor, contentMarker)
-    ) {
-      consumed.push(contentMarker);
-      return { skip: true, markers: consumed };
-    }
-
-    if (
-      this.allowsExternalContentFallback(sessionKeyCursor)
-      && externalDirect
-      && contentMarker
-      && (turnIds.length > 0 || (contentMatchCounts.get(contentMarker) ?? 0) > 1)
-    ) {
-      consumed.push(...this.retireExternalTurnMarker(sessionKeyCursor, contentMarker));
-    }
-    return { skip: false, markers: consumed };
+    return { skip: false, markers: [], rollbackMarkers: [] };
   }
 
-  private allowsExternalContentFallback(sessionKeyCursor: string): boolean {
-    return !sessionKeyCursor.startsWith("openclaw:transcript:");
+  private hasExternalTurnMarker(sessionKeyCursor: string, marker: string): boolean {
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
+    return (bucket?.get(marker) ?? 0) > 0;
   }
 
   private consumeExternalTurnMarker(sessionKeyCursor: string, marker: string): boolean {
@@ -1667,18 +1608,6 @@ export class ChatTurnWriter {
       this.externalTurnMarkers.delete(sessionKeyCursor);
     }
     return true;
-  }
-
-  private retireExternalTurnMarker(sessionKeyCursor: string, marker: string): string[] {
-    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
-    if (!bucket) return [];
-    const count = bucket.get(marker) ?? 0;
-    if (count <= 0) return [];
-    bucket.delete(marker);
-    if (bucket.size === 0) {
-      this.externalTurnMarkers.delete(sessionKeyCursor);
-    }
-    return Array.from({ length: count }, () => marker);
   }
 
   private restoreExternalTurnMarker(sessionKeyCursor: string, marker: string): void {

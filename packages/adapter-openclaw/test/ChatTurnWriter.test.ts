@@ -640,6 +640,18 @@ describe("ChatTurnWriter", () => {
       await flushMicrotasks();
 
       expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+      await restarted[hookName]({ channelId: "telegram", sessionKey: "agent:main:main" });
+      mockClient.storeChatTurn.mockClear();
+      restarted.onAgentEnd({
+        sessionId: "test",
+        messages: [
+          { role: "user", content: "reset ui question", context: { Provider: "dkg-ui", DkgTurnId: turnId } },
+          { role: "assistant", content: "reset ui answer" },
+        ],
+      }, { channelId: "telegram", sessionKey: "agent:main:main" });
+      await flushMicrotasks();
+
+      expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
       restarted.flushSync();
     });
   }
@@ -734,18 +746,13 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T85 - session-key external markers do not content-fallback without an exact ID", async () => {
+  it("T85 - session-key external markers require an exact ID", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-unique-content",
       user: "unique ui question",
       assistant: "unique ui answer",
     });
-    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-    const contentMarker = (writer as any).externalTurnContentMarkerKey("unique ui question", "unique ui answer");
-    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
-    (writer as any).writeWatermarkFile();
-
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
     restarted.onAgentEnd({
@@ -767,7 +774,7 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T86 — content fallback does not consume a unique non-direct channel pair", async () => {
+  it("T86 — ID-less non-direct channel pair is not skipped by an external marker", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-stale-content",
@@ -791,18 +798,13 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T91 — content fallback does not consume a direct pair with a mismatched explicit ID", async () => {
+  it("T91 — exact external marker does not skip a direct pair with a mismatched explicit ID", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-stale-id",
       user: "same direct text",
       assistant: "same direct answer",
     });
-    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-    const contentMarker = (writer as any).externalTurnContentMarkerKey("same direct text", "same direct answer");
-    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
-    (writer as any).writeWatermarkFile();
-
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
     restarted.onAgentEnd({
@@ -819,18 +821,13 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T92 — content fallback is ambiguous when any same-content direct pair has an explicit ID", async () => {
+  it("T92 — ID-less direct pair is not skipped without an exact external ID", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-ambiguous-content",
       user: "ambiguous direct text",
       assistant: "ambiguous direct answer",
     });
-    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-    const contentMarker = (writer as any).externalTurnContentMarkerKey("ambiguous direct text", "ambiguous direct answer");
-    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
-    (writer as any).writeWatermarkFile();
-
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
     restarted.onAgentEnd({
@@ -852,18 +849,13 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T93 - session-key content markers cannot skip later ID-less windows", async () => {
+  it("T93 - exact external marker does not skip later ID-less windows", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-retired-content",
       user: "retired direct text",
       assistant: "retired direct answer",
     });
-    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-    const contentMarker = (writer as any).externalTurnContentMarkerKey("retired direct text", "retired direct answer");
-    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
-    (writer as any).writeWatermarkFile();
-
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     restarted.onAgentEnd({
       sessionId: "test",

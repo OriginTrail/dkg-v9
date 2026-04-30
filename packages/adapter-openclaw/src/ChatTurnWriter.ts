@@ -512,6 +512,8 @@ export class ChatTurnWriter {
             ? this.consumeExternalTurnMarkersForPair(
               externalCursorKey,
               externalTurnIds,
+              user,
+              assistant,
             )
             : { skip: false, markers: [], rollbackMarkers: [] };
           if (externalCursorKey && externalMarkerAction.markers.length > 0) {
@@ -679,7 +681,7 @@ export class ChatTurnWriter {
   }): Promise<void> {
     const externalCursorKey = this.externalCursorKeyFromSessionKey(opts.sessionKey);
     const markers = [
-      this.externalTurnMarkerId(opts.turnId),
+      this.externalTurnMarkerId(opts.turnId, opts.user, opts.assistant),
     ].filter(Boolean);
     if (!externalCursorKey || markers.length === 0) return;
     for (const marker of markers) {
@@ -1584,21 +1586,28 @@ export class ChatTurnWriter {
     return `w4b-content::${this.contentHash(user, assistant)}`;
   }
 
-  private externalTurnMarkerId(turnId?: unknown): string {
+  private externalTurnMarkerId(turnId?: unknown, user?: string, assistant?: string): string {
     if (typeof turnId !== "string" || turnId.trim().length === 0) return "";
-    return `external-id::${createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16)}`;
+    const idHash = createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16);
+    if (typeof user !== "string" || typeof assistant !== "string") {
+      return `external-id::${idHash}`;
+    }
+    return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
   private consumeExternalTurnMarkersForPair(
     sessionKeyCursor: string,
     turnIds: string[],
+    user: string,
+    assistant: string,
   ): ExternalMarkerAction {
     for (const turnId of turnIds) {
-      const marker = this.externalTurnMarkerId(turnId);
+      const marker = this.externalTurnMarkerId(turnId, user, assistant);
       if (marker && this.hasExternalTurnMarker(sessionKeyCursor, marker)) {
-        // Exact external markers are durable daemon-success facts, not
-        // one-shot tickets. Keep them for later reset/compaction replays
-        // until a future transcript-retention cursor can prove safe GC.
+        // Content-bound exact markers are durable daemon-success facts,
+        // not one-shot tickets. Keep them for later reset/compaction
+        // replays until a future transcript-retention cursor can prove
+        // safe GC.
         return { skip: true, markers: [marker], rollbackMarkers: [] };
       }
     }

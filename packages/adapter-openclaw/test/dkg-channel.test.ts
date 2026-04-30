@@ -1389,6 +1389,7 @@ describe('DkgChannelPlugin', () => {
 
     expect(reply.text).toBe('Hello from agent');
     expect(reply.correlationId).toBe('corr-1');
+    expect(reply.sessionKey).toBe('session-1');
     expect(dispatched).toMatchObject({
       ctx: expect.objectContaining({
         BodyForAgent: 'Hello',
@@ -2044,9 +2045,10 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi({ routeInboundMessage });
     plugin.register(api);
 
-    await plugin.processInbound('Hello', 'corr-route-marker', 'owner');
+    const reply = await plugin.processInbound('Hello', 'corr-route-marker', 'owner');
     await new Promise((resolve) => setTimeout(resolve, 10));
 
+    expect(reply.sessionKey).toBe('agent:main:main');
     expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
     expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
     expect(storeCalls[0]).toEqual([
@@ -2059,6 +2061,34 @@ describe('DkgChannelPlugin', () => {
       sessionKey: 'agent:main:main',
       turnId: 'corr-route-marker',
       user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback hashes the routed agent body for direct-channel markers', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-context-marker',
+      text: 'Reply!',
+      sessionKey: 'agent:main:main',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-context-marker', 'owner', {
+      contextEntries: [{ key: 'target_context_graph', label: 'Target context graph', value: 'dkg-code-project' }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0].text).toContain('Context for this chat turn:');
+    expect(storeCalls[0][1]).toBe('Hello');
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      turnId: 'corr-route-context-marker',
+      user: expect.stringContaining('Context for this chat turn:'),
       assistant: 'Reply!',
     });
   });
@@ -2141,7 +2171,7 @@ describe('DkgChannelPlugin', () => {
     const reply = await plugin.processInbound('Hello', 'corr-route-uppercase-session', 'owner');
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect((reply as any).SessionKey).toBeUndefined();
+    expect((reply as any).SessionKey).toBe('agent:legacy:actual');
     expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
       sessionKey: 'agent:legacy:actual',
       turnId: 'corr-route-uppercase-session',
@@ -2349,7 +2379,7 @@ describe('DkgChannelPlugin', () => {
     expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
       sessionKey: 'session-1',
       turnId: 'corr-stream-runtime',
-      user: 'Hello',
+      user: expect.stringContaining('Attached Working Memory items:'),
       assistant: 'Streamed reply',
     });
   });
@@ -2783,6 +2813,7 @@ describe('DkgChannelPlugin', () => {
     await expect(replyPromise).resolves.toEqual({
       text: 'Reply before shutdown',
       correlationId: 'corr-stop-nonstream',
+      sessionKey: 'session-1',
     });
 
     let stopSettled = false;

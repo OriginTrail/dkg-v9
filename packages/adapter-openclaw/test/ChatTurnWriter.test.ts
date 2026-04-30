@@ -669,6 +669,31 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T104 - reused direct-channel turnId with different content does not skip W4a", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-reused",
+      user: "first ui question",
+      assistant: "first ui answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "second ui question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-reused" } },
+        { role: "assistant", content: "second ui answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("second ui question");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("second ui answer");
+    restarted.flushSync();
+  });
+
   for (const hookName of ["onBeforeReset", "onBeforeCompaction"] as const) {
     it(`T99 - ${hookName} preserves durable external markers for replay dedupe`, async () => {
       const turnId = `node-ui-corr-${hookName}`;
@@ -681,7 +706,7 @@ describe("ChatTurnWriter", () => {
       await writer[hookName]({ channelId: "telegram", sessionKey: "agent:main:main" });
 
       const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-      const marker = (writer as any).externalTurnMarkerId(turnId);
+      const marker = (writer as any).externalTurnMarkerId(turnId, "reset ui question", "reset ui answer");
       const persisted = JSON.parse(fs.readFileSync(
         path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json"),
         "utf-8",
@@ -1071,7 +1096,11 @@ describe("ChatTurnWriter", () => {
     const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-counts-"));
     try {
       const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
-      const marker = (writer as any).externalTurnMarkerId("node-ui-corr-counted");
+      const marker = (writer as any).externalTurnMarkerId(
+        "node-ui-corr-counted",
+        "counted question",
+        "counted answer",
+      );
       (writer as any).restoreExternalTurnMarker(externalCursorKey, marker);
       (writer as any).writeWatermarkFile();
 
@@ -1103,7 +1132,11 @@ describe("ChatTurnWriter", () => {
 
       const dkw = writer as any;
       const externalCursorKey = dkw.externalCursorKeyFromSessionKey("agent:main:main");
-      const marker = dkw.externalTurnMarkerId("node-ui-corr-marker-race");
+      const marker = dkw.externalTurnMarkerId(
+        "node-ui-corr-marker-race",
+        "migrated ui question",
+        "migrated ui answer",
+      );
       const realWrite = dkw.writeWatermarkFile.bind(dkw);
       const writeSpy = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce((target: string, override: any) => {
         dkw.restoreExternalTurnMarker(externalCursorKey, marker);
@@ -1144,7 +1177,11 @@ describe("ChatTurnWriter", () => {
       const originalStateDir = dkw.stateDir;
       const originalWatermarkFilePath = dkw.watermarkFilePath;
       const externalCursorKey = dkw.externalCursorKeyFromSessionKey("agent:main:main");
-      const marker = dkw.externalTurnMarkerId("node-ui-corr-marker-final-fail");
+      const marker = dkw.externalTurnMarkerId(
+        "node-ui-corr-marker-final-fail",
+        "final fail question",
+        "final fail answer",
+      );
       const realWrite = dkw.writeWatermarkFile.bind(dkw);
       const writeSpy = vi.spyOn(dkw, "writeWatermarkFile")
         .mockImplementationOnce((target: string, override: any) => {

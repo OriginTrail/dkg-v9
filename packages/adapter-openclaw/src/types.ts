@@ -126,7 +126,7 @@ export interface ChannelInboundMessage {
   text: string;
   /** Correlation ID for request-reply tracking. */
   correlationId?: string;
-  /** Optional transcript session key for legacy route fallbacks that can honor it. */
+  /** Optional transcript session key when the caller already knows the resolved route. */
   sessionKey?: string;
   /** OpenClaw context-style alias for `sessionKey`. */
   SessionKey?: string;

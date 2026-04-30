@@ -218,6 +218,7 @@ interface PersistTurnOptions {
   attachmentRefs?: OpenClawAttachmentRef[];
   sessionKey?: string;
   turnId?: string;
+  markerUser?: string;
 }
 
 interface ExternalTurnMarkerPersistOptions {
@@ -1200,6 +1201,10 @@ export class DkgChannelPlugin {
     if (opts?.contextEntries != null && contextEntries === undefined) {
       throw new Error('Invalid context entries');
     }
+    const markerUserMessage = buildAgentBody(text, {
+      attachmentRefs: contextAttachmentRefs,
+      contextEntries: sanitizedContextEntries,
+    });
 
     // Re-assert memory-slot capability before dispatch so our runtime
     // handles recall even if memory-core's dreaming sidecar overwrote it.
@@ -1208,13 +1213,14 @@ export class DkgChannelPlugin {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
-        const { sessionKey, ...replyForCaller } = reply;
+        const sessionKey = typeof reply.sessionKey === 'string' ? reply.sessionKey : undefined;
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
           sessionKey,
+          markerUser: markerUserMessage,
         }, true);
-        return replyForCaller;
+        return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
         throw err;
@@ -1248,7 +1254,8 @@ export class DkgChannelPlugin {
           correlationId,
         }),
       );
-      const { sessionKey: replySessionKey, SessionKey: replyOpenClawSessionKey, ...replyForCaller } = reply;
+      const replySessionKey = reply.sessionKey;
+      const replyOpenClawSessionKey = reply.SessionKey;
       const returnedSessionKey =
         (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
         || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '');
@@ -1260,8 +1267,9 @@ export class DkgChannelPlugin {
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
         sessionKey: returnedSessionKey || undefined,
+        markerUser: markerUserMessage,
       }, true);
-      return replyForCaller;
+      return reply;
     }
 
     throw new Error(
@@ -1680,6 +1688,7 @@ export class DkgChannelPlugin {
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
           sessionKey: route.sessionKey,
+          markerUser: agentBody,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
         this.queueTurnPersistence(
@@ -1687,7 +1696,13 @@ export class DkgChannelPlugin {
           this.buildFailedAssistantReply(resolvedFailureReason),
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs, sessionKey: route.sessionKey },
+          {
+            persistenceState: 'failed',
+            failureReason: resolvedFailureReason,
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+          },
           true,
         );
       } else {
@@ -1696,7 +1711,13 @@ export class DkgChannelPlugin {
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs, sessionKey: route.sessionKey },
+          {
+            persistenceState: 'failed',
+            failureReason: 'cancelled',
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+          },
           true,
         );
       }
@@ -1905,7 +1926,7 @@ export class DkgChannelPlugin {
     await this.markExternalTurnPersistedAfterStore({
       sessionKey: opts?.sessionKey,
       turnId: opts?.turnId ?? correlationId,
-      user: userMessage,
+      user: opts?.markerUser ?? userMessage,
       assistant: assistantReply,
       correlationId,
     }, allowDuringShutdown);

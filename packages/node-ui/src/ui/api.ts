@@ -620,6 +620,7 @@ export interface MemorySession {
     persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
     failureReason?: string | null;
     attachmentRefs?: LocalAgentChatAttachmentRef[];
+    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
   }>;
 }
 export interface MemorySessionGraphDeltaWatermark {
@@ -673,8 +674,8 @@ export const fetchMemorySessionGraphDelta = (
 };
 
 // IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
-// importMemories were retired with the /api/memory/import V9 relic as
-// part of the openclaw-dkg-primary-memory work. Agents write memory via
+// importMemories were retired with /api/memory/import as part of the
+// openclaw-dkg-primary-memory work. Agents write memory via
 // the adapter's dkg_memory_import tool, and file-import flows go through
 // /api/assertion/:name/import-file directly.
 
@@ -715,6 +716,8 @@ interface LocalAgentChatRequestOptions {
   correlationId?: string;
   signal?: AbortSignal;
   identity?: string;
+  sessionId?: string;
+  profile?: string;
   attachments?: LocalAgentChatAttachmentRef[];
   contextEntries?: LocalAgentChatContextEntry[];
   /**
@@ -736,22 +739,21 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
 
 // --- OpenClaw local channel bridge ---
 
+export interface LocalAgentChatResponse {
+  text: string;
+  correlationId: string;
+  sessionId?: string;
+  turnId?: string;
+}
+
 export async function sendOpenClawLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
-): Promise<{ text: string; correlationId: string }> {
-  const body = {
-    text,
-    correlationId: opts?.correlationId ?? crypto.randomUUID(),
-    ...(opts?.identity ? { identity: opts.identity } : {}),
-    ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
-    ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
-    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
-  };
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(body),
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts?.signal,
   });
   if (!res.ok) {
@@ -763,8 +765,47 @@ export async function sendOpenClawLocalChat(
 
 export type OpenClawStreamEvent =
   | { type: 'text_delta'; delta: string }
-  | { type: 'final'; text: string; correlationId: string }
+  | ({ type: 'final' } & LocalAgentChatResponse)
   | { type: 'error'; error: string };
+
+type HermesRawStreamEvent =
+  | OpenClawStreamEvent
+  | { type: 'delta'; text?: string; correlationId?: string };
+
+export type LocalAgentChannelTarget = 'bridge' | 'gateway';
+
+export interface LocalAgentHealthResponse {
+  ok: boolean;
+  target?: LocalAgentChannelTarget;
+  error?: string;
+  profile?: string;
+  memory?: string | {
+    provider?: string;
+    mode?: string;
+    status?: string;
+    conflict?: boolean;
+    error?: string;
+  };
+  status?: string;
+  bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
+  gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
+}
+
+function buildLocalAgentChatBody(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Record<string, unknown> {
+  return {
+    text,
+    correlationId: opts?.correlationId ?? crypto.randomUUID(),
+    ...(opts?.identity ? { identity: opts.identity } : {}),
+    ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+    ...(opts?.profile ? { profile: opts.profile } : {}),
+    ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
+  };
+}
 
 /**
  * SSE streaming variant of sendOpenClawLocalChat.
@@ -775,15 +816,7 @@ export async function streamOpenClawLocalChat(
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
-): Promise<{ text: string; correlationId: string }> {
-  const body = {
-    text,
-    correlationId: opts.correlationId ?? crypto.randomUUID(),
-    ...(opts.identity ? { identity: opts.identity } : {}),
-    ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
-    ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
-    ...(opts.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
-  };
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
     headers: {
@@ -791,7 +824,7 @@ export async function streamOpenClawLocalChat(
       'Accept': 'text/event-stream',
       ...authHeaders(),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts.signal,
   });
 
@@ -804,7 +837,7 @@ export async function streamOpenClawLocalChat(
 
   // Fallback: if server didn't return SSE, treat as JSON
   if (!res.body || !contentType.includes('text/event-stream')) {
-    const data = await res.json() as { text: string; correlationId: string };
+    const data = await res.json() as LocalAgentChatResponse;
     opts.onEvent?.({ type: 'final', ...data });
     return data;
   }
@@ -813,7 +846,7 @@ export async function streamOpenClawLocalChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let finalPayload: { text: string; correlationId: string } | undefined;
+  let finalPayload: LocalAgentChatResponse | undefined;
   let streamError: Error | undefined;
 
   const handleEvent = (event: OpenClawStreamEvent): void => {
@@ -821,7 +854,12 @@ export async function streamOpenClawLocalChat(
     if (event.type === 'error') {
       streamError = new Error(event.error || 'Stream failed');
     } else if (event.type === 'final') {
-      finalPayload = { text: event.text, correlationId: event.correlationId };
+      finalPayload = {
+        text: event.text,
+        correlationId: event.correlationId,
+        ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        ...(event.turnId ? { turnId: event.turnId } : {}),
+      };
     }
   };
 
@@ -865,15 +903,128 @@ export async function streamOpenClawLocalChat(
 }
 
 export const fetchOpenClawLocalHealth = () =>
-  get<{
-    ok: boolean;
-    target?: 'bridge' | 'gateway';
+  get<LocalAgentHealthResponse & {
     bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
     gateway?: { ok: boolean; channel?: string; error?: string };
-    error?: string;
   }>(
     '/api/openclaw-channel/health',
   );
+
+export async function sendHermesLocalChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const res = await fetch('/api/hermes-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function streamHermesLocalChat(
+  text: string,
+  opts: LocalAgentChatRequestOptions & {
+    onEvent?: (event: OpenClawStreamEvent) => void;
+  } = {},
+): Promise<LocalAgentChatResponse> {
+  const res = await fetch('/api/hermes-channel/stream', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    const data = await res.json() as LocalAgentChatResponse;
+    opts.onEvent?.({ type: 'final', ...data });
+    return data;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalPayload: LocalAgentChatResponse | undefined;
+  let streamError: Error | undefined;
+
+  const normalizeHermesEvent = (event: HermesRawStreamEvent): OpenClawStreamEvent => {
+    if (event.type === 'delta') {
+      return { type: 'text_delta', delta: event.text ?? '' };
+    }
+    return event;
+  };
+
+  const handleEvent = (event: OpenClawStreamEvent): void => {
+    opts.onEvent?.(event);
+    if (event.type === 'error') {
+      streamError = new Error(event.error || 'Stream failed');
+    } else if (event.type === 'final') {
+      finalPayload = {
+        text: event.text,
+        correlationId: event.correlationId,
+        ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        ...(event.turnId ? { turnId: event.turnId } : {}),
+      };
+    }
+  };
+
+  const processLines = (finalFlush: boolean): void => {
+    let lineEnd = buffer.indexOf('\n');
+    while (lineEnd !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const dataLine = line.slice(5).trim();
+      if (!dataLine) continue;
+      try {
+        handleEvent(normalizeHermesEvent(JSON.parse(dataLine) as HermesRawStreamEvent));
+      } catch { /* ignore malformed frames */ }
+      if (streamError) return;
+    }
+    if (finalFlush && buffer.trim().startsWith('data:')) {
+      const dataLine = buffer.trim().slice(5).trim();
+      if (!dataLine) return;
+      try {
+        handleEvent(normalizeHermesEvent(JSON.parse(dataLine) as HermesRawStreamEvent));
+      } catch { /* ignore malformed frames */ }
+      buffer = '';
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    processLines(false);
+    if (streamError) break;
+  }
+  buffer += decoder.decode();
+  processLines(true);
+
+  if (streamError) throw streamError;
+  if (!finalPayload) throw new Error('Stream ended without final payload');
+  return finalPayload;
+}
+
+export const fetchHermesLocalHealth = () =>
+  get<LocalAgentHealthResponse>('/api/hermes-channel/health');
 
 interface LocalAgentIntegrationRecord {
   id: string;
@@ -913,6 +1064,7 @@ interface LocalAgentIntegrationRecord {
 export type LocalAgentIntegrationStatus =
   | 'chat_ready'
   | 'connecting'
+  | 'degraded'
   | 'bridge_offline'
   | 'available'
   | 'coming_soon';
@@ -922,6 +1074,8 @@ export interface LocalAgentIntegration {
   name: string;
   framework: string;
   description: string;
+  defaultSessionId?: string;
+  profile?: string;
   chatSupported: boolean;
   chatAttachments: boolean;
   connectSupported: boolean;
@@ -935,7 +1089,7 @@ export interface LocalAgentIntegration {
   statusLabel: string;
   detail: string;
   error?: string;
-  target?: 'bridge' | 'gateway';
+  target?: LocalAgentChannelTarget;
   source: 'live' | 'planned';
 }
 
@@ -952,20 +1106,29 @@ export interface LocalAgentHistoryMessage {
   turnId?: string;
   failureReason?: string | null;
   attachmentRefs?: LocalAgentChatAttachmentRef[];
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }
 
 interface LocalAgentSurface {
   connectSupported: boolean;
   chatSupported: boolean;
-  defaultSessionId?: (integrationId: string) => string;
+  defaultSessionId?: (args: {
+    integrationId: string;
+    record?: LocalAgentIntegrationRecord;
+    health?: LocalAgentHealthResponse | null;
+  }) => string;
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<{
     ok: boolean;
-    target?: 'bridge' | 'gateway';
+    target?: LocalAgentChannelTarget;
     error?: string;
+    profile?: string;
+    memory?: LocalAgentHealthResponse['memory'];
+    status?: string;
   }>;
   streamChat?: typeof streamOpenClawLocalChat;
 }
@@ -974,7 +1137,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   openclaw: {
     connectSupported: true,
     chatSupported: true,
-    defaultSessionId: (integrationId: string) => `${integrationId}:dkg-ui`,
+    defaultSessionId: ({ integrationId }) => `${integrationId}:dkg-ui`,
     resolveChatContext: ({ integrationId, sessionId }) => {
       if (!sessionId) return {};
       const prefix = `${integrationId}:dkg-ui:`;
@@ -985,11 +1148,22 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     fetchHealth: fetchOpenClawLocalHealth,
     streamChat: streamOpenClawLocalChat,
   },
+  hermes: {
+    connectSupported: true,
+    chatSupported: true,
+    defaultSessionId: ({ integrationId, record, health }) => buildHermesDefaultSessionId(integrationId, record, health),
+    resolveChatContext: ({ sessionId, profile }) => ({
+      ...(sessionId ? { sessionId } : {}),
+      ...(profile ? { profile } : {}),
+    }),
+    fetchHealth: fetchHermesLocalHealth,
+    streamChat: streamHermesLocalChat,
+  },
 };
 
 export function getDefaultLocalAgentSessionId(integrationId: string): string | null {
   const normalizedId = integrationId.trim().toLowerCase();
-  return LOCAL_AGENT_SURFACES[normalizedId]?.defaultSessionId?.(normalizedId) ?? null;
+  return LOCAL_AGENT_SURFACES[normalizedId]?.defaultSessionId?.({ integrationId: normalizedId }) ?? null;
 }
 
 function resolveLocalAgentHistorySessionId(integrationId: string, sessionId?: string): string | null {
@@ -1029,6 +1203,7 @@ async function fetchLocalAgentHistoryBySessionId(
         turnId: message.turnId,
         failureReason: message.failureReason,
         attachmentRefs: message.attachmentRefs,
+        toolCalls: message.toolCalls,
       }));
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {
@@ -1056,6 +1231,156 @@ function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boole
   );
 }
 
+function firstTrimmedString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function sessionSegment(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || stableSessionHash(value);
+}
+
+function stableSessionHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function buildHermesDefaultSessionId(
+  integrationId: string,
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string {
+  const metadata = record?.metadata ?? {};
+  const profile = firstTrimmedString(
+    health?.profile,
+    metadata.profileName,
+    metadata.profile,
+  );
+  const hermesHome = firstTrimmedString(metadata.hermesHome);
+  const transportSegment = !hermesHome ? buildHermesTransportSessionSegment(record) : null;
+  const segments = [
+    profile ? `profile-${sessionSegment(profile)}` : null,
+    hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
+    transportSegment,
+  ].filter((value): value is string => value != null);
+  return segments.length
+    ? `${integrationId}:dkg-ui:${segments.join(':')}`
+    : `${integrationId}:dkg-ui`;
+}
+
+function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord): string | null {
+  const transport = record?.transport;
+  if (!transport) return null;
+  const parts = [
+    transport.kind,
+    transport.bridgeUrl,
+    transport.gatewayUrl,
+    transport.healthUrl,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
+}
+
+function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
+  if (!memory) return null;
+  if (typeof memory === 'string') return memory;
+  return [
+    memory.provider,
+    memory.mode,
+    memory.status,
+  ].filter(Boolean).join(' / ') || null;
+}
+
+function isDegradedLocalAgentHealth(
+  runtimeStatus: LocalAgentIntegrationRecord['status'] | undefined,
+  health: LocalAgentHealthResponse | null,
+): boolean {
+  if (runtimeStatus === 'degraded') return true;
+  const status = String(health?.status ?? '').toLowerCase();
+  const memory = health?.memory;
+  return status.includes('degraded')
+    || status.includes('conflict')
+    || (typeof memory === 'object' && memory != null && memory.conflict === true);
+}
+
+function isHealthObject(value: unknown): value is Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function healthObjectScore(value: unknown): number {
+  if (!isHealthObject(value)) return -1;
+  let score = value.ok === false ? 100 : 0;
+  if (value.profile) score += 10;
+  if (value.memory) score += 10;
+  if (value.status) score += 10;
+  if (value.error) score += 10;
+  if (value.ok === true) score += 1;
+  return score;
+}
+
+function localAgentHealthTargetDetails(health: LocalAgentHealthResponse): {
+  target?: LocalAgentChannelTarget;
+  details?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
+} {
+  if (health.target === 'bridge') return { target: 'bridge', details: health.bridge };
+  if (health.target === 'gateway') return { target: 'gateway', details: health.gateway };
+
+  const bridgeScore = healthObjectScore(health.bridge);
+  const gatewayScore = healthObjectScore(health.gateway);
+  if (bridgeScore < 0 && gatewayScore < 0) return {};
+  return bridgeScore >= gatewayScore
+    ? { target: 'bridge', details: health.bridge }
+    : { target: 'gateway', details: health.gateway };
+}
+
+function normalizeLocalAgentHealth(health: LocalAgentHealthResponse | null): LocalAgentHealthResponse | null {
+  if (!health) return null;
+  const { target, details: targetDetails } = localAgentHealthTargetDetails(health);
+  if (!isHealthObject(targetDetails)) return health;
+  const targetOk = typeof targetDetails.ok === 'boolean' ? targetDetails.ok : undefined;
+  return {
+    ...targetDetails,
+    ...health,
+    ok: health.ok === false ? false : targetOk ?? health.ok,
+    target: health.target ?? target,
+    profile: health.profile ?? targetDetails.profile,
+    memory: health.memory ?? targetDetails.memory,
+    status: health.status ?? targetDetails.status,
+    error: health.error ?? targetDetails.error,
+  };
+}
+
+function hermesDetail(
+  record: LocalAgentIntegrationRecord,
+  health: LocalAgentHealthResponse | null,
+): string | null {
+  if (String(record.id ?? '').toLowerCase() !== 'hermes') return null;
+  const profile = health?.profile;
+  const profileText = profile ? `profile ${profile}` : 'the configured profile';
+  const memoryLabel = localAgentMemoryLabel(health?.memory);
+  const memory = typeof health?.memory === 'object' && health.memory != null ? health.memory : null;
+  if (memory?.conflict === true || String(health?.status ?? '').toLowerCase().includes('conflict')) {
+    return `${record.name} ${profileText} has a memory provider conflict${memoryLabel ? ` (${memoryLabel})` : ''}.`;
+  }
+  if (health?.ok) {
+    return `${record.name} ${profileText} is connected${memoryLabel ? ` with ${memoryLabel} memory` : ''}.`;
+  }
+  if (health?.status) {
+    return `${record.name} ${profileText} reports ${health.status}${memoryLabel ? ` (${memoryLabel})` : ''}.`;
+  }
+  return null;
+}
+
 async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecord): Promise<LocalAgentIntegration> {
   const id = String(record.id ?? '').toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[id];
@@ -1065,33 +1390,48 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const configured = record.enabled === true;
   const runtimeStatus = record.runtime?.status;
   const health = configured && hasChatBridge && surface?.fetchHealth
-    ? await surface.fetchHealth().catch(() => null)
+    ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
-  const chatReady = health?.ok === true;
+  const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
+  const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
   const persistentChat = configured && hasChatBridge && (
     chatReady
     || runtimeStatus === 'connecting'
+    || runtimeStatus === 'degraded'
     || record.runtime?.ready === true
     || hasLocalAgentTransportHints(record)
   );
+  const hermesRuntimeDetail = hermesDetail(record, health);
+  const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
+  const profile = id === 'hermes'
+    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile)
+    : undefined;
 
   let status: LocalAgentIntegrationStatus;
   let statusLabel: string;
   let detail: string;
-  if (bridgeOnline) {
-    status = 'chat_ready';
-    statusLabel = 'Chat ready';
-    detail = `${record.name} is connected to this node and ready for chat.`;
+  if (persistentChat && degraded) {
+    status = 'degraded';
+    statusLabel = 'Degraded';
+    detail = hermesRuntimeDetail
+      ?? health?.error
+      ?? record.runtime?.lastError
+      ?? `${record.name} is attached to this node, but one capability is degraded.`;
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
     detail = record.runtime?.lastError
       ?? `${record.name} is registered and still starting up.`;
+  } else if (bridgeOnline) {
+    status = 'chat_ready';
+    statusLabel = 'Chat ready';
+    detail = `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';
-    detail = health?.error
+    detail = hermesRuntimeDetail
+      ?? health?.error
       ?? record.runtime?.lastError
       ?? `${record.name} is attached to this node, but it is not responding right now.`;
   } else if (surface) {
@@ -1113,6 +1453,8 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     ? 'Connected'
     : status === 'connecting'
       ? 'Connecting'
+      : status === 'degraded'
+        ? 'Degraded'
       : persistentChat
         ? 'Unavailable'
         : connectSupported
@@ -1124,6 +1466,8 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     name: record.name,
     framework: record.name,
     description: record.description,
+    defaultSessionId,
+    profile,
     chatSupported: hasChatBridge,
     chatAttachments,
     connectSupported,
@@ -1214,6 +1558,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 
 export async function fetchLocalAgentHealth(id: string) {
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
+  if (id === 'hermes') return fetchHermesLocalHealth();
   throw new Error(`${id} local health is not available yet.`);
 }
 
@@ -1235,20 +1580,23 @@ export async function streamLocalAgentChat(
     signal?: AbortSignal;
     onEvent?: (event: LocalAgentStreamEvent) => void;
     sessionId?: string;
+    profile?: string;
     attachments?: LocalAgentChatAttachmentRef[];
     contextEntries?: LocalAgentChatContextEntry[];
     /** UI-selected project context graph for this turn (memory scope). */
     contextGraphId?: string;
   } = {},
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
+    const { sessionId, profile, ...transportOpts } = opts;
     return surface.streamChat(text, {
-      ...opts,
+      ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
-        sessionId: opts.sessionId,
+        sessionId,
+        profile,
       }),
     });
   }

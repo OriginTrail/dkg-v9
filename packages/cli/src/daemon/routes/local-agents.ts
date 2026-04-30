@@ -322,6 +322,7 @@ import {
   hasStoredLocalAgentTransportConfig,
   connectLocalAgentIntegrationFromUi,
   type ReverseLocalAgentSetupDeps,
+  reverseHermesSetupForUi,
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
@@ -450,6 +451,24 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
               ready: false,
               lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
             },
+          });
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, integration });
+        }
+      }
+
+      if (explicitDisconnect && normalizedId === 'hermes') {
+        try {
+          await reverseHermesSetupForUi(config);
+        } catch (err: any) {
+          const integration = updateLocalAgentIntegration(config, id, {
+            enabled: false,
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
+            },
+            metadata: { userDisabled: true },
           });
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, integration });

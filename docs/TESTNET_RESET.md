@@ -1,37 +1,53 @@
 # Testnet reset runbook (V10 RandomSampling + staking consolidation)
 
-This is the operator-facing procedure for resetting the DKG testnet onto the
-V10-only contract layout shipped in PR #357. It covers the four roles
-involved (maintainer, contracts deployer, node operators, smoke verifier)
-and the order they must run in.
+Procedure for resetting the DKG testnet (Base Sepolia) onto the V10-only
+contract layout shipped in PR #357. Covers the three roles involved
+(maintainer, contracts deployer, node operators) and what each one
+actually has to do — most of the operator-facing pain is handled by the
+daemon's built-in auto-update + supervised-restart.
 
 The reset is the simplest cutover path because it lets us drop V8
-`Staking` + `DelegatorsInfo` + the dual-store coupling completely instead
-of running a wholesale state migration. Tradeoff: any node-side state
-that references the old chain (oxigraph triple store, publish journal,
-RandomSampling WAL) must be wiped per node.
+`Staking` + `DelegatorsInfo` + the dual-store coupling completely
+instead of running a wholesale state migration. Tradeoff: any node-side
+state that references the old chain entities (oxigraph triple store,
+publish journal, RandomSampling WAL) needs a one-time wipe per node
+because the chain-side anchors no longer exist.
 
 ## What this resets and what it preserves
 
 | Preserved | Reset |
 |---|---|
-| `Hub` contract (same address) | Every other contract (new addresses) |
-| `Token` contract (same address) | All on-chain stake / TRAC custody (V8 vault wholesale-drained or abandoned) |
-| Operator wallet keystore (same private key per node) | On-chain `identityId` (re-derived clean by `ensureProfile()`) |
+| `Hub` contract address | Every other contract gets a new address |
+| `Token` contract address | All on-chain stake / TRAC custody |
+| Operator wallet keystore (same private key) | On-chain `identityId` for that wallet (re-derived clean by `ensureProfile`) |
 | | All published Knowledge Collections + Context Graphs |
-| | Per-node oxigraph triple store, publish journal, RandomSampling WAL |
+| | Per-node oxigraph store, publish journal, RandomSampling WAL |
 
-A core node operator running through this end-to-end ends up: same wallet,
-fresh on-chain identity (auto-derived), zero KCs, zero stake until it
-auto-stakes via `ensureProfile`, prover idle until first KC is published.
+Net effect for a core operator: same wallet, fresh on-chain identity
+auto-derived on next boot, zero KCs to start, agent auto-stakes 50k TRAC
+into a V10 NFT position via `ensureProfile`, prover idle until first KC
+is published, score non-zero from the first proof period after that.
 
-## Preconditions
+## Daemon auto-update is built-in (operators don't have to upgrade manually)
 
-- PR #357 (`feat/v10-random-sampling-and-staking-consolidation`) merged to
-  `main`.
-- Local Hardhat devnet smoke is green on the merge commit
-  (`./scripts/devnet.sh start 6 && ./scripts/devnet-test-random-sampling.sh`).
-- Multisig signers available for the deployer multisig (Hub owner).
+`packages/cli/src/daemon/auto-update.ts` + `daemon/lifecycle.ts:735-781` +
+`cli.ts:163,210` implement a polling auto-update with supervised restart.
+Defaults are sensible for testnet:
+
+- Poll interval: 30 min (`autoUpdate.checkIntervalMinutes`, configurable)
+- Source:
+  - **Standalone install** (`npm install -g @origintrail-official/dkg`):
+    daemon polls npm for newer versions, runs `npm install -g` on hit.
+  - **Monorepo install** (operator runs from a git checkout): daemon polls
+    the configured `autoUpdate.repo` + branch, does a blue/green slot
+    swap to the new commit.
+- After update: daemon exits with `DAEMON_EXIT_CODE_RESTART`.
+- The CLI parent (`runForegroundSupervisor` / background variant) catches
+  that exit code and respawns the daemon against the new code.
+
+So once the maintainer cuts the release tag in Phase A, every testnet
+node picks it up within `checkIntervalMinutes` and auto-restarts itself
+into the new build. **Operators do nothing for the code update.**
 
 ## Phase A — Maintainer release (one-shot)
 
@@ -42,19 +58,19 @@ auto-stakes via `ensureProfile`, prover idle until first KC is published.
    ```
 2. The `release.yml` workflow builds binaries, creates the GitHub Release,
    and (manually, per `docs/RELEASE.md`) publishes to npm.
-3. Announce the tag + this runbook to operators.
+3. From this point: every operator's daemon will pick up the new release
+   on its next 30-min auto-update poll and self-restart. No operator
+   action needed for the code update.
 
 ## Phase B — Contracts deploy (deployer + multisig)
 
-The deploy helper at `packages/evm-module/utils/helpers.ts` short-circuits
-on contracts whose `deployed: true` flag is set in the network deployments
-JSON. To force a fresh deploy of every contract except `Hub` and `Token`,
-edit the snapshot before running.
+The deploy helper at `packages/evm-module/utils/helpers.ts:148-162`
+short-circuits on contracts whose `deployed: true` flag is set in the
+network deployments JSON. To force a fresh deploy of every contract
+except `Hub` and `Token`, edit the snapshot before running.
 
-1. Open `packages/evm-module/deployments/base_sepolia_v10_contracts.json`
-   (or whichever testnet you're resetting).
-2. For every entry **except** `Hub` and `Token`, set `deployed: false`.
-   A handy one-liner:
+1. Open `packages/evm-module/deployments/base_sepolia_v10_contracts.json`.
+2. For every entry **except** `Hub` and `Token`, set `deployed: false`:
    ```bash
    node -e '
      const fs = require("fs");
@@ -66,41 +82,46 @@ edit the snapshot before running.
      fs.writeFileSync(path, JSON.stringify(j, null, 4));
    '
    ```
-3. Run hardhat-deploy on the target network:
+3. Run hardhat-deploy on Base Sepolia:
    ```bash
-   pnpm --filter @origintrail-official/dkg-evm-module exec hardhat deploy --network base_sepolia
+   pnpm --filter @origintrail-official/dkg-evm-module \
+     exec hardhat deploy --network base_sepolia
    ```
-   The helper queues every redeployed contract for `Hub.setContractAddress`
-   and writes the queue to its own list (see `_writeNewContractsBatch` in
-   `helpers.ts`). For non-development networks it does NOT call
-   `setContractAddress` directly — Hub is multisig-owned and the helper
-   emits a batch JSON for the multisig to consume.
-4. The multisig (Hub owner) executes the queued
-   `Hub.setContractAddress(name, newAddr)` batch. After this point Hub is
-   pointing at the new contracts and consumers re-resolve atomically.
-5. Initial bootstrap (one tx — same multisig):
-   - `DKGStakingConvictionNFT.finalizeMigrationBatch(currentEpoch)` to set
-     the `v10LaunchEpoch` marker on `ConvictionStakingStorage`.
-   - No `Hub.transferTokens(StakingStorage, newCSS)` is needed on a true
-     reset — there is no V8 TRAC to drain (the V8 staking contracts are
-     unregistered, the testnet starts empty).
+   For non-development networks the helper does NOT call
+   `Hub.setContractAddress` directly (Hub is multisig-owned). Instead
+   it queues the new addresses for the multisig to execute as a batch.
+4. Multisig (Hub owner) executes the queued
+   `Hub.setContractAddress(name, newAddr)` batch. After this lands,
+   every node — even ones still running the old release — re-resolves
+   the new addresses on its next contract call (per-call resolution for
+   V10 staking contracts) or after its next restart (boot-cached
+   contracts; auto-update will trigger this within 30 min anyway).
+5. One-shot bootstrap, same multisig:
+   - `DKGStakingConvictionNFT.finalizeMigrationBatch(currentEpoch)` to
+     set the `v10LaunchEpoch` marker on `ConvictionStakingStorage`.
+   - **No** `Hub.transferTokens(StakingStorage, newCSS)` is needed on a
+     true reset — there is no V8 TRAC to drain (the V8 staking
+     contracts are unregistered, the testnet starts empty).
 
-After Phase B, the chain has fresh empty contracts at fresh addresses. No
-KCs, no profiles, no stake. Hub is the only stable entrypoint.
+## Phase C — Per-node state wipe (one-time, each operator)
 
-## Phase C — Per-node reset (each operator)
+This is the only thing testnet operators have to do manually, and only
+because the chain reset orphans state — the auto-update doesn't know
+that the underlying chain has been replaced wholesale.
 
-Each node operator runs this on their own host. The order matters: stop
-the daemon BEFORE wiping state, then upgrade, then start.
+The `<dataDir>` defaults to `~/.dkg` for standalone installs. Override
+with `DKG_HOME` if your operator uses a non-default path.
 
 ```bash
-# 1. Stop the running daemon. If you're using devnet.sh:
-./scripts/devnet.sh stop
-# Or for production-style installs, SIGTERM the daemon process.
+# 1. Stop the running daemon. The CLI's supervisor will not restart it
+#    after a clean stop — only after DAEMON_EXIT_CODE_RESTART (which is
+#    what auto-update uses).
+dkg stop
+# Or SIGTERM the daemon process; the supervisor will exit cleanly.
 
-# 2. Wipe per-node chain-state-derived files. KEEP the keystore so the
-#    node retains its wallet (ensureProfile re-derives an identityId on
-#    the new chain cleanly).
+# 2. Wipe per-node chain-state-derived files.
+#    KEEP the keystore so the wallet stays the same and ensureProfile
+#    re-derives a fresh identityId on the new chain cleanly.
 NODE_DATA_DIR="${DKG_HOME:-$HOME/.dkg}"
 rm -rf \
   "$NODE_DATA_DIR/store.nq" \
@@ -108,15 +129,7 @@ rm -rf \
   "$NODE_DATA_DIR/publish-journal."* \
   "$NODE_DATA_DIR/random-sampling.wal"
 
-# 3. Upgrade to the v10.x.y release.
-#    From git:
-git fetch origin --tags
-git checkout v10.x.y
-pnpm install --frozen-lockfile
-pnpm run build
-#    Or via npm install -g if running off the published CLI binary.
-
-# 4. Start the daemon. On first start it will:
+# 3. Start the daemon. It will:
 #      - load the existing keystore (same wallet)
 #      - call hub.getContractAddress(...) for each new contract address
 #      - find no on-chain identity for this wallet on the new chain
@@ -125,24 +138,21 @@ pnpm run build
 #        with lockTier=1 (1-month tier, cheapest non-zero multiplier)
 #      - register the StorageACK handler (cores only)
 #      - mount the RandomSampling prover bind (cores only)
-./scripts/devnet.sh start 6
-# Or systemctl/PM2/etc. for production-style installs.
-
-# 5. Confirm the prover bound and the auto-stake landed.
-curl -sS -H "Authorization: Bearer <token>" \
-  "http://127.0.0.1:9201/api/random-sampling/status"
-# Expected shape:
-#   {"enabled":true,"role":"core","identityId":"<N>","loop":{...}}
+#      - resume the auto-update polling loop (no further manual action
+#        needed after this — future releases land via auto-update again)
+dkg start
 ```
 
-**Things that go wrong if you skip the wipe step:**
-- Old `store.nq` references CG IDs and KC merkle roots from the old chain;
-  the agent will gossip them to peers and any cross-node validation will
-  fail (the on-chain anchors don't exist anymore).
-- Old `publish-journal.*` may have idempotency keys that collide with
+**Why the wipe is needed even with auto-update:**
+- Old `store.nq` references CG IDs and KC merkle roots that don't exist
+  on the new chain. The agent will gossip them to peers; peers will
+  attempt on-chain validation; validation fails; entries get dropped
+  one by one. Faster + cleaner to wipe upfront than to rely on
+  self-healing.
+- Old `publish-journal.*` may carry idempotency keys that collide with
   fresh publish attempts.
 - Old `random-sampling.wal` records challenges (epoch + period start
-  block) from the old chain; the prover may attempt to resubmit a "stuck"
+  block) from the old chain; the prover may try to resubmit a "stuck"
   challenge that doesn't exist on the new chain.
 
 The keystore is intentionally preserved so the wallet identity stays
@@ -153,19 +163,20 @@ intervention.
 ## Phase D — Smoke verification (any operator with publish authority)
 
 After enough cores have come back online (≥ 2 for a meaningful
-RandomSampling smoke), run the same E2E that gates the devnet smoke:
+RandomSampling smoke), run the same E2E that gates the local devnet
+smoke. This is normally run from a developer machine pointed at the
+testnet's RPC + a node's API — NOT something each operator runs.
 
 ```bash
-# Run from the same checkout used to redeploy contracts so ABIs match.
-RS_TIMEOUT=120 \
+# From a checkout matching the deployed release tag:
+HARDHAT_PORT=<base_sepolia_rpc_port_proxy> \
+  RS_TIMEOUT=180 \
   ./scripts/devnet-test-random-sampling.sh
 ```
 
 Expected output:
 ```
 [rs-test] === Random Sampling devnet smoke: PASS ===
-[rs-test]   prover node:          <N>
-[rs-test]   prover identityId:    <id>
 [rs-test]   on-chain solved:      true
 [rs-test]   on-chain score:       <non-zero>
 ```
@@ -173,25 +184,37 @@ Expected output:
 A non-zero score from `RandomSamplingStorage.getNodeEpochProofPeriodScore`
 is the canonical "the consolidation works" signal. A zero score with
 `solved=true` would point at the same V8/V10 stake-vault split we
-chased on devnet — reach for the ConvictionStakingStorage state +
-StakingV10 deploy address before anything else.
+chased on devnet — reach for `ConvictionStakingStorage.getNodeStakeV10`
+and the `StakingV10` deploy address before anything else.
 
 ## Rollback
 
-A reset is destructive — the only rollback path is "redeploy the V8
-contracts again", which is not really a rollback. The conservative
-mitigation is to run Phase B against a stage testnet first if there's
-any doubt; the smoke test above pins the V10 staking + RS pipeline in
-under a minute.
+A reset is destructive — there's no real rollback path; "redeploy V8"
+isn't really one. The conservative mitigation is to walk through Phase B
+on a stage testnet first if there's any doubt; the smoke pins the V10
+staking + RS pipeline in under a minute.
+
+## Followup — make future resets zero-touch for operators
+
+Right now Phase C is the one operator-facing step. To make future chain
+resets fully zero-touch we'd need a "chain-reset migration step" baked
+into the network config (e.g. a `network/base_sepolia.json` field like
+`migration: { wipeChainCacheBeforeEpoch: <N> }`) and a hook in the
+agent's startup that detects the marker and runs the wipe automatically
+on first boot after the chain reset. Tracked as a separate followup —
+out of scope for PR #357.
 
 ## Cross-references
 
-- `scripts/devnet.sh` — the local Hardhat devnet (mirrors Phases B + C
-  for one-host smoke tests).
-- `scripts/devnet-test-random-sampling.sh` — the smoke test invoked in
-  Phase D.
+- `packages/cli/src/daemon/auto-update.ts` — the polling auto-updater.
+- `packages/cli/src/daemon/lifecycle.ts:735-781` — the
+  `setInterval(runCheck, checkIntervalMs)` loop.
+- `packages/cli/src/cli.ts:163,210` — the `DAEMON_EXIT_CODE_RESTART`
+  catch in the supervisor.
 - `packages/evm-module/utils/helpers.ts` — the deploy helper +
-  short-circuit logic.
+  short-circuit logic used in Phase B.
 - `packages/chain/src/evm-adapter.ts:ensureProfile` — the auto-stake
-  path each node runs at boot.
-- `docs/RELEASE.md` — the npm/GitHub release process used in Phase A.
+  path each node runs at boot in Phase C.
+- `scripts/devnet-test-random-sampling.sh` — the smoke test invoked
+  in Phase D (works against any RPC + auth token, not devnet-only).
+- `docs/RELEASE.md` — the npm + GitHub release process used in Phase A.

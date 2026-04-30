@@ -1732,7 +1732,7 @@ export class EVMChainAdapter implements ChainAdapter {
   // Staking Conviction
   // =====================================================================
 
-  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+  async stakeWithLock(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
     await this.init();
 
     let nft: Contract;
@@ -1741,16 +1741,24 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       throw new Error('DKGStakingConvictionNFT contract not deployed.');
     }
-    const nftAddr = await nft.getAddress();
 
+    // V10 consolidation (v4.0.0): TRAC is pulled by `StakingV10`, not by
+    // the NFT — the NFT is only the entry point and never custodies TRAC.
+    // Approving the NFT here would still leave the inner `stakingV10.stake`
+    // call short on allowance and revert. Mirror the pattern used in
+    // `ensureProfile` / `scripts/devnet.sh`.
     if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddr);
+      const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+      if (stakingV10Addr === ethers.ZeroAddress) {
+        throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+      }
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
       if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(nftAddr, ethers.MaxUint256)).wait();
+        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
       }
     }
 
-    const tx = await nft.stake(identityId, amount, lockEpochs);
+    const tx = await nft.createConviction(identityId, amount, lockTier);
     const receipt = await tx.wait();
 
     return {

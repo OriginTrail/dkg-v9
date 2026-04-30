@@ -459,7 +459,16 @@ export interface ChainAdapter {
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
 
   // Staking Conviction
-  stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
+  /**
+   * Mint a V10 NFT-backed conviction stake position on `identityId` with
+   * `amount` TRAC at `lockTier` (tier index, NOT epoch count — lock duration
+   * is fixed per tier on `ConvictionStakingStorage`). Each call mints a new
+   * position; there is no per-delegator-address position to "extend" under
+   * V10 (that V8 semantic is gone — `getDelegatorConvictionMultiplier`
+   * accordingly returns the address-keyed shim of 1x). Use the V10
+   * tokenId-keyed `getPosition` for per-position multipliers.
+   */
+  stakeWithLock?(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult>;
   getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
 
   /**

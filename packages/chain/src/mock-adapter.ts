@@ -549,13 +549,13 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- Staking Conviction ---
 
-  private delegatorLocks = new Map<string, { lockEpochs: number; startEpoch: number }>();
+  private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
 
-  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+  async stakeWithLock(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
     const key = `${identityId}-${this.signerAddress}`;
     const existing = this.delegatorLocks.get(key);
-    if (!existing || lockEpochs > existing.lockEpochs) {
-      this.delegatorLocks.set(key, { lockEpochs, startEpoch: 0 });
+    if (!existing || lockTier > existing.lockTier) {
+      this.delegatorLocks.set(key, { lockTier, startEpoch: 0 });
     }
     return this.txResult(true);
   }
@@ -563,8 +563,8 @@ export class MockChainAdapter implements ChainAdapter {
   async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
     const key = `${identityId}-${delegator}`;
     const lock = this.delegatorLocks.get(key);
-    const lockEpochs = lock?.lockEpochs ?? 1;
-    return { multiplier: computeConvictionMultiplier(lockEpochs) };
+    const lockTier = lock?.lockTier ?? 1;
+    return { multiplier: computeConvictionMultiplier(lockTier) };
   }
 
   // --- On-Chain Context Graphs (ContextGraphs contract) ---

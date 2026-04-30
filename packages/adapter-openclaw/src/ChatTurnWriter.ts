@@ -258,6 +258,7 @@ export class ChatTurnWriter {
     // concurrent persists keep their advances; nothing got wiped.
     const mergedWm = new Map(this.cachedWatermarks);
     const mergedBc = new Map(this.w4bSessionCounts);
+    const baseMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
     const mergedMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
     try {
       if (fs.existsSync(newWatermarkFilePath)) {
@@ -320,8 +321,10 @@ export class ChatTurnWriter {
       // T45 — Commit by union-merging back into live. If a concurrent
       // persist advanced live's watermark during the write window,
       // its increment is preserved (max takes the higher of merged-
-      // from-destination and post-flush-live). If no concurrent
-      // persist arrived, live ends up exactly equal to mergedWm/Bc.
+      // from-destination and post-flush-live). External markers are
+      // multiplicities, so only add the destination delta beyond the
+      // baseline snapshot; adding the whole merged snapshot would
+      // double-count markers that were already live before migration.
       for (const [key, val] of mergedWm) {
         this.cachedWatermarks.set(key, Math.max(this.cachedWatermarks.get(key) ?? -1, val));
       }
@@ -331,7 +334,9 @@ export class ChatTurnWriter {
       for (const [key, markers] of mergedMarkers) {
         const live = this.externalTurnMarkers.get(key) ?? new Map<string, number>();
         for (const [marker, count] of markers) {
-          live.set(marker, Math.max(live.get(marker) ?? 0, count));
+          const baseCount = baseMarkers.get(key)?.get(marker) ?? 0;
+          const delta = count - baseCount;
+          if (delta > 0) live.set(marker, (live.get(marker) ?? 0) + delta);
         }
         if (live.size > 0) this.externalTurnMarkers.set(key, live);
       }
@@ -681,10 +686,8 @@ export class ChatTurnWriter {
     assistant: string;
   }): Promise<void> {
     const externalCursorKey = this.externalCursorKeyFromSessionKey(opts.sessionKey);
-    const assistant = this.stripRecalledMemory(opts.assistant);
     const markers = [
       this.externalTurnMarkerId(opts.turnId),
-      this.externalTurnContentMarkerKey(opts.user, assistant),
     ].filter(Boolean);
     if (!externalCursorKey || markers.length === 0) return;
     for (const marker of markers) {
@@ -997,6 +1000,7 @@ export class ChatTurnWriter {
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
               if (!this.commitWatermarkStateSync(sessionId)) {
+                this.scheduleWatermarkFlush(sessionId, { retryOnFailure: true, attempts: 3 });
                 throw new Error("Failed to write W4b chat-turn watermark");
               }
             }
@@ -1623,7 +1627,8 @@ export class ChatTurnWriter {
 
     const contentMarker = this.externalTurnContentMarkerKey(user, assistant);
     if (
-      externalDirect
+      this.allowsExternalContentFallback(sessionKeyCursor)
+      && externalDirect
       && turnIds.length === 0
       && contentMarker
       && contentMatchCounts.get(contentMarker) === 1
@@ -1634,13 +1639,18 @@ export class ChatTurnWriter {
     }
 
     if (
-      externalDirect
+      this.allowsExternalContentFallback(sessionKeyCursor)
+      && externalDirect
       && contentMarker
       && (turnIds.length > 0 || (contentMatchCounts.get(contentMarker) ?? 0) > 1)
     ) {
       consumed.push(...this.retireExternalTurnMarker(sessionKeyCursor, contentMarker));
     }
     return { skip: false, markers: consumed };
+  }
+
+  private allowsExternalContentFallback(sessionKeyCursor: string): boolean {
+    return !sessionKeyCursor.startsWith("openclaw:transcript:");
   }
 
   private consumeExternalTurnMarker(sessionKeyCursor: string, marker: string): boolean {
@@ -1696,7 +1706,7 @@ export class ChatTurnWriter {
     const bucket = target.get(key) ?? new Map<string, number>();
     for (const [marker, count] of Object.entries(markers)) {
       if (typeof count === "number" && count > 0) {
-        bucket.set(marker, Math.max(bucket.get(marker) ?? 0, count));
+        bucket.set(marker, (bucket.get(marker) ?? 0) + count);
       }
     }
     if (bucket.size > 0) target.set(key, bucket);
@@ -2055,15 +2065,32 @@ export class ChatTurnWriter {
    * T17 — Schedule a debounced watermark-file flush WITHOUT changing
    * the pending watermark value. Used by W4b's `w4bSessionCounts`
    * increment so the new count lands on disk via the same file write
-   * that watermark updates use. If a flush is already scheduled, no-op
-   * — it will pick up the new w4bCount when it fires.
+   * that watermark updates use. Retry flushes may take over an existing
+   * non-retry debounce timer while preserving that timer's pending
+   * watermark index.
    */
-  private scheduleWatermarkFlush(sessionId: string): void {
-    if (this.debounceTimers.has(sessionId)) return;
-    const currentWatermark = this.cachedWatermarks.get(sessionId) ?? -1;
-    const timer = setTimeout(() => {
-      this.writeWatermarkFile();
+  private scheduleWatermarkFlush(
+    sessionId: string,
+    opts: { retryOnFailure?: boolean; attempts?: number; pendingIndex?: number } = {},
+  ): void {
+    const existing = this.debounceTimers.get(sessionId);
+    if (existing) {
+      if (!opts.retryOnFailure) return;
+      clearTimeout(existing.timer);
       this.debounceTimers.delete(sessionId);
+      opts = { ...opts, pendingIndex: existing.pendingIndex };
+    }
+    const currentWatermark = opts.pendingIndex ?? this.cachedWatermarks.get(sessionId) ?? -1;
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(sessionId);
+      this.cachedWatermarks.set(sessionId, currentWatermark);
+      const wrote = this.writeWatermarkFile();
+      if (!wrote && opts.retryOnFailure && (opts.attempts ?? 1) > 1) {
+        this.scheduleWatermarkFlush(sessionId, {
+          retryOnFailure: true,
+          attempts: (opts.attempts ?? 1) - 1,
+        });
+      }
     }, 50);
     this.debounceTimers.set(sessionId, { timer, pendingIndex: currentWatermark });
   }

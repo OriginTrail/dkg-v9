@@ -475,6 +475,55 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T96 - W4b durable write failure retries state flush after daemon success", async () => {
+    const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile")
+      .mockImplementationOnce(() => false);
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "retry q", messageId: "in-retry" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "retry a", success: true, messageId: "out-retry" },
+    } as any);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+
+    expect(writeSpy).toHaveBeenCalledTimes(2);
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((restarted as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBe(1);
+    writeSpy.mockRestore();
+    restarted.flushSync();
+  });
+
+  it("T98 - W4b durable retry upgrades an existing normal debounce flush", async () => {
+    const sessionId = "openclaw:tg:::sk";
+    (writer as any).saveWatermark(sessionId, 0);
+    const commitSpy = vi.spyOn(writer as any, "commitWatermarkStateSync")
+      .mockReturnValue(false);
+    const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile")
+      .mockImplementationOnce(() => false);
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "pending retry q", messageId: "in-retry-pending" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "pending retry a", success: true, messageId: "out-retry-pending" },
+    } as any);
+    await new Promise((resolve) => setTimeout(resolve, 130));
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(writeSpy).toHaveBeenCalledTimes(2);
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(0);
+    expect((restarted as any).w4bSessionCounts.get(sessionId)).toBe(1);
+    commitSpy.mockRestore();
+    writeSpy.mockRestore();
+    restarted.flushSync();
+  });
+
   it("T81 — before_reset can use event payload identity and clears stale W4b state", async () => {
     writer.onMessageReceived({
       sessionKey: "sk",
@@ -581,7 +630,7 @@ describe("ChatTurnWriter", () => {
 
     const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
     const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
-    expect(Array.from(bucket?.values() ?? [])).toEqual([1, 1]);
+    expect(Array.from(bucket?.values() ?? [])).toEqual([1]);
     writeSpy.mockRestore();
   });
 
@@ -650,13 +699,17 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T85 — external markers fall back to unique content only with direct-channel metadata", async () => {
+  it("T85 - session-key external markers do not content-fallback without an exact ID", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-unique-content",
       user: "unique ui question",
       assistant: "unique ui answer",
     });
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const contentMarker = (writer as any).externalTurnContentMarkerKey("unique ui question", "unique ui answer");
+    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
+    (writer as any).writeWatermarkFile();
 
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
@@ -671,8 +724,11 @@ describe("ChatTurnWriter", () => {
     }, { channelId: "telegram", sessionKey: "agent:main:main" });
     await flushMicrotasks();
 
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
-    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram question");
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => call[1])).toEqual([
+      "unique ui question",
+      "telegram question",
+    ]);
     restarted.flushSync();
   });
 
@@ -707,6 +763,10 @@ describe("ChatTurnWriter", () => {
       user: "same direct text",
       assistant: "same direct answer",
     });
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const contentMarker = (writer as any).externalTurnContentMarkerKey("same direct text", "same direct answer");
+    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
+    (writer as any).writeWatermarkFile();
 
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
@@ -731,6 +791,10 @@ describe("ChatTurnWriter", () => {
       user: "ambiguous direct text",
       assistant: "ambiguous direct answer",
     });
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const contentMarker = (writer as any).externalTurnContentMarkerKey("ambiguous direct text", "ambiguous direct answer");
+    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
+    (writer as any).writeWatermarkFile();
 
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
@@ -753,13 +817,17 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T93 — blocked content fallback retires the stale content marker for later windows", async () => {
+  it("T93 - session-key content markers cannot skip later ID-less windows", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-retired-content",
       user: "retired direct text",
       assistant: "retired direct answer",
     });
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const contentMarker = (writer as any).externalTurnContentMarkerKey("retired direct text", "retired direct answer");
+    (writer as any).restoreExternalTurnMarker(externalCursorKey, contentMarker);
+    (writer as any).writeWatermarkFile();
 
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     restarted.onAgentEnd({
@@ -907,6 +975,32 @@ describe("ChatTurnWriter", () => {
 
       expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
       restarted.flushSync();
+    } finally {
+      fs.rmSync(destinationStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("T97 - setStateDir adds external marker multiplicities", async () => {
+    const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-counts-"));
+    try {
+      const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+      const marker = (writer as any).externalTurnMarkerId("node-ui-corr-counted");
+      (writer as any).restoreExternalTurnMarker(externalCursorKey, marker);
+      (writer as any).writeWatermarkFile();
+
+      const destination = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir: destinationStateDir });
+      (destination as any).restoreExternalTurnMarker(externalCursorKey, marker);
+      (destination as any).writeWatermarkFile();
+
+      await writer.setStateDir(destinationStateDir);
+
+      const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
+      expect(bucket?.get(marker)).toBe(2);
+      const persisted = JSON.parse(fs.readFileSync(
+        path.join(destinationStateDir, "dkg-adapter", "chat-turn-watermarks.json"),
+        "utf-8",
+      ));
+      expect(persisted[externalCursorKey].m[marker]).toBe(2);
     } finally {
       fs.rmSync(destinationStateDir, { recursive: true, force: true });
     }

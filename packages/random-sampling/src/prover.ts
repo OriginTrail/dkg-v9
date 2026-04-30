@@ -134,6 +134,30 @@ export class RandomSamplingProver {
     await this.wal.close();
   }
 
+  /**
+   * Detect "the cached challenge says solved, but its proof period has
+   * already elapsed in wall-clock terms even though no on-chain tx has
+   * advanced the storage cursor yet". Returns true when we should force
+   * a `createChallenge` to make the chain rotate.
+   *
+   * Robust to chain adapters that don't expose `getBlockNumber` (mock /
+   * test): falls back to "not stale" so the existing short-circuit
+   * behaviour is preserved.
+   */
+  private async isCachedSolvedStale(existing: NodeChallenge): Promise<boolean> {
+    if (!this.chain.getBlockNumber) return false;
+    if (existing.proofingPeriodDurationInBlocks <= 0n) return false;
+    let currentBlock: number;
+    try {
+      currentBlock = await this.chain.getBlockNumber();
+    } catch {
+      return false;
+    }
+    const periodEndBlock =
+      existing.activeProofPeriodStartBlock + existing.proofingPeriodDurationInBlocks;
+    return BigInt(currentBlock) >= periodEndBlock;
+  }
+
   private async tickImpl(): Promise<TickOutcome> {
     if (
       !this.chain.getActiveProofPeriodStatus ||
@@ -173,12 +197,37 @@ export class RandomSamplingProver {
       existing !== null
       && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
 
+    // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
+    // strands the node when the read-only `getActiveProofPeriodStatus` view is
+    // stale (no tx has called `updateAndGetActiveProofPeriodStartBlock` since
+    // the wall-clock boundary crossed). Detect this by comparing actual
+    // chain block height against the cached period's expiry. If we're past
+    // the on-chain boundary, force `createChallenge` so the contract rotates
+    // the period and we get a fresh challenge. Otherwise, the cached solved
+    // result is genuinely current and we can safely short-circuit.
+    //
+    // Why not always call createChallenge when solved? The on-chain
+    // `createChallenge` REVERTS with "already been solved" when the period
+    // hasn't rotated yet (RandomSampling.sol L191-200). So a naive
+    // always-call would burn a tick + emit confusing reverts on every
+    // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
-      this.log.info('rs.tick.already-solved', {
-        epoch: existing.epoch.toString(),
-        periodStart: existing.activeProofPeriodStartBlock.toString(),
+      const isStale = await this.isCachedSolvedStale(existing);
+      if (!isStale) {
+        this.log.info('rs.tick.already-solved', {
+          epoch: existing.epoch.toString(),
+          periodStart: existing.activeProofPeriodStartBlock.toString(),
+        });
+        return { kind: 'already-solved' };
+      }
+      // Fall through to createChallenge — period actually rotated on-chain
+      // even though the status view hasn't caught up. The chain's
+      // updateAndGetActiveProofPeriodStartBlock advances the storage slot
+      // inside createChallenge and we get a fresh challenge.
+      this.log.info('rs.tick.forcing-rotation', {
+        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
       });
-      return { kind: 'already-solved' };
     }
 
     const periodKey: PeriodKey = {
@@ -189,7 +238,7 @@ export class RandomSamplingProver {
 
     let challenge: NodeChallenge;
     let cgId: bigint;
-    if (existingIsCurrent) {
+    if (existingIsCurrent && !existing.solved) {
       challenge = existing;
       cgId = await this.chain.getKCContextGraphId(challenge.knowledgeCollectionId);
     } else {

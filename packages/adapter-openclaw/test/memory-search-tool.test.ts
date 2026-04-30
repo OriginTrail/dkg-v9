@@ -120,6 +120,92 @@ describe('memory_search tool', () => {
     expect(text).toMatch(/dkgHome/);
   });
 
+  it('T76 — probes ensureNodePeerId on confirmed-no-keystore nodes when nodePeerId is still undefined (mirrors dkg_query WM branch)', async () => {
+    // T76 — Codex flagged: pre-fix, `handleMemorySearch` returned the
+    // "agent eth address not resolved" error whenever the resolver
+    // surfaced no address, even when `localKeystoreCheckedAndAbsent`
+    // was true and the only remaining gap was a missed `/api/status`
+    // peerId probe. The dkg_query WM branch already triggers
+    // `ensureNodePeerId()` in that case; memory_search did not, so
+    // it stayed falsely unavailable until the deferred probe retry
+    // fired (which can be many turns later).
+    //
+    // After the fix, memory_search awaits both `ensureNodeAgentAddress`
+    // and (when keystore is confirmed absent) `ensureNodePeerId`
+    // before resolving the default address.
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+
+    // Set up the no-keystore-but-peerId-not-yet-probed state.
+    (plugin as any).nodeAgentAddress = undefined;
+    (plugin as any).nodePeerId = undefined;
+    (plugin as any).localKeystoreCheckedAndAbsent = true;
+
+    // Spy on the probe methods. Make `ensureNodePeerId` resolve the
+    // peerId, mirroring what a recovered /api/status call would do.
+    const ensureAgentSpy = vi.fn().mockResolvedValue(undefined);
+    const ensurePeerIdSpy = vi.fn(async () => {
+      (plugin as any).nodePeerId = '12D3KooWRecoveredPeer';
+    });
+    (plugin as any).ensureNodeAgentAddress = ensureAgentSpy;
+    (plugin as any).ensureNodePeerId = ensurePeerIdSpy;
+
+    const result = await tool.execute('t-no-keystore-recover', { query: 'tatooine' });
+
+    // Both probes were awaited.
+    // Called at least once — exact count varies because the resolver's
+    // `getSession` and `getDefaultAgentAddress` also fire it
+    // fire-and-forget. All calls are idempotent (debounced via
+    // `agentAddressProbeInFlight`).
+    expect(ensureAgentSpy).toHaveBeenCalled();
+    expect(ensurePeerIdSpy).toHaveBeenCalled();
+
+    // After the peerId probe lands, the resolver returns the recovered
+    // peerId via `resolveDefaultAgentAddress`, so the tool proceeds with
+    // the search instead of returning the "not ready" error.
+    const text = (result as any).content?.[0]?.text ?? '';
+    expect(text).not.toMatch(/not ready/i);
+    expect((result as any).details?.error).toBeFalsy();
+  });
+
+  it('T76 — does NOT probe ensureNodePeerId when localKeystoreCheckedAndAbsent is false (remote-daemon path)', async () => {
+    // Mirrors dkg_query's T60 guarantee: the peerId fallback is gated
+    // on `localKeystoreCheckedAndAbsent` so remote-daemon deployments
+    // (where probeNodeAgentAddressOnce intentionally skips the keystore
+    // read) don't silently route WM scope to the gateway's local peerId.
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+
+    (plugin as any).nodeAgentAddress = undefined;
+    (plugin as any).nodePeerId = undefined;
+    (plugin as any).localKeystoreCheckedAndAbsent = false; // remote-daemon: probe skipped
+
+    const ensureAgentSpy = vi.fn().mockResolvedValue(undefined);
+    const ensurePeerIdSpy = vi.fn().mockResolvedValue(undefined);
+    (plugin as any).ensureNodeAgentAddress = ensureAgentSpy;
+    (plugin as any).ensureNodePeerId = ensurePeerIdSpy;
+
+    const result = await tool.execute('t-remote-daemon', { query: 'tatooine' });
+
+    // ensureNodeAgentAddress fires (always best-effort); ensureNodePeerId
+    // does NOT — the gate prevents leaking the gateway's local peerId
+    // into a remote daemon's scope.
+    // Called at least once — exact count varies because the resolver's
+    // `getSession` and `getDefaultAgentAddress` also fire it
+    // fire-and-forget. All calls are idempotent (debounced via
+    // `agentAddressProbeInFlight`).
+    expect(ensureAgentSpy).toHaveBeenCalled();
+    expect(ensurePeerIdSpy).not.toHaveBeenCalled();
+
+    // Without an eth address AND without the keystore-absent flag, the
+    // tool surfaces the "not ready" error so operators see the recovery
+    // knobs (DKG_AGENT_ADDRESS, dkgHome) — NOT a silently-empty result.
+    const text = (result as any).content?.[0]?.text ?? '';
+    expect(text).toMatch(/not ready/i);
+  });
+
   it('re-asserts memory-slot capability before running the search (R7.5 mode-independent anchor)', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     const client = (plugin as any).client;

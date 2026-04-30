@@ -2824,6 +2824,23 @@ export class DkgNodePlugin {
     // eth-shaped agent address (read from agent-keystore.json); if
     // the resolver hasn't probed it yet, we cannot run the fan-out
     // at all.
+    //
+    // T76 — Mirror `dkg_query`'s WM-branch fallback: probe both eth
+    // address AND (when `localKeystoreCheckedAndAbsent` confirmed there's
+    // no keystore) peerId before resolving the default. Without this,
+    // confirmed-no-keystore nodes whose register-time `/api/status` probe
+    // missed startup or failed transiently report `memory_search` as
+    // "not ready" and stay falsely unavailable until the deferred
+    // resolver retry fires. The resolver's fire-and-forget
+    // `ensureNodeAgentAddress` doesn't await, and it never triggers
+    // `ensureNodePeerId` for the keystore-absent case — only the
+    // explicit await chain here does.
+    if (this.nodeAgentAddress === undefined) {
+      await this.ensureNodeAgentAddress().catch(() => {});
+    }
+    if (this.localKeystoreCheckedAndAbsent && this.nodePeerId === undefined) {
+      await this.ensureNodePeerId().catch(() => {});
+    }
     const session = this.memorySessionResolver.getSession(undefined);
     const agentAddress = session?.agentAddress ?? this.memorySessionResolver.getDefaultAgentAddress();
     if (!agentAddress) {

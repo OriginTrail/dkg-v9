@@ -4341,6 +4341,7 @@ describe('DkgNodePlugin', () => {
 
       const channelPlugin = (plugin as any).channelPlugin as any;
       expect(channelPlugin).toBeDefined();
+      expect(channelPlugin.chatTurnWriter).toBe((plugin as any).chatTurnWriter);
 
       // Simulate a dispatch scope by running the memorySessionResolver
       // lookup inside `channelPlugin.dispatchContext.run`, the same

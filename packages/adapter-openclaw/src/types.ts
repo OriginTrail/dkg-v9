@@ -136,6 +136,8 @@ export interface ChannelOutboundReply {
   text: string;
   /** Session-internal turn ID. */
   turnId?: string;
+  /** OpenClaw transcript session key resolved for this channel dispatch. */
+  sessionKey?: string;
   /** Tool calls made during this turn. */
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }

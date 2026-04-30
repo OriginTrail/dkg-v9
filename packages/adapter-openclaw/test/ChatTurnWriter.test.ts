@@ -447,6 +447,416 @@ describe("ChatTurnWriter", () => {
     newWriter.flushSync();
   });
 
+  it("T80 — W4b success durably writes the skip floor before the debounce window", async () => {
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u1", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "a1", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((restarted as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBe(1);
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    restarted.flushSync();
+  });
+
+  it("T81 — before_reset can use event payload identity and clears stale W4b state", async () => {
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "before reset", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "old reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect((writer as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBe(1);
+
+    mockClient.storeChatTurn.mockClear();
+    await writer.onBeforeReset({ channelId: "tg", sessionKey: "sk" });
+    expect((writer as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBeUndefined();
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "after reset" },
+        { role: "assistant", content: "new reply" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("after reset");
+  });
+
+  it("T82 — durable external direct-channel marker prevents restart backfill by W4a", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-1",
+      user: "node ui question",
+      assistant: "node ui answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "node ui question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-1" } },
+        { role: "assistant", content: "node ui answer" },
+        { role: "user", content: "telegram question" },
+        { role: "assistant", content: "telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram question");
+    restarted.flushSync();
+  });
+
+  it("T83 — external marker write failure rolls back counts before retry", async () => {
+    const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    await expect(writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-rollback",
+      user: "rollback question",
+      assistant: "rollback answer",
+    })).rejects.toThrow("Failed to write external chat-turn marker");
+
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-rollback",
+      user: "rollback question",
+      assistant: "rollback answer",
+    });
+
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
+    expect(Array.from(bucket?.values() ?? [])).toEqual([1, 1]);
+    writeSpy.mockRestore();
+  });
+
+  it("T84 — external markers are correlation-bound, not content-only", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-2",
+      user: "same question",
+      assistant: "same answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "same question" },
+        { role: "assistant", content: "same answer" },
+        { role: "user", content: "same question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-2" } },
+        { role: "assistant", content: "same answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("same question");
+    const expectedFirstPairTurnId = (restarted as any).deterministicTurnId(
+      (restarted as any).deriveSessionId({ channelId: "telegram", sessionKey: "agent:main:main" }),
+      "same question",
+      "same answer",
+      0,
+    );
+    const skippedSecondPairTurnId = (restarted as any).deterministicTurnId(
+      (restarted as any).deriveSessionId({ channelId: "telegram", sessionKey: "agent:main:main" }),
+      "same question",
+      "same answer",
+      1,
+    );
+    expect(mockClient.storeChatTurn.mock.calls[0][3]).toEqual({ turnId: expectedFirstPairTurnId });
+    expect(mockClient.storeChatTurn.mock.calls[0][3]).not.toEqual({ turnId: skippedSecondPairTurnId });
+    restarted.flushSync();
+  });
+
+  it("T85 — external markers fall back to unique content only with direct-channel metadata", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-unique-content",
+      user: "unique ui question",
+      assistant: "unique ui answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "unique ui question", context: { Provider: "dkg-ui" } },
+        { role: "assistant", content: "unique ui answer" },
+        { role: "user", content: "telegram question" },
+        { role: "assistant", content: "telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram question");
+    restarted.flushSync();
+  });
+
+  it("T86 — content fallback does not consume a unique non-direct channel pair", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-stale-content",
+      user: "shared text",
+      assistant: "shared answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "shared text" },
+        { role: "assistant", content: "shared answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("shared text");
+    restarted.flushSync();
+  });
+
+  it("T91 — content fallback does not consume a direct pair with a mismatched explicit ID", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-stale-id",
+      user: "same direct text",
+      assistant: "same direct answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "same direct text", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-new-id" } },
+        { role: "assistant", content: "same direct answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("same direct text");
+    restarted.flushSync();
+  });
+
+  it("T92 — content fallback is ambiguous when any same-content direct pair has an explicit ID", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-ambiguous-content",
+      user: "ambiguous direct text",
+      assistant: "ambiguous direct answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "ambiguous direct text", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-new-id" } },
+        { role: "assistant", content: "ambiguous direct answer" },
+        { role: "user", content: "ambiguous direct text", context: { Provider: "dkg-ui" } },
+        { role: "assistant", content: "ambiguous direct answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => call[1])).toEqual([
+      "ambiguous direct text",
+      "ambiguous direct text",
+    ]);
+    restarted.flushSync();
+  });
+
+  it("T93 — blocked content fallback retires the stale content marker for later windows", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-retired-content",
+      user: "retired direct text",
+      assistant: "retired direct answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "retired direct text", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-new-id" } },
+        { role: "assistant", content: "retired direct answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "retired direct text", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-new-id" } },
+        { role: "assistant", content: "retired direct answer" },
+        { role: "user", content: "retired direct text", context: { Provider: "dkg-ui" } },
+        { role: "assistant", content: "retired direct answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("retired direct text");
+    restarted.flushSync();
+  });
+
+  it("T87 — ID marker does not skip a mixed direct and non-direct joined user side", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-mixed",
+      user: "ui part",
+      assistant: "combined answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "ui part", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-mixed" } },
+        { role: "user", content: "telegram part" },
+        { role: "assistant", content: "combined answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("ui part\ntelegram part");
+    restarted.flushSync();
+  });
+
+  it("T88 — one direct marker does not skip multiple collapsed direct users", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-direct-collapse",
+      user: "first ui",
+      assistant: "shared ui answer",
+    });
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "first ui", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-direct-collapse" } },
+        { role: "user", content: "second ui", context: { Provider: "dkg-ui" } },
+        { role: "assistant", content: "shared ui answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("first ui\nsecond ui");
+    restarted.flushSync();
+  });
+
+  it("T89 — reset gate replays W4b inbound that arrives while pre-reset W4a work drains", async () => {
+    let releaseFirstPersist!: () => void;
+    let firstPersist = true;
+    mockClient.storeChatTurn.mockImplementation(async () => {
+      if (firstPersist) {
+        firstPersist = false;
+        await new Promise<void>((resolve) => { releaseFirstPersist = resolve; });
+      }
+      return undefined;
+    });
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "before reset" },
+        { role: "assistant", content: "old reply" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const resetPromise = writer.onBeforeReset({ channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "after reset", messageId: "in-after" },
+    } as any);
+
+    releaseFirstPersist();
+    await resetPromise;
+    await flushMicrotasks();
+
+    mockClient.storeChatTurn.mockClear();
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "new reply", success: true, messageId: "out-after" },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("after reset");
+  });
+
+  it("T90 — setStateDir preserves destination external markers", async () => {
+    const destinationStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-dest-"));
+    try {
+      const destination = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir: destinationStateDir });
+      await destination.markExternalTurnPersistedDurable({
+        sessionKey: "agent:main:main",
+        turnId: "node-ui-corr-migrate",
+        user: "migrated ui question",
+        assistant: "migrated ui answer",
+      });
+      destination.flushSync();
+
+      await writer.setStateDir(destinationStateDir);
+      const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir: destinationStateDir });
+      mockClient.storeChatTurn.mockClear();
+      restarted.onAgentEnd({
+        sessionId: "test",
+        messages: [
+          { role: "user", content: "migrated ui question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-migrate" } },
+          { role: "assistant", content: "migrated ui answer" },
+        ],
+      }, { channelId: "telegram", sessionKey: "agent:main:main" });
+      await flushMicrotasks();
+
+      expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(destinationStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("T17 — disk file accepts the legacy number format for backward compat", async () => {
     // The pre-fix file contained `{ "sid": <number> }` (watermark only).
     // Existing on-disk files MUST still load correctly to avoid losing

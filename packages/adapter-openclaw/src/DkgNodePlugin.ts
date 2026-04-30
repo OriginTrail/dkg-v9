@@ -706,6 +706,7 @@ export class DkgNodePlugin {
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     this.chatTurnWriterStateDir = stateDir;
     this.chatTurnWriterStateDirSource = stateDirSource;
+    this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
 
 
@@ -1115,6 +1116,7 @@ export class DkgNodePlugin {
       if (!this.channelPlugin) {
         this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
       }
+      this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
       this.channelPlugin.register(api);
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
@@ -1516,6 +1518,7 @@ export class DkgNodePlugin {
       this.peerIdDeferredRetryTimer = null;
     }
     await this.channelPlugin?.stop();
+    try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
   }
 
   getClient(): DkgDaemonClient {

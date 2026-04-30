@@ -31,6 +31,7 @@ import type {
   OpenClawPluginApi,
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
+import type { ChatTurnWriter } from './ChatTurnWriter.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -214,6 +215,8 @@ interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
   attachmentRefs?: OpenClawAttachmentRef[];
+  sessionKey?: string;
+  turnId?: string;
 }
 
 interface InboundChatOptions {
@@ -387,6 +390,7 @@ export class DkgChannelPlugin {
   private readonly gatewayLifecyclePendingOwnersByAccount = new Map<string, object>();
   private readonly gatewayLifecycleOwnersByContext = new WeakMap<object, object>();
   private readonly gatewayLifecycleOwnersBySignal = new WeakMap<AbortSignal, object>();
+  private chatTurnWriter: ChatTurnWriter | null = null;
   /**
    * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
    * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
@@ -408,6 +412,10 @@ export class DkgChannelPlugin {
   /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
   setPreDispatchReAssert(cb: (() => void) | null): void {
     this.preDispatchReAssert = cb;
+  }
+
+  setChatTurnWriter(writer: ChatTurnWriter | null): void {
+    this.chatTurnWriter = writer;
   }
 
   /**
@@ -870,6 +878,15 @@ export class DkgChannelPlugin {
     this.notifyStopIdle();
   }
 
+  private reservePendingTurnPersistence(correlationId: string, allowDuringShutdown: boolean): void {
+    if (this.pendingTurnPersistence.has(correlationId)) return;
+    this.pendingTurnPersistence.set(correlationId, {
+      attempt: 0,
+      timer: null,
+      allowDuringShutdown,
+    });
+  }
+
   private clearPendingTurnPersistence(): void {
     for (const job of this.pendingTurnPersistence.values()) {
       if (job.timer) clearTimeout(job.timer);
@@ -1093,11 +1110,13 @@ export class DkgChannelPlugin {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
+        const { sessionKey, ...replyForCaller } = reply;
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
+          sessionKey,
         }, true);
-        return reply;
+        return replyForCaller;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
         throw err;
@@ -1130,10 +1149,12 @@ export class DkgChannelPlugin {
           correlationId,
         } as any),
       );
+      const { sessionKey, ...replyForCaller } = reply;
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
+        sessionKey,
       }, true);
-      return reply;
+      return replyForCaller;
     }
 
     throw new Error(
@@ -1209,6 +1230,8 @@ export class DkgChannelPlugin {
       CommandBody: commandBody,
       BodyForCommands: commandBody,
       ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,
@@ -1303,7 +1326,7 @@ export class DkgChannelPlugin {
         clearTimeout(timer);
         const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-        resolve({ text: replyText, correlationId });
+        resolve({ text: replyText, correlationId, sessionKey: route.sessionKey });
       }).catch((err: any) => {
         clearTimeout(timer);
         log.warn?.(`[dkg-channel] dispatchInboundReplyWithBase failed: ${err.message}`);
@@ -1352,7 +1375,7 @@ export class DkgChannelPlugin {
           clearTimeout(timer);
           const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-          resolve({ text: replyText, correlationId });
+          resolve({ text: replyText, correlationId, sessionKey: route.sessionKey });
         })
         .catch((err: any) => {
           clearTimeout(timer);
@@ -1438,6 +1461,8 @@ export class DkgChannelPlugin {
       Body: formattedBody, BodyForAgent: agentBody, RawBody: commandBody,
       CommandBody: commandBody, BodyForCommands: commandBody,
       ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
@@ -1547,6 +1572,7 @@ export class DkgChannelPlugin {
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
+          sessionKey: route.sessionKey,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
         this.queueTurnPersistence(
@@ -1554,7 +1580,7 @@ export class DkgChannelPlugin {
           this.buildFailedAssistantReply(resolvedFailureReason),
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
+          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs, sessionKey: route.sessionKey },
           true,
         );
       } else {
@@ -1563,7 +1589,7 @@ export class DkgChannelPlugin {
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
+          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs, sessionKey: route.sessionKey },
           true,
         );
       }
@@ -1603,6 +1629,7 @@ export class DkgChannelPlugin {
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
       if (terminalState === 'cancelled' && dispatchTerminal == null) {
+        this.reservePendingTurnPersistence(correlationId, true);
         void dispatchCompletion.finally(() => {
           persistResolvedTerminalState();
         });
@@ -1767,7 +1794,43 @@ export class DkgChannelPlugin {
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
       },
     );
+    await this.markExternalTurnPersistedAfterStore({
+      sessionKey: opts?.sessionKey,
+      turnId: opts?.turnId ?? correlationId,
+      user: userMessage,
+      assistant: assistantReply,
+      correlationId,
+    });
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private async markExternalTurnPersistedAfterStore(opts: {
+    sessionKey?: string;
+    turnId: string;
+    user: string;
+    assistant: string;
+    correlationId: string;
+  }): Promise<void> {
+    if (!this.chatTurnWriter) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.chatTurnWriter.markExternalTurnPersistedDurable({
+          sessionKey: opts.sessionKey,
+          turnId: opts.turnId,
+          user: opts.user,
+          assistant: opts.assistant,
+        });
+        return;
+      } catch (err: any) {
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, TURN_PERSIST_RETRY_DELAYS_MS[0]));
+          continue;
+        }
+        this.api?.logger.warn?.(
+          `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}: ${err?.message ?? err}`,
+        );
+      }
+    }
   }
 
   private queueTurnPersistence(
@@ -1778,7 +1841,11 @@ export class DkgChannelPlugin {
     opts?: PersistTurnOptions,
     allowDuringShutdown = false,
   ): void {
-    if (!this.canContinuePersistenceAttempt(allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
+    const existing = this.pendingTurnPersistence.get(correlationId);
+    if (
+      !this.canContinuePersistenceAttempt(allowDuringShutdown)
+      || (existing && existing.attempt > 0)
+    ) return;
 
     const attemptPersist = (attempt: number): void => {
       if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;

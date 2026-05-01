@@ -48,6 +48,7 @@ import {
   canonicalPathForCompare,
   defaultStateDirForWorkspace,
   legacyStateDirForWorkspace,
+  workspaceDirForDefaultStateDir,
   type ChatTurnWriterStateLayout,
 } from './state-dir-path.js';
 
@@ -659,6 +660,7 @@ export class DkgNodePlugin {
       );
     const workspaceStateDir = trimmedWorkspaceDir ? defaultStateDirForWorkspace(trimmedWorkspaceDir) : undefined;
     const runtimeStateDir = trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.());
+    const runtimeWorkspaceDir = runtimeStateDir ? workspaceDirForDefaultStateDir(runtimeStateDir) : undefined;
     const envStateDir = trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR);
     let stateDir = homeDir;
     let stateDirSource: ChatTurnWriterStateDirSource = 'home';
@@ -686,6 +688,7 @@ export class DkgNodePlugin {
     }
 
     const workspaceDerivedStateDirs = [
+      runtimeWorkspaceDir ? defaultStateDirForWorkspace(runtimeWorkspaceDir) : undefined,
       workspaceStateDir,
       setupDefaultStateDir,
     ].filter((candidate): candidate is string => !!candidate);
@@ -694,7 +697,7 @@ export class DkgNodePlugin {
     );
     const stateLayout: ChatTurnWriterStateLayout =
       stateDirIsKnownWorkspaceDefault ? 'direct' : 'nested';
-    const legacyStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir]
+    const legacyStateDirs = [runtimeWorkspaceDir, trimmedWorkspaceDir, setupWorkspaceDir]
       .filter((candidate): candidate is string => !!candidate)
       .filter((candidate) => matchesPath(stateDir, defaultStateDirForWorkspace(candidate)))
       .map((candidate) => legacyStateDirForWorkspace(candidate))

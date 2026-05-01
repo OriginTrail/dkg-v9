@@ -601,6 +601,15 @@ export class DkgMemoryPlugin {
 
   setClient(client: DkgDaemonClient): void {
     this.client = client;
+    if (
+      this.registeredApi &&
+      this.registeredCapability &&
+      typeof this.registeredApi.registerMemoryCapability === 'function'
+    ) {
+      const capability = this.buildCapability(this.registeredApi);
+      this.registeredApi.registerMemoryCapability(capability);
+      this.registeredCapability = capability;
+    }
   }
 
   register(api: OpenClawPluginApi): boolean {
@@ -695,16 +704,20 @@ export class DkgMemoryPlugin {
       return false;
     }
 
-    const capability: MemoryPluginCapability = {
-      promptBuilder: () => buildDkgMemoryPromptSections(),
-      runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
-    };
+    const capability = this.buildCapability(api);
     api.registerMemoryCapability(capability);
     this.registeredCapability = capability;
     this.registeredApi = api;
     const modeLabel = (api.registrationMode ?? 'full');
     api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
     return true;
+  }
+
+  private buildCapability(api: OpenClawPluginApi): MemoryPluginCapability {
+    return {
+      promptBuilder: () => buildDkgMemoryPromptSections(),
+      runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
+    };
   }
 }
 

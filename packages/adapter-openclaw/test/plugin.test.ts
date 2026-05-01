@@ -4463,6 +4463,96 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - runtime state API .dkg-adapter root uses direct layout without workspaceDir metadata', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-runtime-direct-${Date.now()}`);
+    const runtimeStateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::runtime-direct': { w: 11, b: 5 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => runtimeStateDir } },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(runtimeStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(runtimeStateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::runtime-direct']).toEqual({ w: 11, b: 5 });
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - runtime state API returning the active .dkg-adapter root does not downgrade direct layout', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-runtime-same-direct-${Date.now()}`);
+    const runtimeStateDir = path.join(workspaceDir, '.dkg-adapter');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiWithWorkspace: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithWorkspace);
+      const writer = (plugin as any).chatTurnWriter;
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
+
+      const apiRuntimeOnly: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => runtimeStateDir } },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiRuntimeOnly);
+
+      expect(setStateDirSpy).not.toHaveBeenCalled();
+      expect(((plugin as any).chatTurnWriter as any).watermarkFilePath.replace(/\\/g, '/')).toBe(
+        path.join(runtimeStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - writer migrates from configured stateDir when runtime state API appears later', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;

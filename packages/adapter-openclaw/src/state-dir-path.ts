@@ -11,6 +11,11 @@ export function legacyStateDirForWorkspace(workspaceDir: string): string {
   return join(workspaceDir, '.openclaw');
 }
 
+export function workspaceDirForDefaultStateDir(stateDir: string): string | undefined {
+  const absolute = resolve(stateDir);
+  return basename(absolute) === '.dkg-adapter' ? dirname(absolute) : undefined;
+}
+
 export function watermarkPathForStateDir(
   stateDir: string,
   layout: ChatTurnWriterStateLayout = 'nested',

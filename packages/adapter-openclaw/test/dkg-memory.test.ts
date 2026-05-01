@@ -105,6 +105,23 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
+  it('rebuilds the registered memory runtime when the daemon client changes', async () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    const firstCapability = api.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const nextClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9300' });
+
+    plugin.setClient(nextClient);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const secondCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    expect(secondCapability).not.toBe(firstCapability);
+
+    const result = await secondCapability.runtime!.getMemorySearchManager({ sessionKey: 'after-refresh' });
+    expect(((result.manager as DkgMemorySearchManager) as any).deps.client.baseUrl).toBe('http://localhost:9300');
+  });
+
   it('registers a prompt builder that teaches WM identity selection', () => {
     const api = makeApi();
     plugin.register(api);

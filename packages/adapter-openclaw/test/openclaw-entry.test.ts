@@ -652,6 +652,44 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
+  it('merges state-only first load with fallback runtime entry config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      stateDir: '/bootstrap-current/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/bootstrap-current',
+    }, {
+      runtime: {
+        config: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9720',
+                  memory: { enabled: true },
+                  channel: { enabled: false },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9720',
+      stateDir: '/bootstrap-current/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/bootstrap-current',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls).toEqual([]);
+  });
+
   it('resolves workspace from runtime.config even when it only carries workspace metadata', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

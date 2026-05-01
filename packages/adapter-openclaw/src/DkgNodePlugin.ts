@@ -444,6 +444,10 @@ export class DkgNodePlugin {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
     }
+    this.clearLocalAgentIntegrationRetry();
+    this.localAgentIntegrationRetryAttempt = 0;
+    this.lastLocalAgentIntegrationWarnReason = null;
+    this.lastLocalAgentIntegrationLoadError = null;
   }
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
@@ -1396,7 +1400,7 @@ export class DkgNodePlugin {
     }
 
     this.clearLocalAgentIntegrationRetry();
-    void this.syncLocalAgentIntegrationState(api, registrationMode);
+    void this.syncLocalAgentIntegrationState(api, registrationMode, this.daemonClientGeneration);
   }
 
   private clearLocalAgentIntegrationRetry(): void {
@@ -1405,7 +1409,11 @@ export class DkgNodePlugin {
     this.localAgentIntegrationRetryTimer = null;
   }
 
-  private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
+  private scheduleLocalAgentIntegrationRetry(
+    api: OpenClawPluginApi,
+    registrationMode: string,
+    generation = this.daemonClientGeneration,
+  ): void {
     if (this.localAgentIntegrationRetryTimer) return;
     // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped). On every
     // successful sync `localAgentIntegrationRetryAttempt` resets to 0
@@ -1419,7 +1427,8 @@ export class DkgNodePlugin {
     this.localAgentIntegrationRetryAttempt = attempt + 1;
     this.localAgentIntegrationRetryTimer = setTimeout(() => {
       this.localAgentIntegrationRetryTimer = null;
-      void this.syncLocalAgentIntegrationState(api, registrationMode);
+      if (generation !== this.daemonClientGeneration) return;
+      void this.syncLocalAgentIntegrationState(api, registrationMode, generation);
     }, delay);
   }
 
@@ -1434,7 +1443,13 @@ export class DkgNodePlugin {
     }
   }
 
-  private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+  private async syncLocalAgentIntegrationState(
+    api: OpenClawPluginApi,
+    registrationMode: string,
+    generation = this.daemonClientGeneration,
+  ): Promise<void> {
+    if (generation !== this.daemonClientGeneration) return;
+    const client = this.client;
     // Skip the retry loop entirely when the adapter has no runtime
     // integrations to sync. The stored-integration fetch is a no-op for
     // metadata-only loads and used to burn a 1 Hz warn loop on cold
@@ -1445,7 +1460,8 @@ export class DkgNodePlugin {
       return;
     }
 
-    const existing = await this.loadStoredOpenClawIntegration(api);
+    const existing = await this.loadStoredOpenClawIntegration(api, generation, client);
+    if (generation !== this.daemonClientGeneration) return;
     if (existing === undefined) {
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
@@ -1462,7 +1478,7 @@ export class DkgNodePlugin {
       } else {
         api.logger.debug?.(retryMessage);
       }
-      this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
+      this.scheduleLocalAgentIntegrationRetry(api, registrationMode, generation);
       return;
     }
     // Successful load — reset dedup + retry counter and log recovery once
@@ -1505,6 +1521,7 @@ export class DkgNodePlugin {
         api.logger.warn?.(`[dkg] OpenClaw channel bridge failed to start: ${startError.message}`);
       }
     }
+    if (generation !== this.daemonClientGeneration) return;
 
     const bridgeReady = this.channelPlugin?.isListening === true && !startError;
     // T30 — Derive memory-related capability flags from actual
@@ -1535,7 +1552,7 @@ export class DkgNodePlugin {
     };
 
     try {
-      await this.client.connectLocalAgentIntegration({
+      await client.connectLocalAgentIntegration({
         ...basePayload,
         runtime: {
           status: startError ? 'error' : bridgeReady ? 'ready' : 'connecting',
@@ -1549,15 +1566,21 @@ export class DkgNodePlugin {
     }
   }
 
-  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
+  private async loadStoredOpenClawIntegration(
+    api: OpenClawPluginApi,
+    generation = this.daemonClientGeneration,
+    client = this.client,
+  ): Promise<LocalAgentIntegrationRecord | null | undefined> {
     try {
-      const result = await this.client.getLocalAgentIntegration('openclaw');
+      const result = await client.getLocalAgentIntegration('openclaw');
+      if (generation !== this.daemonClientGeneration) return undefined;
       // Clear any stale error from an earlier failed attempt so the
       // retry dedup logic in `syncLocalAgentIntegrationState` can
       // distinguish a fresh failure reason from the previous one.
       this.lastLocalAgentIntegrationLoadError = null;
       return result;
     } catch (err: any) {
+      if (generation !== this.daemonClientGeneration) return undefined;
       const reason = typeof err?.message === 'string' && err.message.length > 0 ? err.message : String(err);
       this.lastLocalAgentIntegrationLoadError = reason;
       // Emit the underlying fetch error at `debug` level on every

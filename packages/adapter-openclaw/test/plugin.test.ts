@@ -1615,6 +1615,61 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('drops stale local-agent sync work after daemon client refresh', async () => {
+    vi.useFakeTimers();
+    let resolveLoad: ((value: null) => void) | undefined;
+    const oldClient = {
+      getLocalAgentIntegration: vi.fn(() => new Promise<null>((resolve) => { resolveLoad = resolve; })),
+      connectLocalAgentIntegration: vi.fn(),
+    };
+    const newClient = {
+      getLocalAgentIntegration: vi.fn(),
+      connectLocalAgentIntegration: vi.fn(),
+    };
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+      memory: { enabled: false },
+    } as any);
+    const api: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      (plugin as any).client = oldClient;
+      (plugin as any).channelPlugin = {
+        isUsingGatewayRoute: false,
+        isListening: true,
+        bridgePort: 0,
+        start: vi.fn(async () => {}),
+        setClient: vi.fn(),
+      };
+
+      const sync = (plugin as any).syncLocalAgentIntegrationState(api, 'full');
+      expect(oldClient.getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+      (plugin as any).scheduleLocalAgentIntegrationRetry(api, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+
+      (plugin as any).daemonClientGeneration += 1;
+      (plugin as any).client = newClient;
+      (plugin as any).resetDaemonScopedCachesForClientChange();
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+
+      resolveLoad?.(null);
+      await sync;
+
+      expect(oldClient.connectLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(newClient.connectLocalAgentIntegration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('registers OpenClaw through the generic local-agent endpoint', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];

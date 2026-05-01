@@ -16,7 +16,7 @@ let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
-  const { config, workspaceDir, apiWorkspaceDir, configIsPartial } = resolveEntryConfig(api);
+  const { config, bootstrapConfig, workspaceDir, apiWorkspaceDir, configIsPartial } = resolveEntryConfig(api);
 
   // Pass only runtime/cfg workspace evidence to the API for auto-detection.
   // `installedWorkspace` remains setup metadata consumed by DkgNodePlugin's
@@ -37,12 +37,12 @@ export default function (api) {
 
   log.info?.(
     `[dkg-entry] config (from OpenClaw plugin config) - daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, `
-      + `memory.enabled: ${config.memory?.enabled}, `
-      + `channel.enabled: ${config.channel?.enabled}, `
+      + `memory.enabled: ${bootstrapConfig.memory?.enabled}, `
+      + `channel.enabled: ${bootstrapConfig.channel?.enabled}, `
       + `registrationMode: ${api.registrationMode ?? 'full'}`,
   );
 
-  const dkg = new DkgNodePlugin(config);
+  const dkg = new DkgNodePlugin(bootstrapConfig);
   dkg.register(api);
   instance = dkg;
   registerLifecycleService(api, log);
@@ -107,6 +107,10 @@ function resolveEntryConfig(api) {
   const configIsPartial =
     !hasConfigSource ||
     (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
+  const fallbackConfig = mergeAdapterPluginConfigs(...fallbackEntryConfigs, ...fallbackDirectConfigs);
+  const bootstrapConfig = configIsPartial
+    ? mergeAdapterPluginConfigs(fallbackConfig, config)
+    : config;
 
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -121,7 +125,7 @@ function resolveEntryConfig(api) {
   const syncWorkspaceDir =
     workspaceDir ??
     config.installedWorkspace;
-  return { config, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
+  return { config, bootstrapConfig, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
 }
 
 function directApiConfigFrom(config) {

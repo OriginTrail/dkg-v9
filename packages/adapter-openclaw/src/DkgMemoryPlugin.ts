@@ -628,13 +628,7 @@ export class DkgMemoryPlugin {
       ? api
       : this.registeredApi;
     const targetOwnership = targetApi ? memorySlotOwnershipForApi(targetApi) : undefined;
-    const registeredOwnership =
-      this.registeredApi && this.registeredApi !== targetApi
-        ? memorySlotOwnershipForApi(this.registeredApi)
-        : undefined;
-    const shouldStampDisabled =
-      targetOwnership === true ||
-      (targetOwnership === undefined && registeredOwnership === true);
+    const shouldStampDisabled = targetOwnership === true;
 
     try {
       if (

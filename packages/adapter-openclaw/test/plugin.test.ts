@@ -171,9 +171,11 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('recreates the channel module when refreshed channel config changes', () => {
+  it('queues channel module recreation until the previous bridge stops', async () => {
     const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
-    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockResolvedValue(undefined);
+    let resolveStop!: () => void;
+    const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockImplementation(() => stopPromise);
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -209,17 +211,24 @@ describe('DkgNodePlugin', () => {
         memory: { enabled: true },
       });
       (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
-      const secondChannelPlugin = (plugin as any).channelPlugin;
 
       expect(firstChannelPlugin).toBeDefined();
+      expect((plugin as any).channelPlugin).toBeNull();
+      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
+      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+      expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+      resolveStop();
+      await stopInFlight;
+      const secondChannelPlugin = (plugin as any).channelPlugin;
+
       expect(secondChannelPlugin).toBeDefined();
       expect(secondChannelPlugin).not.toBe(firstChannelPlugin);
-      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
       expect((secondChannelPlugin as any).chatTurnWriter).toBe(chatTurnWriter);
       expect((secondChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
-      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
       expect(registerSpy).toHaveBeenCalledTimes(2);
-      expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
     } finally {
       registerSpy.mockRestore();
       stopSpy.mockRestore();
@@ -276,7 +285,7 @@ describe('DkgNodePlugin', () => {
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
-  it('clears memory capability through current direct-config api when previous slot ownership is known', async () => {
+  it('does not clear memory capability through current direct-config api without current slot ownership', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       memory: { enabled: true },
@@ -313,6 +322,7 @@ describe('DkgNodePlugin', () => {
 
     (plugin as any).registerIntegrationModules(initialApi, { enableFullRuntime: true });
     expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
 
     plugin.updateConfig({
       daemonUrl: 'http://localhost:9200',
@@ -321,11 +331,12 @@ describe('DkgNodePlugin', () => {
     });
     (plugin as any).registerIntegrationModules(currentDirectApi, { enableFullRuntime: true });
 
-    expect(currentRegisterMemoryCapability).toHaveBeenCalledTimes(1);
-    const disabledCapability = currentRegisterMemoryCapability.mock.calls[0][0];
-    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    expect(currentRegisterMemoryCapability).not.toHaveBeenCalled();
     expect((plugin as any).memoryPlugin).toBeNull();
     expect((plugin as any).memoryResolverApi).toBeNull();
+    oldMemoryPlugin.reAssertCapability();
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
   it('does not clear another plugin memory slot when refreshed config disables memory', () => {

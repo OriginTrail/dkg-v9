@@ -16,7 +16,9 @@ let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
-  const { config, bootstrapConfig, workspaceDir, apiWorkspaceDir, configIsPartial } = resolveEntryConfig(api);
+  const { config, bootstrapConfig, workspaceDir, apiWorkspaceDir, configIsPartial } = resolveEntryConfig(api, {
+    hasInstance: instance !== null,
+  });
 
   // Pass only runtime/cfg workspace evidence to the API for auto-detection.
   // `installedWorkspace` remains setup metadata consumed by DkgNodePlugin's
@@ -56,7 +58,7 @@ export default function (api) {
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }
 
-function resolveEntryConfig(api) {
+function resolveEntryConfig(api, options = {}) {
   const anyApi = api;
   const runtime = anyApi?.runtime;
   const fullConfigCandidatesMostToLeast = [
@@ -90,10 +92,10 @@ function resolveEntryConfig(api) {
     .filter(isObjectRecord);
   const currentDirectConfigs = [
     directApiConfigFrom(anyApi?.config),
-    anyApi?.pluginConfig,
+    directPluginConfigFrom(anyApi?.pluginConfig, { allowEmpty: options.hasInstance === true }),
   ].filter(isObjectRecord);
   const fallbackDirectConfigs = [
-    runtime?.pluginConfig,
+    directPluginConfigFrom(runtime?.pluginConfig),
   ].filter(isObjectRecord);
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
   const entryConfigs = hasCurrentConfigSource ? currentEntryConfigs : fallbackEntryConfigs;
@@ -137,6 +139,17 @@ function directApiConfigFrom(config) {
     typeof config.workspace === 'string'
   ) {
     return undefined;
+  }
+  if (looksLikeAdapterPluginConfig(config)) {
+    return config;
+  }
+  return undefined;
+}
+
+function directPluginConfigFrom(config, options = {}) {
+  if (!isObjectRecord(config)) return undefined;
+  if (options.allowEmpty && Object.keys(config).length === 0) {
+    return config;
   }
   if (looksLikeAdapterPluginConfig(config)) {
     return config;

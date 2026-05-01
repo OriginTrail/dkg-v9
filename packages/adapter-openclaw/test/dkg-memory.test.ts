@@ -166,6 +166,28 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
+  it('does not stamp the inactive capability when current slot ownership is unknown', () => {
+    const initialApi = makeApi();
+    plugin.register(initialApi);
+    const currentApi = {
+      config: {
+        memory: { enabled: false },
+      },
+      registerTool: vi.fn(),
+      registerHook: vi.fn(),
+      on: vi.fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryCapability: vi.fn(),
+    } as unknown as MockApi;
+
+    expect(plugin.disable(currentApi)).toBe(false);
+
+    expect(currentApi.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('registers a prompt builder that teaches WM identity selection', () => {
     const api = makeApi();
     plugin.register(api);

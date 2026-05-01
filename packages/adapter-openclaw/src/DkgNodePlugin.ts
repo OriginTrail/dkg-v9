@@ -159,6 +159,10 @@ export class DkgNodePlugin {
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private channelPluginConfigFingerprint: string | null = null;
+  private channelPluginStopInFlight: Promise<boolean> | null = null;
+  private channelPluginStartQueued = false;
+  private pendingChannelStartApi: OpenClawPluginApi | null = null;
+  private pendingChannelStartRegistrationMode: string | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
@@ -546,7 +550,7 @@ export class DkgNodePlugin {
         // null `chatTurnWriter` and W3/W4a/W4b silently never install.
         this.ensureChatTurnWriter(api);
       }
-      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled, registrationMode });
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
@@ -599,7 +603,7 @@ export class DkgNodePlugin {
     this.installHooksIfNeeded(api, { runtimeHooksEnabled: runtimeEnabled });
 
     // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled, registrationMode });
 
     if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
@@ -1297,7 +1301,74 @@ export class DkgNodePlugin {
    * Register DKG integration modules: channel and memory.
    * Each module is optional — enabled via config flags.
    */
-  private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {
+  private startChannelPlugin(api: OpenClawPluginApi): boolean {
+    const channelConfig = this.config.channel;
+    if (!channelConfig?.enabled) return false;
+    const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
+    if (!this.channelPlugin) {
+      this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+      this.channelPluginConfigFingerprint = nextChannelFingerprint;
+    }
+    this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
+    const memoryPlugin = this.memoryPlugin;
+    if (memoryPlugin?.isRegistered()) {
+      this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
+    }
+    this.channelPlugin.register(api);
+    api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
+    return true;
+  }
+
+  private stopChannelPluginForReconfigure(api: OpenClawPluginApi): void {
+    const channelPlugin = this.channelPlugin;
+    if (!channelPlugin) return;
+    channelPlugin.setPreDispatchReAssert(null);
+    this.channelPlugin = null;
+    this.channelPluginConfigFingerprint = null;
+    const stopWork = Promise.resolve(channelPlugin.stop({ updateGatewayStatus: false }))
+      .then(
+        () => true,
+        (err: any) => {
+          api.logger.warn?.(`[dkg] Channel module reconfiguration stop failed: ${err?.message ?? err}`);
+          return false;
+        },
+      )
+      .finally(() => {
+        if (this.channelPluginStopInFlight === stopWork) {
+          this.channelPluginStopInFlight = null;
+        }
+      });
+    this.channelPluginStopInFlight = stopWork;
+  }
+
+  private queueChannelPluginStartAfterStop(api: OpenClawPluginApi, registrationMode?: string): void {
+    this.pendingChannelStartApi = api;
+    this.pendingChannelStartRegistrationMode = registrationMode ?? null;
+    if (this.channelPluginStartQueued) return;
+    const stopWork = this.channelPluginStopInFlight;
+    if (!stopWork) {
+      this.startChannelPlugin(api);
+      return;
+    }
+    this.channelPluginStartQueued = true;
+    void stopWork.then((stopped) => {
+      this.channelPluginStartQueued = false;
+      const pendingApi = this.pendingChannelStartApi;
+      const pendingRegistrationMode = this.pendingChannelStartRegistrationMode;
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      if (!stopped || !pendingApi) return;
+      const registered = this.startChannelPlugin(pendingApi);
+      if (registered && pendingRegistrationMode) {
+        this.registerLocalAgentIntegration(pendingApi, pendingRegistrationMode);
+      }
+    });
+  }
+
+  private registerIntegrationModules(
+    api: OpenClawPluginApi,
+    opts?: { enableFullRuntime?: boolean; registrationMode?: string },
+  ): void {
     // T58 — Gate channel registration on `enableFullRuntime`. The
     // file header (line 432-436) explicitly documents `setup-only`
     // and `cli-metadata` as "true metadata-only modes that skip
@@ -1318,19 +1389,14 @@ export class DkgNodePlugin {
     const channelConfig = this.config.channel;
     const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
     if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
-      this.channelPlugin.setPreDispatchReAssert(null);
-      void this.channelPlugin.stop({ updateGatewayStatus: false });
-      this.channelPlugin = null;
-      this.channelPluginConfigFingerprint = null;
+      this.stopChannelPluginForReconfigure(api);
     }
     if (channelConfig?.enabled) {
-      if (!this.channelPlugin) {
-        this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
-        this.channelPluginConfigFingerprint = nextChannelFingerprint;
+      if (this.channelPluginStopInFlight) {
+        this.queueChannelPluginStartAfterStop(api, opts?.registrationMode);
+      } else {
+        this.startChannelPlugin(api);
       }
-      this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
-      this.channelPlugin.register(api);
-      api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
 
     // --- Memory module ---
@@ -1754,11 +1820,16 @@ export class DkgNodePlugin {
     // flight and the turn is silently lost.
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
+    this.pendingChannelStartApi = null;
+    this.pendingChannelStartRegistrationMode = null;
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
     }
+    await this.channelPluginStopInFlight;
     await this.channelPlugin?.stop();
+    this.channelPlugin = null;
+    this.channelPluginConfigFingerprint = null;
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
   }
 

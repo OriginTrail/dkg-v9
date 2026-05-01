@@ -625,6 +625,7 @@ export class ChatTurnWriter {
             continue;
           }
           const typedW4bInflightOrigins = this.typedW4bInflightOrigins(
+            typedW4bCursorKeys,
             user,
             assistant,
             messageIds,
@@ -1296,6 +1297,7 @@ export class ChatTurnWriter {
         const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev, queuedMeta);
         const w4bMarkerOccurrences = this.typedW4bMarkerOccurrences(w4bDiscriminator, queuedMeta);
         const w4bInflightMarkerOrigins = this.typedW4bInflightOriginsFromOccurrences(
+          sessionId,
           userText,
           assistantText,
           w4bMarkerOccurrences,
@@ -1449,6 +1451,11 @@ export class ChatTurnWriter {
   private nextPendingUserArrivalId(): string {
     this.pendingUserMessageSeq = (this.pendingUserMessageSeq + 1) >>> 0;
     return `arrival::${this.pendingUserMessageSeq}`;
+  }
+
+  private pendingUserArrivalOrder(meta?: PendingUserMessageMeta): number {
+    const match = typeof meta?.arrivalId === "string" ? /^arrival::(\d+)$/.exec(meta.arrivalId) : null;
+    return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
   }
 
   private messageHookDedupKey(
@@ -1622,19 +1629,19 @@ export class ChatTurnWriter {
   private movePendingInboundQueue(fromKey: string, toKey: string): void {
     if (fromKey === toKey) return;
     const messages = this.pendingUserMessages.get(fromKey);
+    const meta = this.pendingUserMessageMeta.get(fromKey);
     if (messages && messages.length > 0) {
-      const target = this.pendingUserMessages.get(toKey) ?? [];
-      target.unshift(...messages);
-      this.pendingUserMessages.set(toKey, target);
+      const targetMessages = this.pendingUserMessages.get(toKey) ?? [];
+      const targetMeta = this.pendingUserMessageMeta.get(toKey) ?? [];
+      const merged = [
+        ...targetMessages.map((text, index) => ({ text, meta: targetMeta[index] })),
+        ...messages.map((text, index) => ({ text, meta: meta?.[index] })),
+      ].sort((a, b) => this.pendingUserArrivalOrder(a.meta) - this.pendingUserArrivalOrder(b.meta));
+      this.pendingUserMessages.set(toKey, merged.map((item) => item.text));
+      this.pendingUserMessageMeta.set(toKey, merged.map((item) => item.meta ?? {}));
       this.pendingUserMessages.delete(fromKey);
     }
-    const meta = this.pendingUserMessageMeta.get(fromKey);
-    if (meta && meta.length > 0) {
-      const target = this.pendingUserMessageMeta.get(toKey) ?? [];
-      target.unshift(...meta);
-      this.pendingUserMessageMeta.set(toKey, target);
-      this.pendingUserMessageMeta.delete(fromKey);
-    }
+    this.pendingUserMessageMeta.delete(fromKey);
   }
 
   private w4bInflightGuardSessionIds(identity: {
@@ -2245,29 +2252,46 @@ export class ChatTurnWriter {
     return Array.from(markers);
   }
 
-  private typedW4bInflightOrigin(marker: string): string {
-    return `typed-w4b-marker::${marker}`;
+  private typedW4bInflightOrigin(cursorKey: string, marker: string): string {
+    return `typed-w4b-marker::${this.identityHash([cursorKey, marker])}`;
   }
 
   private typedW4bInflightOrigins(
+    cursorKeys: string[],
     user: string,
     assistant: string,
     messageIds: string[],
     assistantMessageIds: string[] = [],
   ): string[] {
-    return this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds)
-      .map((marker) => this.typedW4bInflightOrigin(marker));
+    return this.typedW4bInflightOriginsForMarkers(
+      cursorKeys,
+      this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds),
+    );
   }
 
   private typedW4bInflightOriginsFromOccurrences(
+    sessionId: string,
     user: string,
     assistant: string,
     occurrences: string[],
   ): string[] {
-    return occurrences
+    const markers = occurrences
       .map((occurrence) => this.typedW4bExternalMarkerId(user, assistant, occurrence))
-      .filter((marker) => marker.length > 0)
-      .map((marker) => this.typedW4bInflightOrigin(marker));
+      .filter((marker) => marker.length > 0);
+    return this.typedW4bInflightOriginsForMarkers(
+      this.typedW4bMarkerCursorKeysFromSessionId(sessionId),
+      markers,
+    );
+  }
+
+  private typedW4bInflightOriginsForMarkers(cursorKeys: string[], markers: string[]): string[] {
+    const origins = new Set<string>();
+    for (const cursorKey of cursorKeys) {
+      for (const marker of markers) {
+        origins.add(this.typedW4bInflightOrigin(cursorKey, marker));
+      }
+    }
+    return Array.from(origins);
   }
 
   private findTypedW4bExternalMarker(

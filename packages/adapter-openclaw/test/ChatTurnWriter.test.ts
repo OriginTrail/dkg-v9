@@ -704,12 +704,76 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("older weak inbound\nlater strong inbound");
   });
 
-  it("T359 - in-flight conversationless W4b completion avoids promoted durable counts", async () => {
-    let releaseStore: (() => void) | null = null;
-    let storeStarted = false;
+  it("T359 - queue promotion appends later weak duplicates after earlier strong messages", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "first strong inbound", metadata: { messageId: "order-strong-first" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-order-append", sessionKey: "real-sk" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "later weak inbound", metadata: { messageId: "order-weak-later" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-order-append" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "later weak inbound", metadata: { messageId: "order-weak-later" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-order-append", sessionKey: "real-sk" },
+    );
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "ordered append answer", success: true, metadata: { messageId: "order-append-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-order-append", sessionKey: "real-sk" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("first strong inbound\nlater weak inbound");
+  });
+
+  it("T359 - conversation-scoped in-flight markers do not suppress another chat with reused messageId", async () => {
+    let releaseFirst: (() => void) | null = null;
+    let storeCalls = 0;
     mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
-      storeStarted = true;
-      await new Promise<void>((resolve) => { releaseStore = resolve; });
+      storeCalls++;
+      if (storeCalls === 1) {
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "same local text", metadata: { messageId: "local-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-A" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "same local reply", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-A" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "same local text", metadata: { messageId: "local-1" } },
+        { role: "assistant", content: "same local reply" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-B", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[1][0]).toBe("openclaw:telegram:bot:chat-B:real-sk");
+
+    releaseFirst!();
+    await writer.flush();
+  });
+
+  it("T359 - in-flight conversationless W4b completion stays isolated from concrete W4a", async () => {
+    let releaseStore: (() => void) | null = null;
+    let storeCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      storeCalls++;
+      if (storeCalls === 1) {
+        await new Promise<void>((resolve) => { releaseStore = resolve; });
+      }
     });
     writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
 
@@ -722,7 +786,7 @@ describe("ChatTurnWriter", () => {
       { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
     );
     await flushMicrotasks();
-    expect(storeStarted).toBe(true);
+    expect(storeCalls).toBe(1);
 
     const weakSessionId = "openclaw:telegram:bot::real-sk";
     const strongSessionId = "openclaw:telegram:bot:chat-late:real-sk";
@@ -737,7 +801,8 @@ describe("ChatTurnWriter", () => {
     }, { channelId: "telegram", accountId: "bot", conversationId: "chat-late", sessionKey: "real-sk" });
     await flushMicrotasks();
 
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[1][0]).toBe(strongSessionId);
     expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(true);
     expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
 

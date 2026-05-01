@@ -1758,6 +1758,24 @@ export class EVMChainAdapter implements ChainAdapter {
   // Staking Conviction
   // =====================================================================
 
+  // V10 baseline tier ladder seeded by `ConvictionStakingStorage._seedBaselineTiers()`
+  // (rest, 30d, 90d, 180d, 366d). Passing a tier outside this set reverts on-chain with
+  // `InvalidLockTier()` from `DKGStakingConvictionNFT._convictionMultiplier`. Validating
+  // off-chain saves a round-trip and surfaces a clearer error to the caller.
+  private static readonly V10_BASELINE_LOCK_TIERS = [0, 1, 3, 6, 12] as const;
+
+  private snapToBaselineLockTier(lockEpochs: number): number {
+    // Snap DOWN to the largest baseline tier ≤ lockEpochs. Conservative: never lock
+    // the user up for longer than the legacy `lockEpochs` they asked for. Examples:
+    //   lockEpochs=2 → 1, lockEpochs=4 → 3, lockEpochs=11 → 6, lockEpochs=30 → 12.
+    let snapped = 0;
+    for (const tier of EVMChainAdapter.V10_BASELINE_LOCK_TIERS) {
+      if (tier <= lockEpochs) snapped = tier;
+      else break;
+    }
+    return snapped;
+  }
+
   private normalizeLegacyLockEpochs(lockEpochs: number): number {
     if (!Number.isInteger(lockEpochs)) {
       throw new Error(`stakeWithLock: lockEpochs must be an integer, got ${lockEpochs}`);
@@ -1765,11 +1783,7 @@ export class EVMChainAdapter implements ChainAdapter {
     if (lockEpochs < 0) {
       throw new Error(`stakeWithLock: lockEpochs must be non-negative, got ${lockEpochs}`);
     }
-    // V10 tiers are bounded by the staking NFT contract. Legacy callers
-    // commonly passed longer lock durations to mean "max conviction";
-    // normalize those to the maximum V10 tier instead of surfacing a
-    // surprising contract revert from an unchanged public method.
-    return Math.min(lockEpochs, 12);
+    return this.snapToBaselineLockTier(lockEpochs);
   }
 
   async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
@@ -1777,8 +1791,10 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   async stakeWithLockTier(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
-    if (!Number.isInteger(lockTier) || lockTier < 0 || lockTier > 12) {
-      throw new Error(`stakeWithLockTier: lockTier must be an integer in [0, 12], got ${lockTier}`);
+    if (!Number.isInteger(lockTier) || !(EVMChainAdapter.V10_BASELINE_LOCK_TIERS as readonly number[]).includes(lockTier)) {
+      throw new Error(
+        `stakeWithLockTier: lockTier must be one of {${EVMChainAdapter.V10_BASELINE_LOCK_TIERS.join(', ')}} (V10 baseline tier ladder), got ${lockTier}`,
+      );
     }
     await this.init();
 

@@ -34,6 +34,18 @@ interface BuildResponse {
   leafCount: number;
 }
 
+/**
+ * Structured fields carried alongside `errorName` so the host can reconstruct
+ * typed errors with their actual values (computed/expected roots, leaf counts,
+ * chunk ids) instead of zeroed placeholders. WAL/log diagnostics on the host
+ * side are otherwise the only place these values surface, and zeros there
+ * make root-cause analysis of mismatch incidents impossible.
+ */
+type BuildErrorFields =
+  | { kind: 'rootMismatch'; computedMerkleRoot: Uint8Array; expectedMerkleRoot: Uint8Array }
+  | { kind: 'leafCountMismatch'; computedLeafCount: number; expectedLeafCount: number }
+  | { kind: 'chunkOutOfRange'; chunkId: number; leafCount: number };
+
 interface BuildError {
   taskId: number;
   ok: false;
@@ -43,6 +55,7 @@ interface BuildError {
     | 'V10ProofChunkOutOfRangeError'
     | 'Error';
   message: string;
+  fields?: BuildErrorFields;
 }
 
 if (!parentPort) {
@@ -63,14 +76,31 @@ parentPort.on('message', (msg: BuildRequest) => {
     parentPort!.postMessage(response);
   } catch (err) {
     let errorName: BuildError['errorName'] = 'Error';
-    if (err instanceof V10ProofRootMismatchError) errorName = 'V10ProofRootMismatchError';
-    else if (err instanceof V10ProofLeafCountMismatchError) errorName = 'V10ProofLeafCountMismatchError';
-    else if (err instanceof V10ProofChunkOutOfRangeError) errorName = 'V10ProofChunkOutOfRangeError';
+    let fields: BuildErrorFields | undefined;
+    if (err instanceof V10ProofRootMismatchError) {
+      errorName = 'V10ProofRootMismatchError';
+      fields = {
+        kind: 'rootMismatch',
+        computedMerkleRoot: err.computedMerkleRoot,
+        expectedMerkleRoot: err.expectedMerkleRoot,
+      };
+    } else if (err instanceof V10ProofLeafCountMismatchError) {
+      errorName = 'V10ProofLeafCountMismatchError';
+      fields = {
+        kind: 'leafCountMismatch',
+        computedLeafCount: err.computedLeafCount,
+        expectedLeafCount: err.expectedLeafCount,
+      };
+    } else if (err instanceof V10ProofChunkOutOfRangeError) {
+      errorName = 'V10ProofChunkOutOfRangeError';
+      fields = { kind: 'chunkOutOfRange', chunkId: err.chunkId, leafCount: err.leafCount };
+    }
     const response: BuildError = {
       taskId: msg.taskId,
       ok: false,
       errorName,
       message: err instanceof Error ? err.message : String(err),
+      fields,
     };
     parentPort!.postMessage(response);
   }

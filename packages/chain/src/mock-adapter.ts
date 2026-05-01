@@ -551,11 +551,25 @@ export class MockChainAdapter implements ChainAdapter {
 
   private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
 
+  // Mirror the V10 baseline tier ladder seeded by
+  // `ConvictionStakingStorage._seedBaselineTiers()` so the mock surfaces the same
+  // "tier must exist" error the real `DKGStakingConvictionNFT` reverts with.
+  private static readonly V10_BASELINE_LOCK_TIERS = [0, 1, 3, 6, 12] as const;
+
+  private snapToBaselineLockTier(lockEpochs: number): number {
+    let snapped = 0;
+    for (const tier of MockChainAdapter.V10_BASELINE_LOCK_TIERS) {
+      if (tier <= lockEpochs) snapped = tier;
+      else break;
+    }
+    return snapped;
+  }
+
   private normalizeLegacyLockEpochs(lockEpochs: number): number {
     if (!Number.isInteger(lockEpochs) || lockEpochs < 0) {
       throw new Error(`Mock: invalid lockEpochs ${lockEpochs}`);
     }
-    return Math.min(lockEpochs, 12);
+    return this.snapToBaselineLockTier(lockEpochs);
   }
 
   async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
@@ -563,8 +577,10 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async stakeWithLockTier(identityId: bigint, _amount: bigint, lockTier: number): Promise<TxResult> {
-    if (!Number.isInteger(lockTier) || lockTier < 0 || lockTier > 12) {
-      throw new Error(`Mock: invalid lockTier ${lockTier}`);
+    if (!Number.isInteger(lockTier) || !(MockChainAdapter.V10_BASELINE_LOCK_TIERS as readonly number[]).includes(lockTier)) {
+      throw new Error(
+        `Mock: lockTier must be one of {${MockChainAdapter.V10_BASELINE_LOCK_TIERS.join(', ')}} (V10 baseline tier ladder), got ${lockTier}`,
+      );
     }
     const key = `${identityId}-${this.signerAddress}`;
     const existing = this.delegatorLocks.get(key);

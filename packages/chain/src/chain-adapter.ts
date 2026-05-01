@@ -472,8 +472,10 @@ export interface ChainAdapter {
    * Legacy staking helper that accepts a lock duration-style number.
    *
    * V10 stakes are NFT-backed positions keyed by `lockTier`; adapters
-   * normalize this legacy `lockEpochs` value to a V10 tier so existing
-   * consumers do not silently reinterpret a public `number` parameter.
+   * snap-down this legacy `lockEpochs` value to the largest baseline V10
+   * tier ≤ `lockEpochs` (baseline ladder = `{0, 1, 3, 6, 12}`). Conservative —
+   * never lock the user up for longer than the legacy parameter requested.
+   * Examples: `lockEpochs=2 → 1`, `lockEpochs=5 → 3`, `lockEpochs=30 → 12`.
    *
    * @deprecated Prefer `stakeWithLockTier` for new V10 callers.
    */
@@ -484,6 +486,11 @@ export interface ChainAdapter {
    * position; there is no per-delegator-address position to "extend" under
    * V10. Use the V10 tokenId-keyed `getPosition` for per-position
    * multipliers.
+   *
+   * `lockTier` MUST be a member of the V10 baseline tier ladder
+   * (`{0, 1, 3, 6, 12}`) seeded by `ConvictionStakingStorage._seedBaselineTiers`;
+   * any other value reverts on-chain with `InvalidLockTier()`. Adapters
+   * validate off-chain and throw a clearer error before broadcasting.
    */
   stakeWithLockTier?(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult>;
   getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;

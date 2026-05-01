@@ -46,6 +46,17 @@ interface WorkerResponseOk {
   leafCount: number;
 }
 
+/**
+ * Mirrors `proof-worker-entry.ts` `BuildErrorFields`. Carrying the structured
+ * fields across the worker → host boundary lets us reconstruct typed errors
+ * with their actual computed/expected values, so WAL/log diagnostics on
+ * mismatch surface real numbers instead of zeroed placeholders.
+ */
+type WorkerErrorFields =
+  | { kind: 'rootMismatch'; computedMerkleRoot: Uint8Array; expectedMerkleRoot: Uint8Array }
+  | { kind: 'leafCountMismatch'; computedLeafCount: number; expectedLeafCount: number }
+  | { kind: 'chunkOutOfRange'; chunkId: number; leafCount: number };
+
 interface WorkerResponseErr {
   taskId: number;
   ok: false;
@@ -55,6 +66,7 @@ interface WorkerResponseErr {
     | 'V10ProofChunkOutOfRangeError'
     | 'Error';
   message: string;
+  fields?: WorkerErrorFields;
 }
 
 type WorkerResponse = WorkerResponseOk | WorkerResponseErr;
@@ -119,15 +131,29 @@ export class WorkerThreadProofBuilder implements ProofBuilder {
   }
 
   private reconstructError(msg: WorkerResponseErr): Error {
+    // Prefer structured fields from the worker so WAL/log records the real
+    // computed-vs-expected values. Fall back to zeroed placeholders only when
+    // the wire downgrades (e.g. a pre-fields worker payload during rollout) —
+    // the orchestrator still branches correctly on `name` either way.
     switch (msg.errorName) {
-      case 'V10ProofRootMismatchError':
-        // The wire shape doesn't carry the structured fields; the
-        // orchestrator branches on `name`, not on field values.
+      case 'V10ProofRootMismatchError': {
+        if (msg.fields?.kind === 'rootMismatch') {
+          return new V10ProofRootMismatchError(msg.fields.computedMerkleRoot, msg.fields.expectedMerkleRoot);
+        }
         return new V10ProofRootMismatchError(new Uint8Array(32), new Uint8Array(32));
-      case 'V10ProofLeafCountMismatchError':
+      }
+      case 'V10ProofLeafCountMismatchError': {
+        if (msg.fields?.kind === 'leafCountMismatch') {
+          return new V10ProofLeafCountMismatchError(msg.fields.computedLeafCount, msg.fields.expectedLeafCount);
+        }
         return new V10ProofLeafCountMismatchError(0, 0);
-      case 'V10ProofChunkOutOfRangeError':
+      }
+      case 'V10ProofChunkOutOfRangeError': {
+        if (msg.fields?.kind === 'chunkOutOfRange') {
+          return new V10ProofChunkOutOfRangeError(msg.fields.chunkId, msg.fields.leafCount);
+        }
         return new V10ProofChunkOutOfRangeError(0, 0);
+      }
       default: {
         const e = new Error(msg.message);
         return e;

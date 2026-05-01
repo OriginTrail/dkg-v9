@@ -543,6 +543,20 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // — no dedicated `restakeOperatorFee` primitive exists in V10 because
     // V10 stake is NFT-keyed and lock-tiered; the operator picks tier on
     // re-stake.
+    //
+    // ── Deprecated V8 lifetime statistics ─────────────────────────────────
+    // V8 `StakingStorage` tracked `operatorFeeCumulative{Earned,PaidOut}Rewards`
+    // (with paired events) so off-chain dashboards could compute lifetime
+    // operator-fee throughput per node. V10 deliberately drops these counters:
+    // the on-chain working set is `nodeOperatorFeeBalance` + queued
+    // `operatorFeeWithdrawals` only. Lifetime analytics for V10 are computed
+    // off-chain by replaying the existing `OperatorFeeBalanceUpdated`,
+    // `OperatorFeeWithdrawalRequestCreated`, and `OperatorFeeWithdrawalRequestDeleted`
+    // events (or via the per-epoch `IsOperatorFeeClaimedForEpoch` flag), and
+    // are not part of the staking-storage surface. Any consumer that needs the
+    // legacy cumulative reads must be ported to event replay; CSS will not be
+    // extended with the V8 fields. Documented here so the omission is
+    // intentional rather than an oversight in the V8→V10 consolidation.
     // ========================================================================
 
     /// @notice Initiate an operator-fee withdrawal. Caller must hold ADMIN_KEY

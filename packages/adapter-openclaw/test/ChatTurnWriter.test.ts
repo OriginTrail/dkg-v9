@@ -316,6 +316,29 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed response");
   });
 
+  it("T359 - empty typed outbound failure clears the pending inbound queue", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "failed typed q", metadata: { messageId: "failed-typed-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-failed-typed" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", success: false, metadata: { messageId: "failed-typed-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-failed-typed" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "later typed a", success: true, metadata: { messageId: "later-typed-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-failed-typed" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+  });
+
   it("T359 - typed message hooks normalize numeric chat and thread ids", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "numeric id hello", metadata: { chatId: 12345 } },
@@ -521,6 +544,41 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("same inbound");
     expect((writer as any).pendingUserMessages.size).toBe(0);
+  });
+
+  it("T359 - same-message strong identity change moves the pending inbound queue", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "strong move inbound", metadata: { messageId: "same-strong-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-strong-move", sessionId: "typed-session" },
+    );
+    writer.onMessageReceived({
+      sessionKey: "internal-session",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-strong-move",
+        content: "strong move inbound",
+        messageId: "same-strong-in",
+      },
+    } as any);
+
+    await writer.onMessageSent({
+      sessionKey: "internal-session",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-strong-move",
+        content: "strong move outbound",
+        success: true,
+        messageId: "same-strong-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-strong-move:internal-session");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("strong move inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("strong move outbound");
   });
 
   it("T359 - internal-first duplicate typed inbound does not move the queue to weaker identity", async () => {

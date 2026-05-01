@@ -1044,7 +1044,9 @@ export class ChatTurnWriter {
     const eventContext = event.context && typeof event.context === "object" ? event.context : {};
     const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
     const content = this.extractTypedMessageContent(event, eventContext, metadata, ctx);
-    if (!content) return null;
+    const successValue = eventContext.success ?? event.success;
+    const isOutboundFailure = direction === "outbound" && successValue === false;
+    if (!content && !isOutboundFailure) return null;
 
     const channelId = firstString(
       ctx.channelId,
@@ -1074,7 +1076,6 @@ export class ChatTurnWriter {
     }
 
     const messageId = this.typedHookMessageId(event, eventContext, metadata, ctx);
-    const successValue = eventContext.success ?? event.success;
     const context: NonNullable<InternalMessageEvent["context"]> = {
       channelId,
       content,
@@ -1693,6 +1694,14 @@ export class ChatTurnWriter {
     if (!existing || !candidate) return false;
     const existingStrong = existing.sessionKey.length > 0 && !this.isWeakSessionKey(existing.sessionKey);
     const candidateStrong = candidate.sessionKey.length > 0 && !this.isWeakSessionKey(candidate.sessionKey);
+    if (existingStrong && candidateStrong) {
+      return (
+        existing.channelId === candidate.channelId &&
+        existing.accountId === candidate.accountId &&
+        existing.conversationId === candidate.conversationId &&
+        existing.sessionKey !== candidate.sessionKey
+      );
+    }
     return candidateStrong && !existingStrong;
   }
 

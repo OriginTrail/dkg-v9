@@ -14,6 +14,13 @@ let instance = null;
 const lifecycleServiceApis = new WeakMap();
 const entryAssignedWorkspaceDirMarkers = new WeakMap();
 let lifecycleOwnerToken = null;
+const PARTIAL_OVERLAY_CONFIG_KEYS = new Set([
+  'daemonUrl',
+  'dkgHome',
+  'stateDir',
+  'stateDirSource',
+  'installedWorkspace',
+]);
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -33,7 +40,11 @@ export default function (api) {
 
   if (instance) {
     log.info?.('[dkg-entry] Re-registering plugin surfaces (channel, memory, tools) into new registry (gateway multi-phase init)');
-    instance.updateConfig?.(config, { partial: configIsPartial });
+    if (registrationModeEnablesRuntime(api)) {
+      instance.updateConfig?.(config, { partial: configIsPartial });
+    } else {
+      log.debug?.('[dkg-entry] Deferred singleton config update during metadata-only registration pass');
+    }
     instance.register(api);
     registerLifecycleService(api, log);
     syncSkillToWorkspace(workspaceDir, log);
@@ -127,7 +138,7 @@ function resolveEntryConfig(api, options = {}) {
   const configSources = [...entryConfigs, ...directConfigs];
   const configIsPartial =
     !hasConfigSource ||
-    configSources.every(isStateMetadataOnlyAdapterConfig);
+    configSources.every(isPartialAdapterConfigOverlay);
   const currentConfigSources = [
     ...currentEntryConfigs,
     ...currentDirectConfigs,
@@ -211,6 +222,17 @@ function directApiConfigFrom(config) {
     return config;
   }
   return undefined;
+}
+
+function isPartialAdapterConfigOverlay(config) {
+  if (!looksLikeAdapterPluginConfig(config)) return false;
+  const keys = Object.keys(config);
+  return keys.length > 0 && keys.every((key) => PARTIAL_OVERLAY_CONFIG_KEYS.has(key));
+}
+
+function registrationModeEnablesRuntime(api) {
+  const mode = api?.registrationMode ?? 'full';
+  return mode !== 'setup-only' && mode !== 'cli-metadata';
 }
 
 function directPluginConfigFrom(config) {

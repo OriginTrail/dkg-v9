@@ -502,9 +502,11 @@ export class ChatTurnWriter {
     stateLayout: ChatTurnWriterStateLayout,
     legacyStateDirs: string[],
   ): string[] {
-    return stateLayout === "direct"
-      ? [stateDir, ...legacyStateDirs]
-      : legacyStateDirs;
+    if (stateLayout !== "direct") return legacyStateDirs;
+    const directWatermarkFilePath = watermarkPathForStateDir(stateDir, stateLayout);
+    return fs.existsSync(directWatermarkFilePath)
+      ? legacyStateDirs
+      : [stateDir, ...legacyStateDirs];
   }
 
   private mergeLegacyStateDirsInto(

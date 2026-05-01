@@ -210,6 +210,45 @@ describe('openclaw-entry', () => {
     expect(instance.stopCalls).toBe(1);
   });
 
+  for (const registrationMode of ['setup-only', 'cli-metadata'] as const) {
+    it(`defers singleton config updates during ${registrationMode} re-registration`, async () => {
+      const entry = await loadEntryWithFakeRuntime();
+      const firstApi = makeApi('http://127.0.0.1:9200');
+      const metadataApi = makeDirectPluginConfigApi({
+        daemonUrl: 'http://127.0.0.1:9300',
+        memory: { enabled: false },
+        channel: { enabled: true, port: 9301 },
+      }, { registrationMode });
+      const runtimeApi = makeDirectPluginConfigApi({
+        daemonUrl: 'http://127.0.0.1:9300',
+        memory: { enabled: false },
+        channel: { enabled: true, port: 9301 },
+      }, { registrationMode: 'setup-runtime' });
+
+      entry(firstApi);
+      entry(metadataApi);
+
+      const instance = globalThis.__openclawEntryTestInstances![0];
+      expect(instance.updateConfigCalls).toEqual([]);
+      expect(instance.config).toMatchObject({
+        daemonUrl: 'http://127.0.0.1:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      expect(instance.registerCalls).toEqual([firstApi, metadataApi]);
+
+      entry(runtimeApi);
+
+      expect(instance.updateConfigCalls).toHaveLength(1);
+      expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+      expect(instance.config).toMatchObject({
+        daemonUrl: 'http://127.0.0.1:9300',
+        memory: { enabled: false },
+        channel: { enabled: true, port: 9301 },
+      });
+    });
+  }
+
   it('accepts OpenClaw-provided direct pluginConfig including setup state metadata', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({
@@ -810,7 +849,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('treats daemon-only direct re-registration config as a full snapshot', async () => {
+  it('treats daemon/home-only direct re-registration config as a partial overlay', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -825,10 +864,10 @@ describe('openclaw-entry', () => {
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9810',
       dkgHome: '/next-daemon-home',
+      memory: { enabled: true },
+      channel: { enabled: false },
     });
-    expect(instance.config).not.toHaveProperty('memory');
-    expect(instance.config).not.toHaveProperty('channel');
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
   it('treats module-shaped direct re-registration config as a full snapshot', async () => {
@@ -966,6 +1005,42 @@ describe('openclaw-entry', () => {
       installedWorkspace: '/bootstrap-current',
       memory: { enabled: true },
       channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls).toEqual([]);
+  });
+
+  it('merges daemon/home-only first-load overlays with fallback runtime entry modules', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      config: {
+        daemonUrl: 'http://127.0.0.1:9820',
+        dkgHome: '/current-daemon-home',
+      },
+      runtime: {
+        config: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9720',
+                  memory: { enabled: true, memoryDir: '/persisted-memory' },
+                  channel: { enabled: false, port: 9721 },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9820',
+      dkgHome: '/current-daemon-home',
+      memory: { enabled: true, memoryDir: '/persisted-memory' },
+      channel: { enabled: false, port: 9721 },
     });
     expect(instance.updateConfigCalls).toEqual([]);
   });

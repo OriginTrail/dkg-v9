@@ -12,6 +12,10 @@ import { createHash } from "crypto";
  * Create/consume failures roll back marker snapshots when
  * `commitWatermarkStateSync` fails; `setStateDir` migrates per-session `m`
  * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
+ * Telegram persistence can arrive through typed `message_received/message_sent`
+ * when typed `agent_end` is silent. Those events are normalized into the W4b
+ * envelope and deduped against internal `message:received/message:sent` by
+ * channel/account/conversation/messageId, outside the Node-UI marker space.
  */
 
 interface Logger {
@@ -88,6 +92,10 @@ export interface InternalMessageEvent {
   };
 }
 
+interface PendingUserMessageMeta {
+  messageId?: string;
+}
+
 /**
  * Pull the message text out of the envelope, preferring the canonical
  * `context.content` over the test-fixture `text` shorthand.
@@ -99,6 +107,13 @@ function readEventText(ev: InternalMessageEvent): string {
   return "";
 }
 
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
 export class ChatTurnWriter {
   private client: any;
   private logger: Logger;
@@ -108,6 +123,11 @@ export class ChatTurnWriter {
   // first reply are both retained; `onMessageSent` consumes the oldest so the
   // first outbound reply pairs with the first inbound, not the most recent.
   private pendingUserMessages: Map<string, string[]> = new Map();
+  // Parallel metadata queue for pending user messages. Typed `message_sent`
+  // lacks an outbound messageId in OpenClaw 2026.4.15, so we carry the inbound
+  // provider messageId forward and use it as the durable W4b turnId
+  // discriminator when the outbound envelope cannot provide one.
+  private pendingUserMessageMeta: Map<string, PendingUserMessageMeta[]> = new Map();
   private debounceTimers: Map<string, { timer: NodeJS.Timeout; pendingIndex: number }> = new Map();
   private watermarkFilePath: string;
   // Cross-path dedup (W4a agent_end vs. W4b message:sent). The gateway fires
@@ -207,6 +227,9 @@ export class ChatTurnWriter {
   // (e.g. an unhandled throw outside the wrapped try/catch).
   private crossPathInflight: Map<string, number> = new Map();
   private static readonly CROSS_PATH_INFLIGHT_TTL_MS = 60_000;
+  private messageHookDedup: Map<string, number> = new Map();
+  private messageHookInboundQueueKeys: Map<string, string> = new Map();
+  private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -852,6 +875,7 @@ export class ChatTurnWriter {
       // raw `:` (e.g. the `agent:<agentId>:<identity>` keys created in
       // `DkgChannelPlugin`).
       this.pendingUserMessages.delete(sessionId);
+      this.pendingUserMessageMeta.delete(sessionId);
       this.clearSessionTurnIds(sessionId);
       // R18.2 — Reset the W4b session count too. After compaction the
       // `messages[]` array is rewritten, so the W4b count's "I persisted
@@ -859,10 +883,101 @@ export class ChatTurnWriter {
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
     }
+    this.messageHookDedup.clear();
+    this.messageHookInboundQueueKeys.clear();
     // External markers record daemon-success facts from direct-channel
     // persists. Preserve them across reset/compaction so the reset W4a replay
     // can still consume the marker instead of duplicating the stored UI turn.
     this.writeWatermarkFile();
+  }
+
+  onTypedMessageReceived(event: any, ctx?: any): void {
+    const ev = this.normalizeTypedMessageEvent("inbound", event, ctx);
+    if (!ev) return;
+    this.onMessageReceived(ev);
+  }
+
+  async onTypedMessageSent(event: any, ctx?: any): Promise<void> {
+    const ev = this.normalizeTypedMessageEvent("outbound", event, ctx);
+    if (!ev) return;
+    await this.onMessageSent(ev);
+  }
+
+  private normalizeTypedMessageEvent(
+    direction: "inbound" | "outbound",
+    eventPayload?: any,
+    hookCtx?: any,
+  ): InternalMessageEvent | null {
+    const event = eventPayload && typeof eventPayload === "object" ? eventPayload : {};
+    const ctx = hookCtx && typeof hookCtx === "object" ? hookCtx : {};
+    const eventContext = event.context && typeof event.context === "object" ? event.context : {};
+    const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
+    const content = [
+      event.content,
+      event.text,
+      event.body,
+      eventContext.content,
+      metadata.content,
+    ].find((value) => typeof value === "string" && value.trim().length > 0) as string | undefined;
+    if (!content) return null;
+
+    const endpoint = direction === "inbound"
+      ? firstString(event.from, metadata.from, metadata.senderId, metadata.userId)
+      : firstString(event.to, metadata.to, metadata.recipientId, metadata.userId);
+    const channelId = firstString(
+      ctx.channelId,
+      event.channelId,
+      eventContext.channelId,
+      metadata.channelId,
+      metadata.originatingChannel,
+      metadata.provider,
+    );
+    if (channelId === "dkg-ui") return null;
+    const accountId = firstString(ctx.accountId, event.accountId, eventContext.accountId, metadata.accountId, metadata.botId);
+    const conversationId = firstString(
+      ctx.conversationId,
+      event.conversationId,
+      eventContext.conversationId,
+      metadata.conversationId,
+      metadata.chatId,
+      metadata.threadId,
+      endpoint,
+    );
+    const sessionKey = firstString(
+      ctx.sessionKey,
+      event.sessionKey,
+      eventContext.sessionKey,
+      metadata.sessionKey,
+      ctx.sessionId,
+      event.sessionId,
+      eventContext.sessionId,
+      metadata.sessionId,
+      conversationId,
+      endpoint,
+    );
+    if (!channelId || !sessionKey) {
+      this.logger.debug?.("[ChatTurnWriter] Dropping typed message hook without channel/session identity");
+      return null;
+    }
+
+    const messageId = firstString(ctx.messageId, event.messageId, eventContext.messageId, metadata.messageId, metadata.id);
+    const successValue = eventContext.success ?? event.success;
+    const context: NonNullable<InternalMessageEvent["context"]> = {
+      channelId,
+      content,
+    };
+    if (accountId) context.accountId = accountId;
+    if (conversationId) context.conversationId = conversationId;
+    if (messageId) context.messageId = messageId;
+    if (typeof successValue === "boolean") context.success = successValue;
+    if (direction === "outbound" && typeof context.success !== "boolean") context.success = true;
+
+    return {
+      sessionKey,
+      direction,
+      text: content,
+      context,
+    };
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {
@@ -886,9 +1001,23 @@ export class ChatTurnWriter {
       // textual inbound. Drop until we add a recoverable representation for
       // attachment-only turns.
       if (!text) return;
+      const inboundDedupKey = this.messageHookDedupKey("inbound", ev, text);
+      const existingConversationKey = this.messageHookInboundQueueKeys.get(inboundDedupKey);
+      if (existingConversationKey && existingConversationKey !== conversationKey) {
+        if (this.shouldMoveInboundQueue(existingConversationKey, conversationKey)) {
+          this.movePendingInboundQueue(existingConversationKey, conversationKey);
+          this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
+        }
+        return;
+      }
+      if (this.markMessageHookDuplicate(inboundDedupKey)) return;
       const queue = this.pendingUserMessages.get(conversationKey) ?? [];
       queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
+      const metaQueue = this.pendingUserMessageMeta.get(conversationKey) ?? [];
+      metaQueue.push({ messageId: this.messageEventId(ev) });
+      this.pendingUserMessageMeta.set(conversationKey, metaQueue);
+      if (inboundDedupKey) this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageReceived] Error", { err });
     }
@@ -921,6 +1050,7 @@ export class ChatTurnWriter {
       // the whole queue here to match the success consumption.
       if (success === false) {
         this.pendingUserMessages.delete(conversationKey);
+        this.pendingUserMessageMeta.delete(conversationKey);
         return;
       }
       // Strip injected `<recalled-memory>` from assistant text — the model may
@@ -961,8 +1091,16 @@ export class ChatTurnWriter {
       // string), preserving structure if a later inbound arrives
       // before the retry.
       const queuedItems = [...queue];
+      const queuedMeta = [...(this.pendingUserMessageMeta.get(conversationKey) ?? [])];
       const userText = queuedItems.join("\n");
+      const outboundDedupKey = this.messageHookDedupKey("outbound", ev, assistantText);
+      if (this.markMessageHookDuplicate(outboundDedupKey)) {
+        this.pendingUserMessages.delete(conversationKey);
+        this.pendingUserMessageMeta.delete(conversationKey);
+        return;
+      }
       this.pendingUserMessages.delete(conversationKey);
+      this.pendingUserMessageMeta.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side (T5: short-TTL stamp map):
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
@@ -998,7 +1136,7 @@ export class ChatTurnWriter {
         //   monotonic in-process sequence when the envelope omits it
         //   (concurrent same-content fires for a single messageId-less
         //   turn are vanishingly rare in that path).
-        const w4bInflight = this.w4bInflightKey(ev, userText, assistantText);
+        const w4bInflight = this.w4bInflightKey(ev, userText, assistantText, queuedMeta);
         if (this.markTurnIdSeen(sessionId, w4bInflight)) return; // concurrent W4b dispatch
         // T33 — Mix the gateway-provided `messageId` (or the
         // monotonic fallback) into the daemon-facing turnId so
@@ -1009,7 +1147,7 @@ export class ChatTurnWriter {
         // is stable across process boundaries. Two LEGITIMATE same-
         // content turns within a session still get distinct ids
         // because their messageIds differ.
-        const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev);
+        const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev, queuedMeta);
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText, w4bDiscriminator);
         // T10 — Reserve cross-path in-flight on W4b-origin BEFORE
         // persistOne so a concurrent W4a `agent_end` fire's
@@ -1089,10 +1227,14 @@ export class ChatTurnWriter {
               const restored = this.pendingUserMessages.get(conversationKey) ?? [];
               restored.unshift(...queuedItems);
               this.pendingUserMessages.set(conversationKey, restored);
+              const restoredMeta = this.pendingUserMessageMeta.get(conversationKey) ?? [];
+              restoredMeta.unshift(...queuedMeta);
+              this.pendingUserMessageMeta.set(conversationKey, restoredMeta);
             }
             // Release the in-flight reservation so a retry can proceed.
             // No `w4bOrigin` release needed — we don't stamp it pre-persist
             // anymore; only stamping happens post-success above.
+            if (outboundDedupKey) this.messageHookDedup.delete(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
@@ -1131,6 +1273,81 @@ export class ChatTurnWriter {
     if (this.recentTurnIds.has(key)) return true;
     this.recentTurnIds.set(key, now);
     return false;
+  }
+
+  private messageEventId(ev: InternalMessageEvent): string | undefined {
+    const ctx = (ev as any)?.context ?? {};
+    return firstString(ctx.messageId, (ev as any)?.messageId);
+  }
+
+  private messageHookDedupKey(
+    direction: "inbound" | "outbound",
+    ev: InternalMessageEvent,
+    text: string,
+  ): string {
+    const ctx = (ev as any)?.context ?? {};
+    const channelId = firstString(ctx.channelId, (ev as any)?.channelId) ?? "unknown";
+    if (channelId === "dkg-ui") return "";
+    const accountId = firstString(ctx.accountId) ?? "";
+    const conversationId = firstString(ctx.conversationId) ?? "";
+    const messageId = this.messageEventId(ev);
+    if (messageId) {
+      return [
+        "message-hook",
+        direction,
+        "msg",
+        this.identityHash([channelId, accountId, conversationId, messageId]),
+      ].join("::");
+    }
+    const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
+    return [
+      "message-hook",
+      direction,
+      "text",
+      this.identityHash([channelId, accountId, conversationId, sessionKey, text]),
+    ].join("::");
+  }
+
+  private markMessageHookDuplicate(key: string): boolean {
+    if (!key) return false;
+    const now = Date.now();
+    const ttl = ChatTurnWriter.MESSAGE_HOOK_DEDUP_TTL_MS;
+    for (const [existingKey, ts] of this.messageHookDedup) {
+      if (now - ts > ttl) {
+        this.messageHookDedup.delete(existingKey);
+        this.messageHookInboundQueueKeys.delete(existingKey);
+      }
+    }
+    if (this.messageHookDedup.has(key)) return true;
+    this.messageHookDedup.set(key, now);
+    return false;
+  }
+
+  private shouldMoveInboundQueue(existingKey: string, candidateKey: string): boolean {
+    const existing = this.parseComposedSessionId(existingKey);
+    const candidate = this.parseComposedSessionId(candidateKey);
+    if (!existing || !candidate) return false;
+    const existingStrong = existing.sessionKey.length > 0 && existing.sessionKey !== existing.conversationId;
+    const candidateStrong = candidate.sessionKey.length > 0 && candidate.sessionKey !== candidate.conversationId;
+    return candidateStrong && !existingStrong;
+  }
+
+  private movePendingInboundQueue(fromKey: string, toKey: string): void {
+    if (fromKey === toKey) return;
+    const messages = this.pendingUserMessages.get(fromKey);
+    if (messages && messages.length > 0) {
+      const target = this.pendingUserMessages.get(toKey) ?? [];
+      target.push(...messages);
+      this.pendingUserMessages.set(toKey, target);
+      this.pendingUserMessages.delete(fromKey);
+    }
+    const meta = this.pendingUserMessageMeta.get(fromKey);
+    if (meta && meta.length > 0) {
+      const target = this.pendingUserMessageMeta.get(toKey) ?? [];
+      target.push(...meta);
+      this.pendingUserMessageMeta.set(toKey, target);
+      this.pendingUserMessageMeta.delete(fromKey);
+    }
   }
 
   /**
@@ -1646,6 +1863,13 @@ export class ChatTurnWriter {
     return `w4b-content::${this.contentHash(user, assistant)}`;
   }
 
+  private identityHash(parts: string[]): string {
+    return createHash("sha256")
+      .update(JSON.stringify(parts))
+      .digest("hex")
+      .slice(0, 16);
+  }
+
   private externalTurnMarkerId(turnId?: unknown, user?: string, assistant?: string): string {
     if (typeof turnId !== "string" || turnId.trim().length === 0) return "";
     const idHash = createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16);
@@ -1758,9 +1982,14 @@ export class ChatTurnWriter {
    * envelopes don't exhibit the race in practice.
    */
   private w4bInflightSeq = 0;
-  private w4bInflightKey(ev: InternalMessageEvent, user: string, assistant: string): string {
-    const messageId = (ev as any)?.context?.messageId;
-    if (typeof messageId === "string" && messageId.length > 0) {
+  private w4bInflightKey(
+    ev: InternalMessageEvent,
+    user: string,
+    assistant: string,
+    pendingMeta: PendingUserMessageMeta[] = [],
+  ): string {
+    const messageId = this.w4bMessageDiscriminator(ev, pendingMeta);
+    if (messageId) {
       return `w4b-inflight::msg::${messageId}`;
     }
     this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
@@ -1783,14 +2012,30 @@ export class ChatTurnWriter {
    * fallback-counter — but the messageId path is the production case
    * and is unambiguously stable.
    */
-  private w4bDaemonTurnIdDiscriminator(ev: InternalMessageEvent): string {
-    const messageId = (ev as any)?.context?.messageId;
-    if (typeof messageId === "string" && messageId.length > 0) {
+  private w4bDaemonTurnIdDiscriminator(
+    ev: InternalMessageEvent,
+    pendingMeta: PendingUserMessageMeta[] = [],
+  ): string {
+    const messageId = this.w4bMessageDiscriminator(ev, pendingMeta);
+    if (messageId) {
       return `msg::${messageId}`;
     }
     // Reuse the same monotonic counter — fallback is rare and best-effort.
     this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
     return `seq::${this.w4bInflightSeq}`;
+  }
+
+  private w4bMessageDiscriminator(
+    ev: InternalMessageEvent,
+    pendingMeta: PendingUserMessageMeta[],
+  ): string {
+    const outboundMessageId = this.messageEventId(ev);
+    if (outboundMessageId) return `out::${outboundMessageId}`;
+    const inboundIds = pendingMeta
+      .map((meta) => meta.messageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (inboundIds.length === 0) return "";
+    return `in::${this.identityHash(inboundIds)}`;
   }
   /**
    * @deprecated Kept temporarily for tests that inspect the dedup-map key
@@ -1993,6 +2238,7 @@ export class ChatTurnWriter {
     for (const key of this.w4bSessionCounts.keys()) add(key);
     for (const key of this.debounceTimers.keys()) add(key);
     for (const key of this.pendingUserMessages.keys()) add(key);
+    for (const key of this.pendingUserMessageMeta.keys()) add(key);
     for (const key of this.inFlightPersists.keys()) add(key);
     for (const key of this.w4aSessionChains.keys()) add(key);
     for (const key of this.recentTurnIds.keys()) {

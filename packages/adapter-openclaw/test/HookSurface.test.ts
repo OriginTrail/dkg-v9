@@ -96,6 +96,28 @@ describe("HookSurface", () => {
       expect(hookMapSym.get("message:sent")?.length).toBe(1);
       expect(logger.warn).toHaveBeenCalled();
     });
+
+    it("tracks whether this surface still owns the live internal wrapper", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+
+      (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map([["message:sent", [vi.fn()]]]);
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(false);
+    });
+
+    it("re-installs an internal hook on the same surface after the global map is replaced", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+
+      const replacement = new Map<string, any[]>([["message:sent", []]]);
+      (globalThis as any)[INTERNAL_HOOK_SYMBOL] = replacement;
+      const unsub = hs.install("internal", "message:sent", vi.fn());
+      expect(unsub).not.toBeNull();
+      expect(replacement.get("message:sent")).toHaveLength(1);
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+    });
   });
 
   describe("legacy kind (api.registerHook)", () => {

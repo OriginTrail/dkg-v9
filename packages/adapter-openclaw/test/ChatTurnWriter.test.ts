@@ -298,6 +298,125 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
+  it("T359 - typed message hooks persist one Telegram turn without internal sessionKey", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "typed hello", metadata: { messageId: "typed-in-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "typed response", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-1:chat-1");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("typed hello");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed response");
+  });
+
+  it("T359 - typed and internal W4b surfaces for the same Telegram message persist once", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "same inbound", metadata: { messageId: "same-in-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    writer.onMessageReceived({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-1",
+        content: "same inbound",
+        messageId: "same-in-1",
+      },
+    } as any);
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "same outbound", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    await writer.onMessageSent({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-1",
+        content: "same outbound",
+        success: true,
+        messageId: "same-out-1",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("same inbound");
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+  });
+
+  it("T359 - internal-first duplicate typed inbound does not move the queue to weaker identity", async () => {
+    writer.onMessageReceived({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-1",
+        content: "internal first",
+        messageId: "same-in-2",
+      },
+    } as any);
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "internal first", metadata: { messageId: "same-in-2" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "typed duplicate outbound", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    await writer.onMessageSent({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-1",
+        content: "internal outbound",
+        success: true,
+        messageId: "same-out-2",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-1:internal-sk");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("internal first");
+  });
+
+  it("T359 - no-session typed Telegram identities stay isolated by conversation", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-A", content: "question A", metadata: { messageId: "typed-A-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-A" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-A", content: "answer A", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-A" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-B", content: "question B", metadata: { messageId: "typed-B-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-B" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-B", content: "answer B", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-B" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => call[0])).toEqual([
+      "openclaw:telegram:bot:chat-A:chat-A",
+      "openclaw:telegram:bot:chat-B:chat-B",
+    ]);
+  });
+
   it("flushSync clears debounce timers", () => {
     writer.flushSync();
     expect((writer as any).debounceTimers.size).toBe(0);
@@ -469,6 +588,37 @@ describe("ChatTurnWriter", () => {
         { role: "assistant", content: "a1" },
       ],
     }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    restarted.flushSync();
+  });
+
+  it("T359 - typed W4b restart durability prevents W4a duplicate backfill", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "restart typed q", metadata: { messageId: "typed-restart-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-restart", sessionKey: "sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "restart typed a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-restart", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+
+    const sessionId = "openclaw:telegram:bot:chat-restart:sk";
+    expect((writer as any).w4bSessionCounts.get(sessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((restarted as any).w4bSessionCounts.get(sessionId)).toBe(1);
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "restart typed q" },
+        { role: "assistant", content: "restart typed a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-restart", sessionKey: "sk" });
     await flushMicrotasks();
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
@@ -666,6 +816,57 @@ describe("ChatTurnWriter", () => {
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram question");
+    restarted.flushSync();
+  });
+
+  it("T359 - typed Telegram W4b and Node-UI external markers both suppress W4a duplicates after restart", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-mixed",
+      user: "node ui question",
+      assistant: "node ui answer",
+    });
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "telegram question", metadata: { messageId: "mixed-telegram-in" } },
+      {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "mixed-chat",
+        sessionKey: "agent:main:main",
+      },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "telegram answer", success: true },
+      {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "mixed-chat",
+        sessionKey: "agent:main:main",
+      },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram question");
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "telegram question" },
+        { role: "assistant", content: "telegram answer" },
+        { role: "user", content: "node ui question", context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-mixed" } },
+        { role: "assistant", content: "node ui answer" },
+      ],
+    }, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "mixed-chat",
+      sessionKey: "agent:main:main",
+    });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
     restarted.flushSync();
   });
 

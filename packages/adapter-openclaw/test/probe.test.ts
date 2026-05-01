@@ -96,8 +96,8 @@ describe('DkgNodePlugin registration-mode probe', () => {
     plugin.register(api);
 
     // Should attempt to register on each event via each mechanism
-    // api.on and api.registerHook are called for each of 6 events
-    const numEvents = 6; // before_prompt_build, agent_end, before_compaction, before_reset, message_received, message_sent
+    // api.on and api.registerHook are called for each typed probe event.
+    const numEvents = 10;
     
     expect(onSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
     expect(registerHookSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
@@ -185,6 +185,9 @@ describe('DkgNodePlugin registration-mode probe', () => {
     const events = onSpy.mock.calls.map((c) => c[0]);
     expect(events).toContain('before_prompt_build');
     expect(events).toContain('agent_end');
+    expect(events).toContain('message_sent');
+    expect(events).toContain('message_sending');
+    expect(events).toContain('message.sent');
   });
 
   it('probe gracefully handles missing globalThis internal-hook map', () => {

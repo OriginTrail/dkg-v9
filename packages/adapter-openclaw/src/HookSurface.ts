@@ -129,6 +129,12 @@ export class HookSurface {
    */
   private readonly installedHandlers = new Map<string, { handler: HookHandler; unsubscribe: Unsubscribe }>();
   /**
+   * Internal hooks are stored in a mutable process-global map owned by the
+   * gateway. Stats only tell us an install once succeeded; this map lets the
+   * adapter prove its own wrapper is still present in the current live map.
+   */
+  private readonly internalWrappedHandlers = new Map<string, HookHandler>();
+  /**
    * R21.1 — Soft "destroyed" flag. OpenClaw's `api.on` and `api.registerHook`
    * have no unsubscribe primitives, so `destroy()`'s no-op unsubscribes for
    * typed and legacy hooks leave handlers live in the upstream registry.
@@ -183,15 +189,25 @@ export class HookSurface {
 
     const existing = this.installedHandlers.get(key);
     if (existing) {
-      if (existing.handler === handler) {
-        this.logger.debug?.(`[hook-surface] install dedup (same handler): ${key}`);
-        return existing.unsubscribe;
+      if (kind === 'internal' && !this.ownsCurrentInternalHook(event)) {
+        try {
+          existing.unsubscribe();
+        } catch {
+          /* best-effort stale teardown */
+        }
+        this.installedHandlers.delete(key);
+        this.internalWrappedHandlers.delete(event);
+      } else {
+        if (existing.handler === handler) {
+          this.logger.debug?.(`[hook-surface] install dedup (same handler): ${key}`);
+          return existing.unsubscribe;
+        }
+        this.logger.warn?.(
+          `[hook-surface] install REJECTED: ${key} already has a different handler registered. ` +
+            `Unsubscribe the prior install before re-installing.`,
+        );
+        return null;
       }
-      this.logger.warn?.(
-        `[hook-surface] install REJECTED: ${key} already has a different handler registered. ` +
-          `Unsubscribe the prior install before re-installing.`,
-      );
-      return null;
     }
 
     let unsubscribe: Unsubscribe | null;
@@ -263,6 +279,21 @@ export class HookSurface {
   }
 
   /**
+   * True only when this surface's adapter-owned wrapper for `event` is still
+   * present in the current process-global internal hook map.
+   */
+  ownsCurrentInternalHook(event: string): boolean {
+    if (this.destroyed) return false;
+    const wrapped = this.internalWrappedHandlers.get(event);
+    if (!wrapped) return false;
+    const g = globalThis as unknown as Record<symbol, unknown>;
+    const existing = g[INTERNAL_HOOK_SYMBOL];
+    if (!(existing instanceof Map)) return false;
+    const handlers = (existing as Map<string, HookHandler[]>).get(event);
+    return Array.isArray(handlers) && handlers.includes(wrapped);
+  }
+
+  /**
    * Tear down all installed handlers and cancel pending commit timers.
    * Idempotent. Called from `DkgNodePlugin.stop()` via the existing
    * `session_end` legacy hook.
@@ -284,6 +315,7 @@ export class HookSurface {
       }
     }
     this.installedHandlers.clear();
+    this.internalWrappedHandlers.clear();
     for (const timer of this.commitTimers.values()) clearTimeout(timer);
     this.commitTimers.clear();
   }
@@ -387,6 +419,7 @@ export class HookSurface {
     };
 
     hookMap.get(event)!.push(wrapped);
+    this.internalWrappedHandlers.set(event, wrapped);
     this.setStat(key, { installedVia: 'globalThis', commitState: 'pending' });
     this.logger.debug?.(`[hook-surface] installed internal hook via globalThis: ${event}`);
 
@@ -394,6 +427,9 @@ export class HookSurface {
       const arr = hookMap.get(event);
       if (!arr) return;
       hookMap.set(event, arr.filter((h) => h !== wrapped));
+      if (this.internalWrappedHandlers.get(event) === wrapped) {
+        this.internalWrappedHandlers.delete(event);
+      }
     };
   }
 

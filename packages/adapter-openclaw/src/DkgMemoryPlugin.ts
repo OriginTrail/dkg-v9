@@ -836,12 +836,12 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
   const candidates = [
-    anyApi?.pluginConfig,
     anyApi?.cfg,
     anyApi?.config,
-    runtime?.pluginConfig,
+    anyApi?.pluginConfig,
     runtime?.cfg,
     runtime?.config,
+    runtime?.pluginConfig,
   ];
   for (const candidate of candidates) {
     if (!looksLikeAdapterPluginConfig(candidate)) continue;

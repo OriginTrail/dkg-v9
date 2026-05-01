@@ -696,12 +696,12 @@ export class DkgNodePlugin {
     } else if (configuredIsSetupDefault && setupDefaultStateDir) {
       stateDir = setupDefaultStateDir;
       stateDirSource = 'setup-default';
-    } else if (configuredHasSetupDefaultSource && setupDefaultStateDir) {
+    } else if (!configuredStateDir && configuredHasSetupDefaultSource && setupDefaultStateDir) {
       stateDir = setupDefaultStateDir;
       stateDirSource = 'setup-default';
     } else if (configuredStateDir) {
       stateDir = configuredStateDir;
-      stateDirSource = configuredHasSetupDefaultSource ? 'setup-default' : 'config';
+      stateDirSource = configuredIsSetupDefault ? 'setup-default' : 'config';
     }
 
     const workspaceDerivedStateDirs = [

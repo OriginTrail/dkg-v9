@@ -118,7 +118,7 @@ function resolveEntryConfig(api, options = {}) {
   const configIsPartial =
     !hasConfigSource ||
     (entryConfigs.length > 0 && entryConfigs.every(isStateMetadataOnlyAdapterConfig)) ||
-    (entryConfigs.length === 0 && directConfigs.length > 0);
+    (entryConfigs.length === 0 && directConfigs.length > 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
   const currentConfigSources = [
     ...currentEntryConfigs,
     ...currentDirectConfigs,

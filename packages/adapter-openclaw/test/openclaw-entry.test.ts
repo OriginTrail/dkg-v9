@@ -581,7 +581,7 @@ describe('openclaw-entry', () => {
     });
   });
 
-  it('merges direct plugin config into the singleton without requiring a full snapshot', async () => {
+  it('replaces singleton config when direct plugin config carries a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -605,7 +605,7 @@ describe('openclaw-entry', () => {
       memory: { enabled: false },
       channel: { enabled: true, port: 9601 },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
     expect(instance.registerCalls).toEqual([firstApi, secondApi]);
   });
 
@@ -631,7 +631,7 @@ describe('openclaw-entry', () => {
       memory: { enabled: true },
       channel: { enabled: true },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
   it('does not let empty api.config hide runtime pluginConfig fallback', async () => {
@@ -723,7 +723,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('treats daemon-only direct re-registration config as partial', async () => {
+  it('treats daemon-only direct re-registration config as a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -738,13 +738,13 @@ describe('openclaw-entry', () => {
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9810',
       dkgHome: '/next-daemon-home',
-      memory: { enabled: true },
-      channel: { enabled: false },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+    expect(instance.config).not.toHaveProperty('memory');
+    expect(instance.config).not.toHaveProperty('channel');
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
-  it('treats module-shaped direct re-registration config as partial', async () => {
+  it('treats module-shaped direct re-registration config as a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -758,10 +758,10 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9800',
-      memory: { enabled: true },
-      channel: { enabled: false, port: 9801 },
+      channel: { port: 9801 },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+    expect(instance.config).not.toHaveProperty('memory');
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
   it('does not backfill stale runtime config when current direct config is state-only partial', async () => {

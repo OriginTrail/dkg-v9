@@ -4464,17 +4464,16 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - stale setup-owned stateDir marker falls back to installedWorkspace default, not config', async () => {
+  it('T75 - stale setup-owned marker does not override a configured custom stateDir', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const installedWorkspace = path.join(require('os').tmpdir(), `dkg-t75-installed-workspace-${Date.now()}`);
-    const staleWorkspace = path.join(require('os').tmpdir(), `dkg-t75-stale-marker-${Date.now()}`);
-    const staleConfigStateDir = path.join(staleWorkspace, '.openclaw');
+    const configuredStateDir = path.join(require('os').tmpdir(), `dkg-t75-custom-with-stale-marker-${Date.now()}`);
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
         installedWorkspace,
-        stateDir: staleConfigStateDir,
+        stateDir: configuredStateDir,
         stateDirSource: 'setup-default',
         channel: { enabled: false },
         memory: { enabled: false },
@@ -4493,18 +4492,18 @@ describe('DkgNodePlugin', () => {
       const targetStateDir = path.join(installedWorkspace, '.dkg-adapter');
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        targetStateDir.replace(/\\/g, '/'),
+        configuredStateDir.replace(/\\/g, '/'),
       );
       expect(watermarkPath.replace(/\\/g, '/')).toBe(
-        path.join(targetStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+        path.join(configuredStateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
-      expect(watermarkPath.replace(/\\/g, '/')).not.toContain(staleConfigStateDir.replace(/\\/g, '/'));
+      expect(watermarkPath.replace(/\\/g, '/')).not.toContain(targetStateDir.replace(/\\/g, '/'));
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
       else process.env.OPENCLAW_STATE_DIR = prevEnv;
       try { fs.rmSync(installedWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
-      try { fs.rmSync(staleWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(configuredStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   });
 

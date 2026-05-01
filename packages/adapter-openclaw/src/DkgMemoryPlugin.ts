@@ -49,6 +49,7 @@ import type {
 } from './types.js';
 import {
   isObjectRecord,
+  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   resolveOpenClawMergedConfig,
 } from './openclaw-config.js';
@@ -806,7 +807,10 @@ function buildDisabledMemoryCapability(): MemoryPluginCapability {
  * `runtime.cfg`, or `runtime.config`, while others pass the adapter's
  * validated plugin config directly as `api.config` / `api.pluginConfig`.
  * Prefer the merged slot owner when it exists; for direct-config-only gateway
- * phases, explicit `memory.enabled` is the scoped ownership signal.
+ * phases, explicit `memory.enabled` is the scoped ownership signal, and a
+ * full adapter-config snapshot that omits `memory` means the memory module is
+ * disabled by default. State/setup metadata-only snapshots remain partial and
+ * carry no memory-slot intent.
  */
 type MemorySlotOwnershipSource = 'merged-config' | 'direct-plugin-config';
 
@@ -832,18 +836,22 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
   const candidates = [
-    anyApi?.cfg,
-    anyApi?.config,
-    anyApi?.pluginConfig,
-    runtime?.cfg,
-    runtime?.config,
-    runtime?.pluginConfig,
+    { config: anyApi?.cfg, omittedMemoryMeansDisabled: true },
+    { config: anyApi?.config, omittedMemoryMeansDisabled: true },
+    { config: anyApi?.pluginConfig, omittedMemoryMeansDisabled: true },
+    { config: runtime?.cfg, omittedMemoryMeansDisabled: false },
+    { config: runtime?.config, omittedMemoryMeansDisabled: false },
+    { config: runtime?.pluginConfig, omittedMemoryMeansDisabled: false },
   ];
-  for (const candidate of candidates) {
+  for (const { config: candidate, omittedMemoryMeansDisabled } of candidates) {
     if (!looksLikeAdapterPluginConfig(candidate)) continue;
     const memory = (candidate as Record<string, unknown>).memory;
-    if (!isObjectRecord(memory) || !Object.prototype.hasOwnProperty.call(memory, 'enabled')) continue;
-    return memory.enabled === true;
+    if (isObjectRecord(memory) && Object.prototype.hasOwnProperty.call(memory, 'enabled')) {
+      return memory.enabled === true;
+    }
+    if (omittedMemoryMeansDisabled && !isStateMetadataOnlyAdapterConfig(candidate)) {
+      return false;
+    }
   }
   return undefined;
 }

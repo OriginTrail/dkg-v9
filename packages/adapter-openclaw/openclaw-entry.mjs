@@ -98,9 +98,18 @@ function resolveEntryConfig(api, options = {}) {
     directApiConfigFrom(anyApi?.cfg),
   ].filter(isObjectRecord);
   const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
-  const currentDirectConfigs = currentEntryConfigs.length > 0 || currentDirectApiConfigs.length > 0
+  const currentEntryConfigsAreMetadataOnly =
+    currentEntryConfigs.length > 0 &&
+    currentEntryConfigs.every(isStateMetadataOnlyAdapterConfig);
+  const currentPluginConfigForMetadataEntry =
+    currentEntryConfigsAreMetadataOnly
+      ? stripStateMetadataFromAdapterConfig(currentPluginConfig)
+      : currentPluginConfig;
+  const currentDirectConfigs = currentDirectApiConfigs.length > 0
     ? currentDirectApiConfigs
-    : [currentPluginConfig].filter(isObjectRecord);
+    : currentEntryConfigs.length === 0 || currentEntryConfigsAreMetadataOnly
+      ? [currentPluginConfigForMetadataEntry].filter(isObjectRecord)
+      : [];
   const fallbackDirectConfigs = [
     directPluginConfigFrom(runtime?.config),
     directPluginConfigFrom(runtime?.cfg),
@@ -115,10 +124,10 @@ function resolveEntryConfig(api, options = {}) {
       : fallbackDirectConfigs;
   const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
+  const configSources = [...entryConfigs, ...directConfigs];
   const configIsPartial =
     !hasConfigSource ||
-    (entryConfigs.length > 0 && entryConfigs.every(isStateMetadataOnlyAdapterConfig)) ||
-    (entryConfigs.length === 0 && directConfigs.length > 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
+    configSources.every(isStateMetadataOnlyAdapterConfig);
   const currentConfigSources = [
     ...currentEntryConfigs,
     ...currentDirectConfigs,
@@ -210,6 +219,17 @@ function directPluginConfigFrom(config) {
     return config;
   }
   return undefined;
+}
+
+function stripStateMetadataFromAdapterConfig(config) {
+  if (!isObjectRecord(config)) return undefined;
+  const {
+    stateDir: _stateDir,
+    stateDirSource: _stateDirSource,
+    installedWorkspace: _installedWorkspace,
+    ...rest
+  } = config;
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

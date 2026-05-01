@@ -53,6 +53,7 @@ import {
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
+import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
 import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
@@ -544,7 +545,10 @@ program
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
     if (!process.env.DKG_NO_BLUE_GREEN) {
-      await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
+      await migrateToBlueGreen((msg) => console.log(msg), {
+        allowRemoteBootstrap: false,
+        repairLiveNodeUi: true,
+      });
     }
 
     if (opts.foreground) {
@@ -2924,7 +2928,10 @@ program
       return;
     }
 
-    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
+    await migrateToBlueGreen((msg) => console.log(msg), {
+      allowRemoteBootstrap: true,
+      repairLiveNodeUi: false,
+    });
     console.log('Checking for updates and applying...');
     try {
       const updateStatus = await performUpdateWithStatus(au, (msg) => console.log(msg), {
@@ -2986,6 +2993,9 @@ program
     const targetEntry = slotEntryPoint(targetDir);
     if (!targetEntry) {
       console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
+      process.exit(1);
+    }
+    if (!ensureRollbackNodeUiBundle(targetDir, target)) {
       process.exit(1);
     }
 

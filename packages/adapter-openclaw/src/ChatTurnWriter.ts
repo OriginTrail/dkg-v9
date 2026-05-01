@@ -16,6 +16,8 @@ import { createHash } from "crypto";
  * when typed `agent_end` is silent. Those events are normalized into the W4b
  * envelope and deduped against internal `message:received/message:sent` by
  * channel/account/conversation/messageId, outside the Node-UI marker space.
+ * Weak W4b replay markers are additionally bound to provider message IDs so
+ * same-text repeats in one transcript do not suppress the wrong occurrence.
  */
 
 interface Logger {
@@ -54,6 +56,7 @@ interface ComputedChatTurnPair {
   pairIndex: number;
   externalTurnIds: string[];
   externalDirect: boolean;
+  messageIds: string[];
 }
 
 interface ExternalMarkerAction {
@@ -183,7 +186,10 @@ export class ChatTurnWriter {
   // persist jobs here, otherwise the reset assumption "all persists for
   // this session are tracked" is silently violated.
   private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
-  private promotedSessionIds: Map<string, string> = new Map();
+  // Job-scoped promotion target for in-flight persists. A conversationless
+  // sessionKey can later appear in many conversations, so promotion must never
+  // become a standing alias for future events.
+  private promotedPersistJobs: Map<Promise<void>, string> = new Map();
   // Per-session reset promises. `onAgentEnd` / `onMessageSent` await these
   // before processing so a compacted message array can't be read against
   // a stale watermark while the reset is still draining.
@@ -570,7 +576,7 @@ export class ChatTurnWriter {
       const lastIdx = pairs.length - 1;
       const job = this.trackPersistJob(sessionId, async () => {
         for (let i = 0; i < pairs.length; i++) {
-          const { user, assistant, pairIndex, externalTurnIds } = pairs[i];
+          const { user, assistant, pairIndex, externalTurnIds, messageIds } = pairs[i];
           if (!user && !assistant) continue;
           const externalMarkerAction = externalCursorKey
             ? this.consumeExternalTurnMarkersForPair(
@@ -593,7 +599,8 @@ export class ChatTurnWriter {
             if (externalMarkerAction.skip) continue;
           }
           const weakMarker = weakConversationCursorKey
-            ? this.weakW4bExternalMarkerId(user, assistant)
+            ? this.weakW4bExternalMarkerIds(user, assistant, messageIds)
+              .find((marker) => this.hasExternalTurnMarker(weakConversationCursorKey, marker)) ?? ""
             : "";
           if (weakConversationCursorKey && weakMarker && this.hasExternalTurnMarker(weakConversationCursorKey, weakMarker)) {
             const previousWeakMarkerCount =
@@ -725,7 +732,9 @@ export class ChatTurnWriter {
   }
 
   private deleteTrackedPersistJob(sessionId: string, job: Promise<void>): void {
-    const candidates = new Set([sessionId, this.resolvePromotedSessionId(sessionId)]);
+    const promotedSessionId = this.promotedPersistJobs.get(job);
+    const candidates = new Set([sessionId]);
+    if (promotedSessionId) candidates.add(promotedSessionId);
     let removed = false;
     for (const candidate of candidates) {
       const bucket = this.inFlightPersists.get(candidate);
@@ -733,6 +742,7 @@ export class ChatTurnWriter {
       removed = bucket.delete(job) || removed;
       if (bucket.size === 0) this.inFlightPersists.delete(candidate);
     }
+    this.promotedPersistJobs.delete(job);
     if (removed) return;
     for (const [key, bucket] of Array.from(this.inFlightPersists.entries())) {
       if (!bucket.delete(job)) continue;
@@ -926,7 +936,6 @@ export class ChatTurnWriter {
       // N turns" no longer maps to the new pair indices. Leaving stale
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
-      this.clearSessionPromotionAliases(sessionId);
     }
     this.clearMessageHookDedupForSessions(ids);
     // External markers record daemon-success facts from direct-channel
@@ -1201,12 +1210,13 @@ export class ChatTurnWriter {
         // reset gate sees this in-flight write and `Promise.allSettled`s
         // it. Without tracking, a `message:sent` write mid-compaction
         // could land its `saveWatermark()` after the reset clears state.
-        this.trackPersistJob(sessionId, async () => {
+        let w4bJob: Promise<void> | undefined;
+        w4bJob = this.trackPersistJob(sessionId, async () => {
           let daemonPersisted = false;
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
             daemonPersisted = true;
-            const completionSessionId = this.resolvePromotedSessionId(sessionId);
+            const completionSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
             // Post-success: stamp the content-only `w4bOrigin` key on
             // the SHORT-TTL cross-path map (T5) so a later W4a
             // `agent_end` last-pair peek can see that W4b already
@@ -1233,7 +1243,12 @@ export class ChatTurnWriter {
                 completionSessionId,
                 (this.w4bSessionCounts.get(completionSessionId) ?? 0) + 1,
               );
-              this.markWeakW4bTurnPersisted(completionSessionId, userText, assistantText);
+              this.markWeakW4bTurnPersisted(
+                completionSessionId,
+                userText,
+                assistantText,
+                this.w4bWeakMarkerOccurrences(w4bDiscriminator, queuedMeta),
+              );
               // T17 — Persist the new count to disk via the
               // debounced flush so a process restart preserves
               // the "skip these pairs in computeDelta" floor.
@@ -1268,7 +1283,7 @@ export class ChatTurnWriter {
             // next outbound will collapse the full queue (old items +
             // new) into one user-side, matching W4a's pairing.
             if (queuedItems.length > 0) {
-              const restoreKey = this.resolvePromotedSessionId(conversationKey);
+              const restoreKey = this.resolvePromotedPersistJobSession(conversationKey, w4bJob);
               const restored = this.pendingUserMessages.get(restoreKey) ?? [];
               restored.unshift(...queuedItems);
               this.pendingUserMessages.set(restoreKey, restored);
@@ -1281,7 +1296,7 @@ export class ChatTurnWriter {
             // anymore; only stamping happens post-success above.
             if (outboundDedupKey) this.deleteMessageHookDedupKey(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
-            const failureSessionId = this.resolvePromotedSessionId(sessionId);
+            const failureSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
             if (failureSessionId !== sessionId) this.releaseTurnIdReservation(failureSessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
@@ -1291,10 +1306,11 @@ export class ChatTurnWriter {
             // 5s post-success window; on failure the reservation must
             // not leak to block legitimate later same-content turns.
             this.unmarkCrossPathInflight(sessionId, w4bOriginKey);
-            const finalSessionId = this.resolvePromotedSessionId(sessionId);
+            const finalSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
             if (finalSessionId !== sessionId) this.unmarkCrossPathInflight(finalSessionId, w4bOriginKey);
           }
-        }).catch(() => {});
+        });
+        w4bJob.catch(() => {});
       }
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageSent] Error", { err });
@@ -1488,7 +1504,6 @@ export class ChatTurnWriter {
   }
 
   private promoteSessionState(fromSessionId: string, strongSessionId: string): void {
-    this.recordSessionPromotion(fromSessionId, strongSessionId);
     let changed = false;
     let durableChanged = false;
     if (this.promoteInFlightPersists(fromSessionId, strongSessionId)) {
@@ -1547,26 +1562,8 @@ export class ChatTurnWriter {
     }
   }
 
-  private recordSessionPromotion(fromSessionId: string, strongSessionId: string): void {
-    const resolvedStrongSessionId = this.resolvePromotedSessionId(strongSessionId);
-    if (!fromSessionId || fromSessionId === resolvedStrongSessionId) return;
-    this.promotedSessionIds.set(fromSessionId, resolvedStrongSessionId);
-    for (const [alias, target] of Array.from(this.promotedSessionIds.entries())) {
-      if (target === fromSessionId) this.promotedSessionIds.set(alias, resolvedStrongSessionId);
-    }
-  }
-
-  private resolvePromotedSessionId(sessionId: string): string {
-    let current = sessionId;
-    const seen = new Set<string>();
-    while (current && !seen.has(current)) {
-      seen.add(current);
-      const next = this.promotedSessionIds.get(current);
-      if (!next || next === current) break;
-      current = next;
-    }
-    if (current && current !== sessionId) this.promotedSessionIds.set(sessionId, current);
-    return current || sessionId;
+  private resolvePromotedPersistJobSession(sessionId: string, job?: Promise<void>): string {
+    return job ? this.promotedPersistJobs.get(job) ?? sessionId : sessionId;
   }
 
   private promoteInFlightPersists(fromSessionId: string, strongSessionId: string): boolean {
@@ -1576,16 +1573,13 @@ export class ChatTurnWriter {
       return false;
     }
     const target = this.inFlightPersists.get(strongSessionId) ?? new Set<Promise<void>>();
-    for (const job of source) target.add(job);
+    for (const job of source) {
+      target.add(job);
+      this.promotedPersistJobs.set(job, strongSessionId);
+    }
     this.inFlightPersists.set(strongSessionId, target);
     this.inFlightPersists.delete(fromSessionId);
     return true;
-  }
-
-  private clearSessionPromotionAliases(sessionId: string): void {
-    for (const [from, to] of Array.from(this.promotedSessionIds.entries())) {
-      if (from === sessionId || to === sessionId) this.promotedSessionIds.delete(from);
-    }
   }
 
   private promoteCompositeSessionKeys(map: Map<string, number>, fromSessionId: string, strongSessionId: string): boolean {
@@ -1860,6 +1854,7 @@ export class ChatTurnWriter {
       text: string;
       externalTurnIds: string[];
       externalDirect: boolean;
+      messageIds: string[];
     }> = [];
     let pairIndex = 0;
     for (const msg of messages) {
@@ -1878,6 +1873,7 @@ export class ChatTurnWriter {
             text: userText,
             externalTurnIds: this.extractExternalTurnIds(msg),
             externalDirect: this.hasExternalDirectChannelMetadata(msg),
+            messageIds: this.extractMessageIds(msg),
           });
         }
       } else if (msg.role === "assistant") {
@@ -1925,6 +1921,7 @@ export class ChatTurnWriter {
         const externalTurnIds = externalDirect
           ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
           : [];
+        const messageIds = Array.from(new Set(pendingUsers.flatMap((pending) => pending.messageIds)));
         pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {
           pairs.push({
@@ -1933,6 +1930,7 @@ export class ChatTurnWriter {
             pairIndex,
             externalTurnIds,
             externalDirect,
+            messageIds,
           });
         }
         pairIndex++;
@@ -2017,6 +2015,26 @@ export class ChatTurnWriter {
     }
 
     return Array.from(ids);
+  }
+
+  private extractMessageIds(msg: ChatTurnMessage): string[] {
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    const messageId = firstString(
+      (msg as any).messageId,
+      (context as any).messageId,
+      (metadata as any).messageId,
+      (msg as any).MessageId,
+      (context as any).MessageId,
+      (metadata as any).MessageId,
+      (msg as any).message_id,
+      (context as any).message_id,
+      (metadata as any).message_id,
+      (msg as any).id,
+      (context as any).id,
+      (metadata as any).id,
+    );
+    return messageId ? [messageId] : [];
   }
 
   private hasExternalDirectChannelMetadata(msg: ChatTurnMessage): boolean {
@@ -2148,17 +2166,32 @@ export class ChatTurnWriter {
     return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
-  private weakW4bExternalMarkerId(user: string, assistant: string): string {
-    return `weak-w4b::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
+  private weakW4bExternalMarkerId(user: string, assistant: string, occurrence: string): string {
+    if (!occurrence) return "";
+    return `weak-w4b::${this.identityHash([occurrence])}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
-  private markWeakW4bTurnPersisted(sessionId: string, user: string, assistant: string): void {
+  private weakW4bExternalMarkerIds(user: string, assistant: string, messageIds: string[]): string[] {
+    const occurrence = this.w4bInboundMessageDiscriminator(messageIds);
+    const marker = this.weakW4bExternalMarkerId(user, assistant, occurrence);
+    return marker ? [marker] : [];
+  }
+
+  private markWeakW4bTurnPersisted(
+    sessionId: string,
+    user: string,
+    assistant: string,
+    occurrences: string[],
+  ): void {
     const cursor = this.weakConversationCursorKeyFromSessionId(sessionId);
     if (!cursor) return;
-    const marker = this.weakW4bExternalMarkerId(user, assistant);
     const bucket = this.externalTurnMarkers.get(cursor) ?? new Map<string, number>();
-    bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
-    this.externalTurnMarkers.set(cursor, bucket);
+    for (const occurrence of occurrences) {
+      const marker = this.weakW4bExternalMarkerId(user, assistant, occurrence);
+      if (!marker) continue;
+      bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+    }
+    if (bucket.size > 0) this.externalTurnMarkers.set(cursor, bucket);
   }
 
   private consumeExternalTurnMarkersForPair(
@@ -2316,8 +2349,29 @@ export class ChatTurnWriter {
     const inboundIds = pendingMeta
       .map((meta) => meta.messageId)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    if (inboundIds.length === 0) return "";
-    return `in::${this.identityHash(inboundIds)}`;
+    return this.w4bInboundMessageDiscriminator(inboundIds);
+  }
+
+  private w4bInboundMessageDiscriminator(messageIds: string[]): string {
+    const ids = messageIds
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+    if (ids.length === 0) return "";
+    return `in::${this.identityHash(ids)}`;
+  }
+
+  private w4bWeakMarkerOccurrences(
+    discriminator: string,
+    pendingMeta: PendingUserMessageMeta[],
+  ): string[] {
+    const occurrences = new Set<string>();
+    if (discriminator) occurrences.add(discriminator);
+    const inboundIds = pendingMeta
+      .map((meta) => meta.messageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    const inboundDiscriminator = this.w4bInboundMessageDiscriminator(inboundIds);
+    if (inboundDiscriminator) occurrences.add(inboundDiscriminator);
+    return Array.from(occurrences);
   }
   /**
    * @deprecated Kept temporarily for tests that inspect the dedup-map key

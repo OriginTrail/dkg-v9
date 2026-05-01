@@ -477,7 +477,7 @@ describe("ChatTurnWriter", () => {
     restarted.onAgentEnd({
       sessionId: "test",
       messages: [
-        { role: "user", content: "weak marker q" },
+        { role: "user", content: "weak marker q", metadata: { messageId: "weak-marker-in" } },
         { role: "assistant", content: "weak marker a" },
       ],
     }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-marker", sessionKey: "agent:main:real" });
@@ -488,6 +488,51 @@ describe("ChatTurnWriter", () => {
     expect((restarted as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
     expect((restarted as any).cachedWatermarks.get(strongSessionId)).toBe(0);
     expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    restarted.flushSync();
+  });
+
+  it("T359 - per-message weak marker skips only the matching repeated occurrence", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "repeat marker q", metadata: { messageId: "repeat-target-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat-marker" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "repeat marker a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat-marker" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "repeat marker q", metadata: { messageId: "repeat-older-in" } },
+        { role: "assistant", content: "repeat marker a" },
+        { role: "user", content: "repeat marker q", metadata: { messageId: "repeat-target-in" } },
+        { role: "assistant", content: "repeat marker a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat-marker", sessionKey: "agent:main:real" });
+    await flushMicrotasks();
+
+    const strongSessionId = "openclaw:telegram:bot:chat-repeat-marker:agent%3Amain%3Areal";
+    const olderTurnId = (restarted as any).deterministicTurnId(
+      strongSessionId,
+      "repeat marker q",
+      "repeat marker a",
+      0,
+    );
+    const targetTurnId = (restarted as any).deterministicTurnId(
+      strongSessionId,
+      "repeat marker q",
+      "repeat marker a",
+      1,
+    );
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][3]?.turnId).toBe(olderTurnId);
+    expect(mockClient.storeChatTurn.mock.calls[0][3]?.turnId).not.toBe(targetTurnId);
+    expect((restarted as any).cachedWatermarks.get(strongSessionId)).toBe(1);
     restarted.flushSync();
   });
 
@@ -587,6 +632,61 @@ describe("ChatTurnWriter", () => {
     });
     expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
     expect((writer as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+  });
+
+  it("T359 - conversationless promotion does not become a standing alias", async () => {
+    let releaseStore: (() => void) | null = null;
+    let storeCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      storeCalls++;
+      if (storeCalls === 1) {
+        await new Promise<void>((resolve) => { releaseStore = resolve; });
+      }
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "alias first q", metadata: { messageId: "alias-first-in" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "alias first a", success: true },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await flushMicrotasks();
+
+    const conversationlessSessionId = "openclaw:telegram:bot::real-sk";
+    const strongSessionId = "openclaw:telegram:bot:chat-alias-A:real-sk";
+    expect((writer as any).inFlightPersists.has(conversationlessSessionId)).toBe(true);
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "alias first q", metadata: { messageId: "alias-first-in" } },
+        { role: "assistant", content: "alias first a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-alias-A", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    releaseStore!();
+    await writer.flush();
+    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+
+    mockClient.storeChatTurn.mockClear();
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "alias second q", metadata: { messageId: "alias-second-in" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "alias second a", success: true },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await writer.flush();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(conversationlessSessionId);
+    expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
+    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
   });
 
   it("T359 - typed endpoint-only events without session identity are dropped", async () => {

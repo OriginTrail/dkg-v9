@@ -895,6 +895,37 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("redelivered move all");
   });
 
+  it("T359 - typed outbound pairs when only one side carries sessionId", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "split strong inbound", metadata: { messageId: "split-strong-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-split-strong", sessionId: "typed-session-a" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "split weak outbound", success: true, metadata: { messageId: "split-weak-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-split-strong" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("split strong inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("split weak outbound");
+
+    mockClient.storeChatTurn.mockClear();
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "split weak inbound", metadata: { messageId: "split-weak-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-split-weak" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "split strong outbound", success: true, metadata: { messageId: "split-strong-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-split-weak", sessionId: "typed-session-b" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("split weak inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("split strong outbound");
+  });
+
   it("T359 - queue promotion appends later weak duplicates after earlier strong messages", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "first strong inbound", metadata: { messageId: "order-strong-first" } },

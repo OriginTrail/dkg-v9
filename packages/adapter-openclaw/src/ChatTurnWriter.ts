@@ -99,6 +99,7 @@ export interface InternalMessageEvent {
 interface PendingUserMessageMeta {
   messageId?: string;
   arrivalId?: string;
+  typedSessionIdFallback?: boolean;
 }
 
 /**
@@ -1059,16 +1060,19 @@ export class ChatTurnWriter {
     if (channelId === "dkg-ui") return null;
     const accountId = firstString(ctx.accountId, event.accountId, eventContext.accountId, metadata.accountId, metadata.botId);
     const conversationId = this.typedHookConversationId(event, eventContext, metadata, ctx);
-    const strongSessionKey = firstString(
+    const explicitSessionKey = firstString(
       ctx.sessionKey,
       event.sessionKey,
       eventContext.sessionKey,
       metadata.sessionKey,
+    );
+    const typedSessionIdFallback = firstString(
       ctx.sessionId,
       event.sessionId,
       eventContext.sessionId,
       metadata.sessionId,
     );
+    const strongSessionKey = explicitSessionKey ?? typedSessionIdFallback;
     const sessionKey = strongSessionKey ?? this.weakSessionKey(channelId, accountId, conversationId);
     if (!channelId || !sessionKey) {
       this.logger.debug?.("[ChatTurnWriter] Dropping typed message hook without channel/session identity");
@@ -1085,6 +1089,7 @@ export class ChatTurnWriter {
     if (messageId) context.messageId = messageId;
     if (typeof successValue === "boolean") context.success = successValue;
     if (direction === "outbound" && typeof context.success !== "boolean") context.success = true;
+    if (!explicitSessionKey && typedSessionIdFallback) (context as any).typedSessionIdFallback = true;
 
     return {
       sessionKey,
@@ -1219,7 +1224,11 @@ export class ChatTurnWriter {
       queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
       const metaQueue = this.pendingUserMessageMeta.get(conversationKey) ?? [];
-      metaQueue.push({ messageId: this.messageEventId(ev), arrivalId: this.nextPendingUserArrivalId() });
+      metaQueue.push({
+        messageId: this.messageEventId(ev),
+        arrivalId: this.nextPendingUserArrivalId(),
+        typedSessionIdFallback: (ev as any)?.context?.typedSessionIdFallback === true,
+      });
       this.pendingUserMessageMeta.set(conversationKey, metaQueue);
       if (inboundDedupKey) this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
     } catch (err) {
@@ -1241,6 +1250,7 @@ export class ChatTurnWriter {
       // so we don't write a turn whose state was about to be wiped.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
+      this.promotePendingInboundQueueForOutbound(conversationKey, ev);
       const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Consume the SAME set of pending inbounds that
@@ -1703,6 +1713,46 @@ export class ChatTurnWriter {
       );
     }
     return candidateStrong && !existingStrong;
+  }
+
+  private pendingQueueUsesTypedSessionFallback(queueKey: string): boolean {
+    const messages = this.pendingUserMessages.get(queueKey) ?? [];
+    const meta = this.pendingUserMessageMeta.get(queueKey) ?? [];
+    return messages.length > 0 && messages.every((_, index) => meta[index]?.typedSessionIdFallback === true);
+  }
+
+  private shouldMoveInboundQueueForOutbound(
+    existingKey: string,
+    targetKey: string,
+    outboundUsesTypedSessionIdFallback: boolean,
+  ): boolean {
+    const existing = this.parseComposedSessionId(existingKey);
+    const target = this.parseComposedSessionId(targetKey);
+    if (!existing || !target) return false;
+    if (!target.conversationId) return false;
+    if (existing.channelId !== target.channelId) return false;
+    if (existing.accountId !== target.accountId) return false;
+    if (existing.conversationId !== target.conversationId) return false;
+    const existingWeak = this.isWeakSessionKey(existing.sessionKey);
+    const targetWeak = this.isWeakSessionKey(target.sessionKey);
+    if (existingWeak === targetWeak) return false;
+    if (targetWeak) return this.pendingQueueUsesTypedSessionFallback(existingKey);
+    return outboundUsesTypedSessionIdFallback;
+  }
+
+  private promotePendingInboundQueueForOutbound(targetKey: string, ev: InternalMessageEvent): void {
+    const targetQueue = this.pendingUserMessages.get(targetKey);
+    if (targetQueue && targetQueue.length > 0) return;
+    const outboundUsesTypedSessionIdFallback = (ev as any)?.context?.typedSessionIdFallback === true;
+    const candidates: string[] = [];
+    for (const [candidateKey, messages] of Array.from(this.pendingUserMessages.entries())) {
+      if (candidateKey === targetKey || !messages || messages.length === 0) continue;
+      if (this.shouldMoveInboundQueueForOutbound(candidateKey, targetKey, outboundUsesTypedSessionIdFallback)) {
+        candidates.push(candidateKey);
+      }
+    }
+    if (candidates.length !== 1) return;
+    this.movePendingInboundQueue(candidates[0], targetKey);
   }
 
   private movePendingInboundQueue(fromKey: string, toKey: string): void {

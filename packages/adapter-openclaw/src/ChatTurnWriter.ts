@@ -57,6 +57,7 @@ interface ComputedChatTurnPair {
   externalTurnIds: string[];
   externalDirect: boolean;
   messageIds: string[];
+  assistantMessageIds: string[];
 }
 
 interface ExternalMarkerAction {
@@ -576,7 +577,7 @@ export class ChatTurnWriter {
       const lastIdx = pairs.length - 1;
       const job = this.trackPersistJob(sessionId, async () => {
         for (let i = 0; i < pairs.length; i++) {
-          const { user, assistant, pairIndex, externalTurnIds, messageIds } = pairs[i];
+          const { user, assistant, pairIndex, externalTurnIds, messageIds, assistantMessageIds } = pairs[i];
           if (!user && !assistant) continue;
           const externalMarkerAction = externalCursorKey
             ? this.consumeExternalTurnMarkersForPair(
@@ -603,6 +604,7 @@ export class ChatTurnWriter {
             user,
             assistant,
             messageIds,
+            assistantMessageIds,
           );
           if (typedW4bMarkerHit) {
             const { cursorKey, marker } = typedW4bMarkerHit;
@@ -1916,6 +1918,7 @@ export class ChatTurnWriter {
           ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
           : [];
         const messageIds = Array.from(new Set(pendingUsers.flatMap((pending) => pending.messageIds)));
+        const assistantMessageIds = this.extractMessageIds(msg);
         pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {
           pairs.push({
@@ -1925,6 +1928,7 @@ export class ChatTurnWriter {
             externalTurnIds,
             externalDirect,
             messageIds,
+            assistantMessageIds,
           });
         }
         pairIndex++;
@@ -2165,10 +2169,21 @@ export class ChatTurnWriter {
     return `weak-w4b::${this.identityHash([occurrence])}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
-  private typedW4bExternalMarkerIds(user: string, assistant: string, messageIds: string[]): string[] {
-    const occurrence = this.w4bInboundMessageDiscriminator(messageIds);
-    const marker = this.typedW4bExternalMarkerId(user, assistant, occurrence);
-    return marker ? [marker] : [];
+  private typedW4bExternalMarkerIds(
+    user: string,
+    assistant: string,
+    messageIds: string[],
+    assistantMessageIds: string[] = [],
+  ): string[] {
+    const markers = new Set<string>();
+    const inboundOccurrence = this.w4bInboundMessageDiscriminator(messageIds);
+    const inboundMarker = this.typedW4bExternalMarkerId(user, assistant, inboundOccurrence);
+    if (inboundMarker) markers.add(inboundMarker);
+    for (const outboundOccurrence of this.w4bOutboundMessageDiscriminators(assistantMessageIds)) {
+      const outboundMarker = this.typedW4bExternalMarkerId(user, assistant, outboundOccurrence);
+      if (outboundMarker) markers.add(outboundMarker);
+    }
+    return Array.from(markers);
   }
 
   private findTypedW4bExternalMarker(
@@ -2176,8 +2191,9 @@ export class ChatTurnWriter {
     user: string,
     assistant: string,
     messageIds: string[],
+    assistantMessageIds: string[] = [],
   ): { cursorKey: string; marker: string } | null {
-    const markers = this.typedW4bExternalMarkerIds(user, assistant, messageIds);
+    const markers = this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds);
     for (const cursorKey of cursorKeys) {
       for (const marker of markers) {
         if (this.hasExternalTurnMarker(cursorKey, marker)) return { cursorKey, marker };
@@ -2374,12 +2390,24 @@ export class ChatTurnWriter {
     return `in::${this.identityHash(ids)}`;
   }
 
+  private w4bOutboundMessageDiscriminators(messageIds: string[]): string[] {
+    return Array.from(new Set(messageIds
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0)
+      .map((id) => `out::${id}`)));
+  }
+
   private typedW4bMarkerOccurrences(
     discriminator: string,
     pendingMeta: PendingUserMessageMeta[],
   ): string[] {
     const occurrences = new Set<string>();
-    if (discriminator) occurrences.add(discriminator);
+    const normalizedDiscriminator = discriminator.startsWith("msg::")
+      ? discriminator.slice("msg::".length)
+      : discriminator;
+    if (normalizedDiscriminator.startsWith("in::") || normalizedDiscriminator.startsWith("out::")) {
+      occurrences.add(normalizedDiscriminator);
+    }
     const inboundIds = pendingMeta
       .map((meta) => meta.messageId)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
@@ -2564,6 +2592,34 @@ export class ChatTurnWriter {
     return `openclaw:weak:${this.identityHash([parsed.channelId, parsed.accountId, parsed.conversationId])}`;
   }
 
+  private concreteSessionCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string {
+    if (!parts.channelId || !parts.conversationId || !parts.sessionKey || this.isWeakSessionKey(parts.sessionKey)) {
+      return "";
+    }
+    return `openclaw:typed:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.conversationId)),
+      this.encodeIdField(this.sanitize(parts.sessionKey)),
+    ])}`;
+  }
+
+  private concreteSessionCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || !parsed.conversationId || !parsed.sessionKey || this.isWeakSessionKey(parsed.sessionKey)) return "";
+    return `openclaw:typed:${this.identityHash([
+      parsed.channelId,
+      parsed.accountId,
+      parsed.conversationId,
+      parsed.sessionKey,
+    ])}`;
+  }
+
   private conversationlessSessionCursorKey(parts: {
     channelId?: string;
     accountId?: string;
@@ -2590,6 +2646,7 @@ export class ChatTurnWriter {
     sessionKey?: string;
   }): string[] {
     return Array.from(new Set([
+      this.concreteSessionCursorKey(parts),
       this.weakConversationCursorKey(parts),
       this.conversationlessSessionCursorKey(parts),
     ].filter((key) => key.length > 0)));
@@ -2597,6 +2654,7 @@ export class ChatTurnWriter {
 
   private typedW4bMarkerCursorKeysFromSessionId(sessionId: string): string[] {
     return Array.from(new Set([
+      this.concreteSessionCursorKeyFromSessionId(sessionId),
       this.weakConversationCursorKeyFromSessionId(sessionId),
       this.conversationlessSessionCursorKeyFromSessionId(sessionId),
     ].filter((key) => key.length > 0)));

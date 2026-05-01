@@ -1069,6 +1069,82 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - concrete typed W4b marker suppresses W4a replay after reset clears counts", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "concrete marker q", metadata: { messageId: "concrete-marker-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-marker", sessionKey: "sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "concrete marker a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-marker", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+
+    const sessionId = "openclaw:telegram:bot:chat-concrete-marker:sk";
+    expect((writer as any).w4bSessionCounts.get(sessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    await restarted.onBeforeCompaction({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-concrete-marker",
+      sessionKey: "sk",
+    });
+    expect((restarted as any).w4bSessionCounts.has(sessionId)).toBe(false);
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "concrete marker q", metadata: { messageId: "concrete-marker-in" } },
+        { role: "assistant", content: "concrete marker a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-marker", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(0);
+    restarted.flushSync();
+  });
+
+  it("T359 - outbound-only typed W4b marker suppresses W4a replay after reset", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "outbound marker q" },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-outbound-marker", sessionKey: "sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "outbound marker a", success: true, metadata: { messageId: "outbound-marker-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-outbound-marker", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+
+    const sessionId = "openclaw:telegram:bot:chat-outbound-marker:sk";
+    expect((writer as any).w4bSessionCounts.get(sessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    await restarted.onBeforeCompaction({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-outbound-marker",
+      sessionKey: "sk",
+    });
+    expect((restarted as any).w4bSessionCounts.has(sessionId)).toBe(false);
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "outbound marker q" },
+        { role: "assistant", content: "outbound marker a", metadata: { messageId: "outbound-marker-out" } },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-outbound-marker", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(0);
+    restarted.flushSync();
+  });
+
   it("T96 - W4b durable write failure retries state flush after daemon success", async () => {
     const writeSpy = vi.spyOn(writer as any, "writeWatermarkFile")
       .mockImplementationOnce(() => false);

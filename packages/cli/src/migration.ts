@@ -187,9 +187,25 @@ export async function migrateToBlueGreen(
     throw lastError;
   };
 
+  const runtimeBuildCommand = (slotDir: string): string => {
+    try {
+      const rootPkg = JSON.parse(readFileSync(join(slotDir, 'package.json'), 'utf-8')) as {
+        scripts?: Record<string, string>;
+      };
+      if (typeof rootPkg.scripts?.['build:runtime:packages'] === 'string') {
+        return 'pnpm build:runtime:packages';
+      }
+    } catch {
+      // Older or partial slots fall back to the compatibility wrapper below.
+    }
+    return 'pnpm build:runtime';
+  };
+
   const buildRuntimeAndNodeUi = (slotDir: string): void => {
-    runSlotCommand('pnpm build:runtime', slotDir, BUILD_TIMEOUT_MS);
-    runNodeUiStaticBuild(slotDir);
+    runSlotCommand(runtimeBuildCommand(slotDir), slotDir, BUILD_TIMEOUT_MS);
+    if (!existsSync(nodeUiStaticIndexPath(slotDir))) {
+      runNodeUiStaticBuild(slotDir);
+    }
     assertNodeUiStaticBundle(slotDir);
   };
 

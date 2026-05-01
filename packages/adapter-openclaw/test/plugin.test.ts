@@ -2686,6 +2686,8 @@ describe('DkgNodePlugin', () => {
     const events = onSpy.mock.calls.map((c: any) => c[0]);
     expect(events).toContain('before_prompt_build');
     expect(events).toContain('agent_end');
+    expect(events).toContain('before_compaction');
+    expect(events).toContain('before_reset');
   });
 
   it('T31 — multi-phase init re-bind: typed hooks installed on EVERY api so emit-against-old-api still fires', async () => {
@@ -2745,6 +2747,97 @@ describe('DkgNodePlugin', () => {
     // reach a live handler. We don't have an emit primitive in the mock
     // here, but the surface count is the load-bearing invariant.
     expect((plugin as any).allHookSurfaces.size).toBe(2);
+  });
+
+  it('T338 - typed fires on one multi-phase surface suppress sibling timeout warnings', async () => {
+    vi.useFakeTimers();
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    } as any);
+
+    const makeApi = () => {
+      const handlers = new Map<string, Array<(...args: any[]) => unknown>>();
+      const api = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: vi.fn(),
+        registerMemoryCapability: vi.fn(),
+        on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
+          const existing = handlers.get(event) ?? [];
+          existing.push(handler);
+          handlers.set(event, existing);
+        }),
+        logger,
+      } as unknown as OpenClawPluginApi;
+      return { api, handlers };
+    };
+
+    const api1 = makeApi();
+    const api2 = makeApi();
+    const api3 = makeApi();
+
+    try {
+      plugin.register(api1.api);
+      plugin.register(api2.api);
+      plugin.register(api3.api);
+
+      const writer = (plugin as any).chatTurnWriter;
+      writer.onAgentEnd = vi.fn().mockResolvedValue(undefined);
+
+      await api2.handlers.get('before_prompt_build')![0](
+        { messages: [{ role: 'user', content: 'hello dkg' }] },
+        { sessionKey: 's1' },
+      );
+      await api2.handlers.get('agent_end')![0](
+        { messages: [{ role: 'user', content: 'hello dkg' }, { role: 'assistant', content: 'hi' }] },
+        { sessionKey: 's1' },
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const warnMessages = logger.warn.mock.calls.map((args) => String(args[0]));
+      expect(warnMessages.filter((msg) => msg.includes('typed:before_prompt_build'))).toHaveLength(0);
+      expect(warnMessages.filter((msg) => msg.includes('typed:agent_end'))).toHaveLength(0);
+      expect(writer.onAgentEnd).toHaveBeenCalledTimes(1);
+
+      const peerCommittedSurfaces = Array.from((plugin as any).allHookSurfaces).filter((surface: any) => {
+        const stats = surface.getDispatchStats();
+        return stats['typed:agent_end']?.commitState === 'committed-by-peer-fire';
+      });
+      expect(peerCommittedSurfaces.length).toBeGreaterThan(0);
+    } finally {
+      await plugin.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('T338 - full-mode typed install failures still warn loudly', () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    } as any);
+    const api: any = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: vi.fn(),
+      logger,
+    };
+
+    plugin.register(api);
+
+    const warnMessages = logger.warn.mock.calls.map((args) => String(args[0]));
+    expect(warnMessages.some((msg) => msg.includes('install FAILED: typed hook before_prompt_build'))).toBe(true);
+    expect(warnMessages.some((msg) => msg.includes('install FAILED: typed hook agent_end'))).toBe(true);
+    const stats = (plugin as any).hookSurface.getDispatchStats();
+    expect(stats['typed:before_prompt_build']?.installedVia).toBe('none');
+    expect(stats['typed:agent_end']?.installedVia).toBe('none');
   });
 
   it('T7 — session_end goes through HookSurface so stop() → register() does NOT accumulate handlers', async () => {
@@ -3413,9 +3506,13 @@ describe('DkgNodePlugin', () => {
       expect(debugMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(true);
       expect(debugMessages.some((msg) => msg.includes("internal:message:received"))).toBe(true);
       expect(debugMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("typed:before_compaction"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("typed:before_reset"))).toBe(true);
       expect(warnMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("internal:message:received"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("typed:before_compaction"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("typed:before_reset"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
     } finally {
       await plugin.stop();

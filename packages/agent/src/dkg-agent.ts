@@ -1217,9 +1217,9 @@ export class DKGAgent {
    * to incoming gossip with an opportunistic dial, we restore the path long
    * before the application-layer sync protocol is invoked.
    *
-   * Best-effort only: we try peerStore-known multiaddrs first, then fall
-   * back to constructing `/p2p-circuit` multiaddrs through each configured
-   * relay. Failures are logged but never surface to the caller.
+   * Best-effort only: for each configured relay that we are already connected
+   * to, construct an explicit `/p2p-circuit` multiaddr and dial. Failures are
+   * logged but never surface to the caller.
    */
   private async maybeDialGossipSender(peerIdStr: string): Promise<void> {
     const selfPeerId = this.node.libp2p.peerId.toString();
@@ -1240,30 +1240,24 @@ export class DKGAgent {
     const shortPeer = peerIdStr.slice(-8);
 
     const { peerIdFromString } = await import('@libp2p/peer-id');
-    let peerId: ReturnType<typeof peerIdFromString>;
     try {
-      peerId = peerIdFromString(peerIdStr);
+      peerIdFromString(peerIdStr);
     } catch (err) {
       this.log.warn(ctx, `Skipping gossip redial for invalid peer id ${shortPeer}: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
-    // First pass: let libp2p try whatever addresses it already knows about
-    // for this peer (direct multiaddrs from identify, previous relay
-    // addresses from peerStore, etc.).
-    try {
-      await this.node.libp2p.dial(peerId, { signal: AbortSignal.timeout(GOSSIP_DIAL_TIMEOUT_MS) });
-      this.log.info(ctx, `Reconnect-on-gossip: dialed ${shortPeer} via peerStore`);
-      return;
-    } catch (err) {
-      this.log.info(ctx, `Reconnect-on-gossip: peerStore dial to ${shortPeer} failed (${err instanceof Error ? err.message : String(err)}); trying relay fallbacks`);
-    }
-
-    // Relay fallback: for each configured relay, construct an explicit
-    // circuit-relay multiaddr and dial. The first relay with a valid
-    // reservation for the sender wins.
     const relays = this.config.relayPeers ?? [];
+    const connectedPeers = new Set(this.node.libp2p.getPeers().map(p => p.toString()));
+    let skippedRelays = 0;
+
     for (const relayAddr of relays) {
+      const relayPeerId = relayAddr.match(/\/p2p\/([^/]+)/)?.[1];
+      if (relayPeerId == null || !connectedPeers.has(relayPeerId)) {
+        skippedRelays++;
+        continue;
+      }
+
       const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${peerIdStr}`;
       try {
         await this.node.libp2p.dial(
@@ -1278,7 +1272,7 @@ export class DKGAgent {
       }
     }
 
-    this.log.info(ctx, `Reconnect-on-gossip: no path to ${shortPeer} via peerStore or ${relays.length} relay(s); will retry after cooldown`);
+    this.log.info(ctx, `Reconnect-on-gossip: no path to ${shortPeer} via ${relays.length - skippedRelays}/${relays.length} connected relay(s); will retry after cooldown`);
   }
 
   /**

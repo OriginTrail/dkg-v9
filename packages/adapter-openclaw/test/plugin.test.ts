@@ -437,6 +437,43 @@ describe('DkgNodePlugin', () => {
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
+  it('rebuilds a registered memory capability when updateConfig refreshes the daemon client', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const initialCapability = registerMemoryCapability.mock.calls[0][0];
+    (plugin as any).initialized = true;
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9300',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(registerMemoryCapability.mock.calls[1][0]).not.toBe(initialCapability);
+  });
+
   it('clears previous memory registry without stamping current direct-config api when ownership is unknown', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',

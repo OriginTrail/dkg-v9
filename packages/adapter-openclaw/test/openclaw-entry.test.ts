@@ -499,7 +499,7 @@ describe('openclaw-entry', () => {
     expect(instance.registerCalls).toEqual([firstApi, secondApi]);
   });
 
-  it('treats empty direct pluginConfig as authoritative so omitted keys can clear stale config', async () => {
+  it('treats empty direct pluginConfig as no current config source', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({}, {
@@ -516,7 +516,11 @@ describe('openclaw-entry', () => {
     entry(secondApi);
 
     const instance = globalThis.__openclawEntryTestInstances![0];
-    expect(instance.config).toEqual({});
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9999',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    });
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
@@ -929,9 +933,10 @@ describe('openclaw-entry', () => {
     (api as any).workspaceDir = '/caller-workspace';
 
     entry(api);
+    entry(api);
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((api as any).workspaceDir).toBe('/caller-workspace');
-    expect(instance.workspaceDirsAtRegister).toEqual(['/caller-workspace']);
+    expect(instance.workspaceDirsAtRegister).toEqual(['/caller-workspace', '/caller-workspace']);
   });
 });

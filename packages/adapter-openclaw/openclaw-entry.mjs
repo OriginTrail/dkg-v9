@@ -98,12 +98,7 @@ function resolveEntryConfig(api, options = {}) {
   const currentDirectApiConfigs = [
     directApiConfigFrom(anyApi?.config),
   ].filter(isObjectRecord);
-  const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig, {
-    allowEmpty:
-      options.hasInstance === true &&
-      currentEntryConfigs.length === 0 &&
-      currentDirectApiConfigs.length === 0,
-  });
+  const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
   const currentDirectConfigs = [
     ...currentDirectApiConfigs,
     currentPluginConfig,
@@ -149,13 +144,14 @@ function resolveEntryConfig(api, options = {}) {
     ? mergeAdapterPluginConfigs(fallbackConfig, config)
     : config;
 
-  const workspaceDir =
+  const configWorkspaceDir =
     workspaceConfig?.agents?.defaults?.workspace ??
     workspaceConfig?.workspace ??
     mergedConfig?.agents?.defaults?.workspace ??
-    mergedConfig?.workspace ??
-    apiWorkspaceDirFrom(anyApi);
-  return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
+    mergedConfig?.workspace;
+  const apiWorkspaceDir = apiWorkspaceDirFrom(anyApi);
+  const workspaceDir = configWorkspaceDir ?? apiWorkspaceDir;
+  return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: configWorkspaceDir, configIsPartial };
 }
 
 function apiWorkspaceDirFrom(api) {
@@ -181,11 +177,8 @@ function directApiConfigFrom(config) {
   return undefined;
 }
 
-function directPluginConfigFrom(config, options = {}) {
+function directPluginConfigFrom(config) {
   if (!isObjectRecord(config)) return undefined;
-  if (options.allowEmpty && Object.keys(config).length === 0) {
-    return config;
-  }
   if (looksLikeAdapterPluginConfig(config)) {
     return config;
   }

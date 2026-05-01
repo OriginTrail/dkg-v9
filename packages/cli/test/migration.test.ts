@@ -45,6 +45,7 @@ function installMocks() {
           writeFileSync(
             join(target, 'package.json'),
             JSON.stringify({
+              dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
               scripts: {
                 'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
                 'build:runtime': RUNTIME_BUILD_COMPAT_WRAPPER,

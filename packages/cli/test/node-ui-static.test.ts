@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  RUNTIME_BUILD_COMPATIBILITY_WRAPPER,
   runtimeBuildCommandFromPackageJson,
   nodeUiNpmStaticIndexPaths,
   nodeUiStaticIndexPaths,
@@ -41,28 +40,42 @@ describe('nodeUiStaticIndexPaths', () => {
 });
 
 describe('runtimeBuildCommandFromPackageJson', () => {
-  it('prefers the runtime-only package build script when present', () => {
+  it('prefers the explicit release runtime build script when configured', () => {
     expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
       scripts: {
         'build:runtime:packages': '...',
-        'build:runtime': RUNTIME_BUILD_COMPATIBILITY_WRAPPER,
+        'build:runtime': 'node prep.js && pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui',
       },
     }))).toBe('pnpm build:runtime:packages');
   });
 
-  it('keeps using build:runtime when the wrapper contains extra prep work', () => {
+  it('keeps using build:runtime when no release runtime build script is configured', () => {
     expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
       scripts: {
         'build:runtime:packages': '...',
-        'build:runtime': `node prep.js && ${RUNTIME_BUILD_COMPATIBILITY_WRAPPER}`,
+        'build:runtime': 'node prep.js && pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui',
       },
     }))).toBe('pnpm build:runtime');
   });
 
-  it('falls back across build:runtime and pnpm build', () => {
+  it('ignores unsafe release runtime script names', () => {
+    expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages && bad' },
+      scripts: {
+        'build:runtime:packages && bad': '...',
+        'build:runtime': '...',
+      },
+    }))).toBe('pnpm build:runtime');
+  });
+
+  it('falls back across build:runtime, build:runtime:packages, and pnpm build', () => {
     expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
       scripts: { 'build:runtime': '...' },
     }))).toBe('pnpm build:runtime');
+    expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      scripts: { 'build:runtime:packages': '...' },
+    }))).toBe('pnpm build:runtime:packages');
     expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
       scripts: { build: 'turbo build' },
     }))).toBe('pnpm build');

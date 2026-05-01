@@ -14,7 +14,6 @@ function makeIo(overrides: Partial<RollbackNodeUiIo>): RollbackNodeUiIo {
       throw new Error('unexpected read');
     },
     rmSync: () => {},
-    renameSync: () => {},
     execSync: () => '',
     log: () => {},
     error: () => {},
@@ -29,7 +28,6 @@ describe('ensureRollbackNodeUiBundle', () => {
     let built = false;
     const commands: string[] = [];
     const removed: string[] = [];
-    const renamed: string[] = [];
     const logs: string[] = [];
     const errors: string[] = [];
     const io = makeIo({
@@ -41,9 +39,6 @@ describe('ensureRollbackNodeUiBundle', () => {
       },
       rmSync: (path) => {
         removed.push(normalizePath(path));
-      },
-      renameSync: (oldPath, newPath) => {
-        renamed.push(`${normalizePath(oldPath)} -> ${normalizePath(newPath)}`);
       },
       execSync: (command: string, options?: ExecSyncOptionsWithStringEncoding) => {
         commands.push(command);
@@ -58,106 +53,41 @@ describe('ensureRollbackNodeUiBundle', () => {
 
     expect(ensureRollbackNodeUiBundle(slotDir, 'b', io)).toBe(true);
     expect(removed).toEqual([
-      normalizePath(`${join(slotDir, 'packages', 'node-ui', 'dist-ui')}.rollback-backup`),
       normalizePath(join(slotDir, 'packages', 'node-ui', 'dist-ui')),
-      normalizePath(`${join(slotDir, 'packages', 'node-ui', 'dist-ui')}.rollback-backup`),
     ]);
-    expect(renamed).toEqual([]);
     expect(commands).toEqual(['pnpm --filter @origintrail-official/dkg-node-ui run build:ui']);
     expect(logs).toEqual(['Slot b has no Node UI static bundle; building UI assets before rollback...']);
     expect(errors).toEqual([]);
   });
 
-  it('rebuilds an existing git-layout Node UI bundle so stale assets cannot satisfy rollback', () => {
+  it('accepts an existing git-layout Node UI bundle without rebuilding during rollback', () => {
     const slotDir = join('tmp', 'releases', 'b');
     const gitIndex = join(slotDir, 'packages', 'node-ui', 'dist-ui', 'index.html');
-    let cleared = false;
-    let built = false;
     const commands: string[] = [];
     const removed: string[] = [];
-    const renamed: string[] = [];
     const logs: string[] = [];
     const io = makeIo({
       existsSync: (path) => {
         const normalized = normalizePath(path);
         if (normalized.endsWith('/packages/cli/dist/cli.js')) return true;
-        if (path === gitIndex) return !cleared || built;
+        if (path === gitIndex) return true;
         return false;
       },
       readFileSync: () => '{"name":"@origintrail-official/dkg-node-ui"}',
       rmSync: (path) => {
         removed.push(normalizePath(path));
-        cleared = true;
-      },
-      renameSync: (oldPath, newPath) => {
-        renamed.push(`${normalizePath(oldPath)} -> ${normalizePath(newPath)}`);
       },
       execSync: (command: string) => {
         commands.push(command);
-        built = true;
         return '';
       },
       log: (message) => logs.push(message),
     });
 
     expect(ensureRollbackNodeUiBundle(slotDir, 'b', io)).toBe(true);
-    expect(removed).toEqual([
-      normalizePath(`${join(slotDir, 'packages', 'node-ui', 'dist-ui')}.rollback-backup`),
-      normalizePath(`${join(slotDir, 'packages', 'node-ui', 'dist-ui')}.rollback-backup`),
-    ]);
-    expect(renamed).toEqual([
-      `${normalizePath(join(slotDir, 'packages', 'node-ui', 'dist-ui'))} -> ${normalizePath(`${join(slotDir, 'packages', 'node-ui', 'dist-ui')}.rollback-backup`)}`,
-    ]);
-    expect(commands).toEqual(['pnpm --filter @origintrail-official/dkg-node-ui run build:ui']);
-    expect(logs).toEqual(['Slot b has an existing Node UI static bundle; rebuilding UI assets before rollback...']);
-  });
-
-  it('restores an existing git-layout Node UI bundle when rollback rebuild fails', () => {
-    const slotDir = join('tmp', 'releases', 'b');
-    const gitDist = join(slotDir, 'packages', 'node-ui', 'dist-ui');
-    const gitIndex = join(gitDist, 'index.html');
-    const backupDist = `${gitDist}.rollback-backup`;
-    let activeBundle = true;
-    let backupBundle = false;
-    const commands: string[] = [];
-    const errors: string[] = [];
-    const io = makeIo({
-      existsSync: (path) => {
-        const normalized = normalizePath(path);
-        if (normalized.endsWith('/packages/cli/dist/cli.js')) return true;
-        if (path === gitIndex) return activeBundle;
-        return false;
-      },
-      readFileSync: () => '{"name":"@origintrail-official/dkg-node-ui"}',
-      rmSync: (path) => {
-        if (path === gitDist) activeBundle = false;
-        if (path === backupDist) backupBundle = false;
-      },
-      renameSync: (oldPath, newPath) => {
-        if (oldPath === gitDist && newPath === backupDist) {
-          activeBundle = false;
-          backupBundle = true;
-          return;
-        }
-        if (oldPath === backupDist && newPath === gitDist) {
-          backupBundle = false;
-          activeBundle = true;
-        }
-      },
-      execSync: (command: string) => {
-        commands.push(command);
-        throw new Error('vite exploded');
-      },
-      error: (message) => errors.push(message),
-    });
-
-    expect(ensureRollbackNodeUiBundle(slotDir, 'b', io)).toBe(false);
-    expect(commands).toEqual(['pnpm --filter @origintrail-official/dkg-node-ui run build:ui']);
-    expect(activeBundle).toBe(true);
-    expect(backupBundle).toBe(false);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('Rollback aborted: failed to build Node UI static bundle');
-    expect(errors[0]).toContain('vite exploded');
+    expect(removed).toEqual([]);
+    expect(commands).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it('fails a git-layout rollback when the UI build cannot produce index.html', () => {

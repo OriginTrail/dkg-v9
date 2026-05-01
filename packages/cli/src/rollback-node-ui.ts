@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -21,7 +21,6 @@ export interface RollbackNodeUiIo {
   existsSync: typeof existsSync;
   readFileSync: typeof readFileSync;
   rmSync: typeof rmSync;
-  renameSync: typeof renameSync;
   execSync: typeof execSync;
   log: (message: string) => void;
   error: (message: string) => void;
@@ -31,7 +30,6 @@ const defaultIo: RollbackNodeUiIo = {
   existsSync,
   readFileSync,
   rmSync,
-  renameSync,
   execSync,
   log: console.log,
   error: console.error,
@@ -82,20 +80,12 @@ export function ensureRollbackNodeUiBundle(
   }
 
   const hadExistingGitBundle = io.existsSync(gitIndex);
+  if (hadExistingGitBundle) return true;
+
   const gitDist = nodeUiStaticDistPath(slotDir);
-  const backupDist = `${gitDist}.rollback-backup`;
-  io.log(
-    hadExistingGitBundle
-      ? `Slot ${target} has an existing Node UI static bundle; rebuilding UI assets before rollback...`
-      : `Slot ${target} has no Node UI static bundle; building UI assets before rollback...`,
-  );
+  io.log(`Slot ${target} has no Node UI static bundle; building UI assets before rollback...`);
   try {
-    io.rmSync(backupDist, { recursive: true, force: true });
-    if (hadExistingGitBundle) {
-      io.renameSync(gitDist, backupDist);
-    } else {
-      io.rmSync(gitDist, { recursive: true, force: true });
-    }
+    io.rmSync(gitDist, { recursive: true, force: true });
   } catch (err) {
     io.error(
       `Rollback aborted: failed to clear stale Node UI static bundle for slot ${target} ` +
@@ -124,17 +114,6 @@ export function ensureRollbackNodeUiBundle(
       lastError = new Error(`Node UI static bundle missing (${gitIndex})`);
     } catch (err) {
       lastError = err;
-    }
-  }
-  if (hadExistingGitBundle) {
-    try {
-      io.rmSync(gitDist, { recursive: true, force: true });
-      io.renameSync(backupDist, gitDist);
-    } catch (restoreErr) {
-      io.error(
-        `Rollback warning: failed to restore previous Node UI static bundle for slot ${target} ` +
-          `(${toErrorMessage(restoreErr)}).`,
-      );
     }
   }
   io.error(

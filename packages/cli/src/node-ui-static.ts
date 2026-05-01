@@ -15,27 +15,29 @@ export const NODE_UI_STATIC_BUILD_LABEL = nodeUiStaticBuildLabel();
 export const RUNTIME_PACKAGES_BUILD_COMMAND = 'pnpm build:runtime:packages';
 export const RUNTIME_BUILD_COMMAND = 'pnpm build:runtime';
 export const FULL_BUILD_COMMAND = 'pnpm build';
-export const RUNTIME_BUILD_COMPATIBILITY_WRAPPER =
-  'pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+export const RELEASE_RUNTIME_BUILD_SCRIPT = 'releaseRuntimeBuildScript';
 
 export function runtimeBuildCommandFromPackageJson(raw: string): string {
   try {
     const rootPkg = JSON.parse(raw) as {
       scripts?: Record<string, string>;
+      dkgBuild?: Record<string, unknown>;
     };
+    const releaseRuntimeBuildScript = rootPkg.dkgBuild?.[RELEASE_RUNTIME_BUILD_SCRIPT];
     const runtimePackagesScript = rootPkg.scripts?.['build:runtime:packages'];
     const runtimeScript = rootPkg.scripts?.['build:runtime'];
     if (
-      typeof runtimePackagesScript === 'string' &&
-      (
-        typeof runtimeScript !== 'string' ||
-        normalizeScript(runtimeScript) === normalizeScript(RUNTIME_BUILD_COMPATIBILITY_WRAPPER)
-      )
+      typeof releaseRuntimeBuildScript === 'string' &&
+      isSafePnpmScriptName(releaseRuntimeBuildScript) &&
+      typeof rootPkg.scripts?.[releaseRuntimeBuildScript] === 'string'
     ) {
-      return RUNTIME_PACKAGES_BUILD_COMMAND;
+      return `pnpm ${releaseRuntimeBuildScript}`;
     }
     if (typeof runtimeScript === 'string') {
       return RUNTIME_BUILD_COMMAND;
+    }
+    if (typeof runtimePackagesScript === 'string') {
+      return RUNTIME_PACKAGES_BUILD_COMMAND;
     }
   } catch {
     // Fall through to the broad build command when metadata is unreadable.
@@ -43,8 +45,8 @@ export function runtimeBuildCommandFromPackageJson(raw: string): string {
   return FULL_BUILD_COMMAND;
 }
 
-function normalizeScript(script: string): string {
-  return script.trim().replace(/\s+/g, ' ');
+function isSafePnpmScriptName(scriptName: string): boolean {
+  return /^[A-Za-z0-9:_-]+$/.test(scriptName);
 }
 
 export function nodeUiPackageJsonPath(slotDir: string): string {

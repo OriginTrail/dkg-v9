@@ -236,7 +236,10 @@ function mockGitUpdateReadFile(
       });
     }
     if (p.endsWith('/package.json') && !p.endsWith('/packages/cli/package.json')) {
-      return JSON.stringify({ scripts: rootScripts });
+      return JSON.stringify({
+        dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
+        scripts: rootScripts,
+      });
     }
     if (p.endsWith('/packages/cli/package.json')) {
       return JSON.stringify({ version: cliVersion });

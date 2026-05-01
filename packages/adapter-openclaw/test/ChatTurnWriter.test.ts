@@ -389,6 +389,39 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("bare id q1\nbare id q2");
   });
 
+  it("T359 - transcript bare id does not consume typed W4b replay marker", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "bare replay q", messageId: "bare-replay-in" },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-bare-replay", sessionKey: "sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "bare replay a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-bare-replay", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    await restarted.onBeforeCompaction({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-bare-replay",
+      sessionKey: "sk",
+    });
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "bare replay q", id: "bare-replay-in" },
+        { role: "assistant", content: "bare replay a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-bare-replay", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    restarted.flushSync();
+  });
+
   it("T359 - typed and internal W4b surfaces for the same Telegram message persist once", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "same inbound", metadata: { messageId: "same-in-1" } },
@@ -952,6 +985,27 @@ describe("ChatTurnWriter", () => {
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("no id duplicate q");
+  });
+
+  it("T359 - no-messageId repeated inbound text before reply is not collapsed", async () => {
+    const ctx = { channelId: "telegram", accountId: "bot", conversationId: "chat-noid-repeat-before-reply" };
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "repeat before reply" },
+      ctx,
+    );
+    await flushMicrotasks();
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "repeat before reply" },
+      ctx,
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "reply after repeats", success: true },
+      ctx,
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("repeat before reply\nrepeat before reply");
   });
 
   it("T359 - conversationless message-id dedupe is scoped by session key", async () => {

@@ -244,9 +244,12 @@ export class ChatTurnWriter {
   private messageHookDedup: Map<string, number> = new Map();
   private messageHookInboundQueueKeys: Map<string, string> = new Map();
   private messageHookDedupSessionKeys: Map<string, string> = new Map();
+  private messageHookNoIdInboundBatch: Set<string> = new Set();
+  private messageHookNoIdInboundBatchClearScheduled = false;
   private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
   private static readonly MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS = 5_000;
   private static readonly MESSAGE_HOOK_DEDUP_MAX_ENTRIES = 2_048;
+  private static readonly MESSAGE_HOOK_NO_ID_INBOUND_PREFIX = "message-hook::inbound::text-batch::";
   private messageHookLastSweepAt = 0;
   private static readonly WEAK_SESSION_PREFIX = "weak-";
 
@@ -1458,12 +1461,13 @@ export class ChatTurnWriter {
       ].join("::");
     }
     if (direction === "inbound") {
+      // Without a provider messageId, only dedupe duplicate hook surfaces
+      // delivered in the same dispatch batch. A longer text cache would drop
+      // legitimate repeated user messages before one assistant reply.
       return [
-        "message-hook",
-        direction,
-        "text",
+        ChatTurnWriter.MESSAGE_HOOK_NO_ID_INBOUND_PREFIX,
         this.identityHash([...scopeParts, text]),
-      ].join("::");
+      ].join("");
     }
     if (direction === "outbound") {
       const inboundIds = pendingMeta
@@ -1500,6 +1504,9 @@ export class ChatTurnWriter {
 
   private markMessageHookDuplicate(key: string, sessionId?: string): boolean {
     if (!key) return false;
+    if (this.isNoIdInboundBatchKey(key)) {
+      return this.markNoIdInboundBatchDuplicate(key, sessionId);
+    }
     const now = Date.now();
     const ttl = ChatTurnWriter.MESSAGE_HOOK_DEDUP_TTL_MS;
     const existingTs = this.messageHookDedup.get(key);
@@ -1529,8 +1536,32 @@ export class ChatTurnWriter {
     return false;
   }
 
+  private isNoIdInboundBatchKey(key: string): boolean {
+    return key.startsWith(ChatTurnWriter.MESSAGE_HOOK_NO_ID_INBOUND_PREFIX);
+  }
+
+  private markNoIdInboundBatchDuplicate(key: string, sessionId?: string): boolean {
+    if (this.messageHookNoIdInboundBatch.has(key)) return true;
+    this.messageHookNoIdInboundBatch.add(key);
+    if (sessionId) this.messageHookDedupSessionKeys.set(key, sessionId);
+    else this.messageHookDedupSessionKeys.delete(key);
+    if (!this.messageHookNoIdInboundBatchClearScheduled) {
+      this.messageHookNoIdInboundBatchClearScheduled = true;
+      queueMicrotask(() => {
+        this.messageHookNoIdInboundBatchClearScheduled = false;
+        const keys = Array.from(this.messageHookNoIdInboundBatch);
+        this.messageHookNoIdInboundBatch.clear();
+        for (const batchKey of keys) {
+          this.deleteMessageHookDedupKey(batchKey);
+        }
+      });
+    }
+    return false;
+  }
+
   private deleteMessageHookDedupKey(key: string): void {
     this.messageHookDedup.delete(key);
+    this.messageHookNoIdInboundBatch.delete(key);
     this.messageHookInboundQueueKeys.delete(key);
     this.messageHookDedupSessionKeys.delete(key);
   }
@@ -2120,9 +2151,6 @@ export class ChatTurnWriter {
       (msg as any).message_id,
       (context as any).message_id,
       (metadata as any).message_id,
-      (msg as any).id,
-      (context as any).id,
-      (metadata as any).id,
     );
     return messageId ? [messageId] : [];
   }

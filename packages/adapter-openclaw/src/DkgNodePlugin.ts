@@ -43,7 +43,7 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   canonicalPathForCompare,
   defaultStateDirForWorkspace,
@@ -385,12 +385,15 @@ export class DkgNodePlugin {
 
   updateConfig(config?: DkgOpenClawConfig): void {
     if (!config || typeof config !== 'object') return;
-    const next: DkgOpenClawConfig = { ...this.config, ...config };
-    if (this.config.memory || config.memory) {
-      next.memory = { ...(this.config.memory ?? {}), ...(config.memory ?? {}) };
+    const next: DkgOpenClawConfig = { ...this.config };
+    if (Object.prototype.hasOwnProperty.call(config, 'stateDir')) {
+      next.stateDir = config.stateDir;
     }
-    if (this.config.channel || config.channel) {
-      next.channel = { ...(this.config.channel ?? {}), ...(config.channel ?? {}) };
+    if (Object.prototype.hasOwnProperty.call(config, 'stateDirSource')) {
+      next.stateDirSource = config.stateDirSource;
+    }
+    if (Object.prototype.hasOwnProperty.call(config, 'installedWorkspace')) {
+      next.installedWorkspace = config.installedWorkspace;
     }
     this.config = next;
   }
@@ -641,19 +644,17 @@ export class DkgNodePlugin {
       stateDirSource = configuredHasSetupDefaultSource ? 'setup-default' : 'config';
     }
 
-    const knownWorkspaceDefaultStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir]
+    const inferredWorkspaceDir =
+      basename(stateDir) === '.dkg-adapter' ? dirname(stateDir) : undefined;
+    const knownWorkspaceDefaultStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir, inferredWorkspaceDir]
       .filter((candidate): candidate is string => !!candidate)
       .map((candidate) => defaultStateDirForWorkspace(candidate));
     const stateDirIsKnownWorkspaceDefault = knownWorkspaceDefaultStateDirs.some((candidate) =>
       matchesPath(stateDir, candidate),
     );
     const stateLayout: ChatTurnWriterStateLayout =
-      stateDirSource === 'workspace' ||
-      (stateDirSource === 'setup-default' && stateDirIsKnownWorkspaceDefault) ||
-      (stateDirSource === 'runtime' && stateDirIsKnownWorkspaceDefault)
-        ? 'direct'
-        : 'nested';
-    const legacyStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir]
+      stateDirIsKnownWorkspaceDefault ? 'direct' : 'nested';
+    const legacyStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir, inferredWorkspaceDir]
       .filter((candidate): candidate is string => !!candidate)
       .filter((candidate) => matchesPath(stateDir, defaultStateDirForWorkspace(candidate)))
       .map((candidate) => legacyStateDirForWorkspace(candidate))

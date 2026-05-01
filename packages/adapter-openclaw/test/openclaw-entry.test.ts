@@ -50,7 +50,14 @@ describe('openclaw-entry', () => {
         '    globalThis.__openclawEntryTestInstances ??= [];',
         '    globalThis.__openclawEntryTestInstances.push(this);',
         '  }',
-        '  updateConfig(config) { this.config = { ...this.config, ...config }; }',
+        '  updateConfig(config) {',
+        '    this.config = {',
+        '      ...this.config,',
+        '      ...(Object.prototype.hasOwnProperty.call(config, "stateDir") ? { stateDir: config.stateDir } : {}),',
+        '      ...(Object.prototype.hasOwnProperty.call(config, "stateDirSource") ? { stateDirSource: config.stateDirSource } : {}),',
+        '      ...(Object.prototype.hasOwnProperty.call(config, "installedWorkspace") ? { installedWorkspace: config.installedWorkspace } : {}),',
+        '    };',
+        '  }',
         '  register(api) { this.registerCalls.push(api); this.workspaceDirsAtRegister.push(api.workspaceDir); }',
         '  async stop() { this.stopCalls += 1; }',
         '}',
@@ -234,7 +241,7 @@ describe('openclaw-entry', () => {
     });
   });
 
-  it('refreshes singleton config before multi-phase re-registration', async () => {
+  it('refreshes singleton state config before multi-phase re-registration', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -249,7 +256,7 @@ describe('openclaw-entry', () => {
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
-      daemonUrl: 'http://127.0.0.1:9600',
+      daemonUrl: 'http://127.0.0.1:9200',
       stateDir: '/second/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/second',

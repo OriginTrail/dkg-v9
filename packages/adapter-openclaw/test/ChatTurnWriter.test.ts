@@ -454,6 +454,53 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - typed endpoint-only events without session identity are dropped", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "endpoint-only q" },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "endpoint-only a", success: true },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+  });
+
+  it("T359 - strong typed session without conversation promotes when conversation arrives", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "strong typed q", metadata: { messageId: "strong-in-1" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "strong typed a", success: true },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const conversationlessSessionId = "openclaw:telegram:bot::real-sk";
+    expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "strong typed q" },
+        { role: "assistant", content: "strong typed a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-real", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    const strongSessionId = "openclaw:telegram:bot:chat-real:real-sk";
+    expect((restarted as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+    expect((restarted as any).w4bSessionCounts.has(conversationlessSessionId)).toBe(false);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+  });
+
   it("T359 - repeated same-text typed replies without outbound messageIds do not dedupe distinct turns", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "repeat q1", metadata: { messageId: "repeat-in-1" } },
@@ -478,6 +525,74 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("repeat q2");
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("same answer");
     expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("same answer");
+  });
+
+  it("T359 - repeated no-messageId typed user text persists as distinct turns", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "ok" },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-noid" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "ack", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-noid" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "ok" },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-noid" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "ack", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-noid" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+      ["ok", "ack"],
+      ["ok", "ack"],
+    ]);
+    expect(mockClient.storeChatTurn.mock.calls[0][3]?.turnId).not.toBe(
+      mockClient.storeChatTurn.mock.calls[1][3]?.turnId,
+    );
+  });
+
+  it("T359 - reset clears only the affected session's message-hook dedupe", async () => {
+    const eventA = {
+      sessionKey: "sk-A",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-A",
+        content: "hello A",
+        messageId: "in-A",
+      },
+    } as any;
+    const eventB = {
+      sessionKey: "sk-B",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-B",
+        content: "hello B",
+        messageId: "in-B",
+      },
+    } as any;
+    writer.onMessageReceived(eventA);
+    writer.onMessageReceived(eventB);
+
+    await writer.onBeforeReset({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-B",
+      sessionKey: "sk-B",
+    });
+
+    writer.onMessageReceived(eventA);
+    writer.onMessageReceived(eventB);
+
+    const pending = (writer as any).pendingUserMessages as Map<string, string[]>;
+    expect(pending.get("openclaw:telegram:bot:chat-A:sk-A")).toEqual(["hello A"]);
+    expect(pending.get("openclaw:telegram:bot:chat-B:sk-B")).toEqual(["hello B"]);
   });
 
   it("flushSync clears debounce timers", () => {

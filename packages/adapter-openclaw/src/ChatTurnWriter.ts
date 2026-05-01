@@ -94,6 +94,7 @@ export interface InternalMessageEvent {
 
 interface PendingUserMessageMeta {
   messageId?: string;
+  arrivalId?: string;
 }
 
 /**
@@ -128,6 +129,7 @@ export class ChatTurnWriter {
   // provider messageId forward and use it as the durable W4b turnId
   // discriminator when the outbound envelope cannot provide one.
   private pendingUserMessageMeta: Map<string, PendingUserMessageMeta[]> = new Map();
+  private pendingUserMessageSeq = 0;
   private debounceTimers: Map<string, { timer: NodeJS.Timeout; pendingIndex: number }> = new Map();
   private watermarkFilePath: string;
   // Cross-path dedup (W4a agent_end vs. W4b message:sent). The gateway fires
@@ -229,6 +231,7 @@ export class ChatTurnWriter {
   private static readonly CROSS_PATH_INFLIGHT_TTL_MS = 60_000;
   private messageHookDedup: Map<string, number> = new Map();
   private messageHookInboundQueueKeys: Map<string, string> = new Map();
+  private messageHookDedupSessionKeys: Map<string, string> = new Map();
   private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
   private static readonly MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS = 5_000;
   private static readonly MESSAGE_HOOK_DEDUP_MAX_ENTRIES = 2_048;
@@ -887,8 +890,7 @@ export class ChatTurnWriter {
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
     }
-    this.messageHookDedup.clear();
-    this.messageHookInboundQueueKeys.clear();
+    this.clearMessageHookDedupForSessions(ids);
     // External markers record daemon-success facts from direct-channel
     // persists. Preserve them across reset/compaction so the reset W4a replay
     // can still consume the marker instead of duplicating the stored UI turn.
@@ -925,9 +927,6 @@ export class ChatTurnWriter {
     ].find((value) => typeof value === "string" && value.trim().length > 0) as string | undefined;
     if (!content) return null;
 
-    const endpoint = direction === "inbound"
-      ? firstString(event.from, metadata.from, metadata.senderId, metadata.userId)
-      : firstString(event.to, metadata.to, metadata.recipientId, metadata.userId);
     const channelId = firstString(
       ctx.channelId,
       event.channelId,
@@ -945,7 +944,6 @@ export class ChatTurnWriter {
       metadata.conversationId,
       metadata.chatId,
       metadata.threadId,
-      endpoint,
     );
     const strongSessionKey = firstString(
       ctx.sessionKey,
@@ -957,7 +955,7 @@ export class ChatTurnWriter {
       eventContext.sessionId,
       metadata.sessionId,
     );
-    const sessionKey = strongSessionKey ?? this.weakSessionKey(channelId, accountId, conversationId, endpoint);
+    const sessionKey = strongSessionKey ?? this.weakSessionKey(channelId, accountId, conversationId);
     if (!channelId || !sessionKey) {
       this.logger.debug?.("[ChatTurnWriter] Dropping typed message hook without channel/session identity");
       return null;
@@ -1005,20 +1003,23 @@ export class ChatTurnWriter {
       // attachment-only turns.
       if (!text) return;
       const inboundDedupKey = this.messageHookDedupKey("inbound", ev, text);
-      const existingConversationKey = this.messageHookInboundQueueKeys.get(inboundDedupKey);
-      if (existingConversationKey && existingConversationKey !== conversationKey) {
-        if (this.shouldMoveInboundQueue(existingConversationKey, conversationKey)) {
-          this.movePendingInboundQueue(existingConversationKey, conversationKey);
-          this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
+      if (inboundDedupKey) {
+        const existingConversationKey = this.messageHookInboundQueueKeys.get(inboundDedupKey);
+        if (existingConversationKey && existingConversationKey !== conversationKey) {
+          if (this.shouldMoveInboundQueue(existingConversationKey, conversationKey)) {
+            this.movePendingInboundQueue(existingConversationKey, conversationKey);
+            this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
+            this.messageHookDedupSessionKeys.set(inboundDedupKey, conversationKey);
+          }
+          return;
         }
-        return;
+        if (this.markMessageHookDuplicate(inboundDedupKey, conversationKey)) return;
       }
-      if (this.markMessageHookDuplicate(inboundDedupKey)) return;
       const queue = this.pendingUserMessages.get(conversationKey) ?? [];
       queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
       const metaQueue = this.pendingUserMessageMeta.get(conversationKey) ?? [];
-      metaQueue.push({ messageId: this.messageEventId(ev) });
+      metaQueue.push({ messageId: this.messageEventId(ev), arrivalId: this.nextPendingUserArrivalId() });
       this.pendingUserMessageMeta.set(conversationKey, metaQueue);
       if (inboundDedupKey) this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
     } catch (err) {
@@ -1097,7 +1098,7 @@ export class ChatTurnWriter {
       const queuedMeta = [...(this.pendingUserMessageMeta.get(conversationKey) ?? [])];
       const userText = queuedItems.join("\n");
       const outboundDedupKey = this.messageHookDedupKey("outbound", ev, assistantText, queuedMeta, userText);
-      if (this.markMessageHookDuplicate(outboundDedupKey)) {
+      if (this.markMessageHookDuplicate(outboundDedupKey, sessionId)) {
         this.pendingUserMessages.delete(conversationKey);
         this.pendingUserMessageMeta.delete(conversationKey);
         return;
@@ -1237,7 +1238,7 @@ export class ChatTurnWriter {
             // Release the in-flight reservation so a retry can proceed.
             // No `w4bOrigin` release needed — we don't stamp it pre-persist
             // anymore; only stamping happens post-success above.
-            if (outboundDedupKey) this.messageHookDedup.delete(outboundDedupKey);
+            if (outboundDedupKey) this.deleteMessageHookDedupKey(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
@@ -1283,6 +1284,11 @@ export class ChatTurnWriter {
     return firstString(ctx.messageId, (ev as any)?.messageId);
   }
 
+  private nextPendingUserArrivalId(): string {
+    this.pendingUserMessageSeq = (this.pendingUserMessageSeq + 1) >>> 0;
+    return `arrival::${this.pendingUserMessageSeq}`;
+  }
+
   private messageHookDedupKey(
     direction: "inbound" | "outbound",
     ev: InternalMessageEvent,
@@ -1317,6 +1323,17 @@ export class ChatTurnWriter {
           this.identityHash([channelId, accountId, conversationId, sessionKey, ...inboundIds, text]),
         ].join("::");
       }
+      const arrivalIds = pendingMeta
+        .map((meta) => meta.arrivalId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      if (arrivalIds.length > 0) {
+        return [
+          "message-hook",
+          direction,
+          "arrival",
+          this.identityHash([channelId, accountId, conversationId, sessionKey, ...arrivalIds, text]),
+        ].join("::");
+      }
       return [
         "message-hook",
         direction,
@@ -1324,23 +1341,17 @@ export class ChatTurnWriter {
         this.identityHash([channelId, accountId, conversationId, sessionKey, userText, text]),
       ].join("::");
     }
-    return [
-      "message-hook",
-      direction,
-      "text",
-      this.identityHash([channelId, accountId, conversationId, sessionKey, text]),
-    ].join("::");
+    return "";
   }
 
-  private markMessageHookDuplicate(key: string): boolean {
+  private markMessageHookDuplicate(key: string, sessionId?: string): boolean {
     if (!key) return false;
     const now = Date.now();
     const ttl = ChatTurnWriter.MESSAGE_HOOK_DEDUP_TTL_MS;
     const existingTs = this.messageHookDedup.get(key);
     if (existingTs !== undefined) {
       if (now - existingTs <= ttl) return true;
-      this.messageHookDedup.delete(key);
-      this.messageHookInboundQueueKeys.delete(key);
+      this.deleteMessageHookDedupKey(key);
     }
     if (
       now - this.messageHookLastSweepAt >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS ||
@@ -1348,8 +1359,7 @@ export class ChatTurnWriter {
     ) {
       for (const [existingKey, ts] of this.messageHookDedup) {
         if (now - ts > ttl) {
-          this.messageHookDedup.delete(existingKey);
-          this.messageHookInboundQueueKeys.delete(existingKey);
+          this.deleteMessageHookDedupKey(existingKey);
         }
       }
       this.messageHookLastSweepAt = now;
@@ -1357,11 +1367,29 @@ export class ChatTurnWriter {
     while (this.messageHookDedup.size >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_MAX_ENTRIES) {
       const oldestKey = this.messageHookDedup.keys().next().value as string | undefined;
       if (!oldestKey) break;
-      this.messageHookDedup.delete(oldestKey);
-      this.messageHookInboundQueueKeys.delete(oldestKey);
+      this.deleteMessageHookDedupKey(oldestKey);
     }
     this.messageHookDedup.set(key, now);
+    if (sessionId) this.messageHookDedupSessionKeys.set(key, sessionId);
+    else this.messageHookDedupSessionKeys.delete(key);
     return false;
+  }
+
+  private deleteMessageHookDedupKey(key: string): void {
+    this.messageHookDedup.delete(key);
+    this.messageHookInboundQueueKeys.delete(key);
+    this.messageHookDedupSessionKeys.delete(key);
+  }
+
+  private clearMessageHookDedupForSessions(sessionIds: Iterable<string>): void {
+    const ids = new Set(Array.from(sessionIds).filter((id) => typeof id === "string" && id.length > 0));
+    if (ids.size === 0) return;
+    for (const [key, sessionId] of Array.from(this.messageHookDedupSessionKeys.entries())) {
+      if (ids.has(sessionId)) this.deleteMessageHookDedupKey(key);
+    }
+    for (const [key, queueKey] of Array.from(this.messageHookInboundQueueKeys.entries())) {
+      if (ids.has(queueKey)) this.deleteMessageHookDedupKey(key);
+    }
   }
 
   private shouldMoveInboundQueue(existingKey: string, candidateKey: string): boolean {
@@ -1398,36 +1426,48 @@ export class ChatTurnWriter {
     sessionKey?: string;
   }): void {
     if (!identity.channelId || !identity.sessionKey || this.isWeakSessionKey(identity.sessionKey)) return;
-    const weakSessionKey = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
-    if (!weakSessionKey) return;
-    const weakSessionId = this.composeSessionId({ ...identity, sessionKey: weakSessionKey });
     const strongSessionId = this.composeSessionId(identity);
-    if (weakSessionId === strongSessionId) return;
+    const candidateSessionIds = new Set<string>();
+    if (identity.conversationId) {
+      const weakSessionKey = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+      if (weakSessionKey) {
+        candidateSessionIds.add(this.composeSessionId({ ...identity, sessionKey: weakSessionKey }));
+      }
+      candidateSessionIds.add(this.composeSessionId({ ...identity, conversationId: "" }));
+    }
 
+    for (const fromSessionId of candidateSessionIds) {
+      if (fromSessionId !== strongSessionId) {
+        this.promoteSessionState(fromSessionId, strongSessionId);
+      }
+    }
+  }
+
+  private promoteSessionState(fromSessionId: string, strongSessionId: string): void {
     let changed = false;
     let durableChanged = false;
-    if (this.pendingUserMessages.has(weakSessionId) || this.pendingUserMessageMeta.has(weakSessionId)) {
-      this.movePendingInboundQueue(weakSessionId, strongSessionId);
+    if (this.pendingUserMessages.has(fromSessionId) || this.pendingUserMessageMeta.has(fromSessionId)) {
+      this.movePendingInboundQueue(fromSessionId, strongSessionId);
       changed = true;
     }
-    const weakWatermark = this.cachedWatermarks.get(weakSessionId);
+    const weakWatermark = this.cachedWatermarks.get(fromSessionId);
     if (weakWatermark !== undefined) {
       this.cachedWatermarks.set(strongSessionId, Math.max(this.cachedWatermarks.get(strongSessionId) ?? -1, weakWatermark));
-      this.cachedWatermarks.delete(weakSessionId);
+      this.cachedWatermarks.delete(fromSessionId);
       changed = true;
       durableChanged = true;
     }
-    const weakW4bCount = this.w4bSessionCounts.get(weakSessionId);
+    const weakW4bCount = this.w4bSessionCounts.get(fromSessionId);
     if (weakW4bCount !== undefined) {
       this.w4bSessionCounts.set(strongSessionId, Math.max(this.w4bSessionCounts.get(strongSessionId) ?? 0, weakW4bCount));
-      this.w4bSessionCounts.delete(weakSessionId);
+      this.w4bSessionCounts.delete(fromSessionId);
       changed = true;
       durableChanged = true;
     }
-    const weakTimer = this.debounceTimers.get(weakSessionId);
+    const weakTimer = this.debounceTimers.get(fromSessionId);
     if (weakTimer) {
       clearTimeout(weakTimer.timer);
-      this.debounceTimers.delete(weakSessionId);
+      this.debounceTimers.delete(fromSessionId);
       const existingStrongTimer = this.debounceTimers.get(strongSessionId);
       const promotedIndex = Math.max(existingStrongTimer?.pendingIndex ?? -1, weakTimer.pendingIndex);
       this.saveWatermark(strongSessionId, promotedIndex);
@@ -1435,30 +1475,36 @@ export class ChatTurnWriter {
       durableChanged = true;
     }
     for (const [dedupKey, queueKey] of this.messageHookInboundQueueKeys.entries()) {
-      if (queueKey === weakSessionId) {
+      if (queueKey === fromSessionId) {
         this.messageHookInboundQueueKeys.set(dedupKey, strongSessionId);
         changed = true;
       }
     }
-    durableChanged = this.promoteCompositeSessionKeys(this.recentTurnIds, weakSessionId, strongSessionId) || durableChanged;
-    durableChanged = this.promoteCompositeSessionKeys(this.crossPathStamps, weakSessionId, strongSessionId) || durableChanged;
-    durableChanged = this.promoteCompositeSessionKeys(this.crossPathInflight, weakSessionId, strongSessionId) || durableChanged;
+    for (const [dedupKey, sessionId] of this.messageHookDedupSessionKeys.entries()) {
+      if (sessionId === fromSessionId) {
+        this.messageHookDedupSessionKeys.set(dedupKey, strongSessionId);
+        changed = true;
+      }
+    }
+    durableChanged = this.promoteCompositeSessionKeys(this.recentTurnIds, fromSessionId, strongSessionId) || durableChanged;
+    durableChanged = this.promoteCompositeSessionKeys(this.crossPathStamps, fromSessionId, strongSessionId) || durableChanged;
+    durableChanged = this.promoteCompositeSessionKeys(this.crossPathInflight, fromSessionId, strongSessionId) || durableChanged;
     if (durableChanged) {
       this.writeWatermarkFile();
     } else if (changed) {
-      this.logger.debug?.("[ChatTurnWriter] Promoted weak typed-message session identity", {
-        weakSessionId,
+      this.logger.debug?.("[ChatTurnWriter] Promoted typed-message session identity", {
+        fromSessionId,
         strongSessionId,
       });
     }
   }
 
-  private promoteCompositeSessionKeys(map: Map<string, number>, weakSessionId: string, strongSessionId: string): boolean {
+  private promoteCompositeSessionKeys(map: Map<string, number>, fromSessionId: string, strongSessionId: string): boolean {
     let changed = false;
-    const prefix = `${weakSessionId}::`;
+    const prefix = `${fromSessionId}::`;
     for (const [key, value] of Array.from(map.entries())) {
       if (!key.startsWith(prefix)) continue;
-      const promotedKey = `${strongSessionId}${key.slice(weakSessionId.length)}`;
+      const promotedKey = `${strongSessionId}${key.slice(fromSessionId.length)}`;
       map.set(promotedKey, Math.max(map.get(promotedKey) ?? 0, value));
       map.delete(key);
       changed = true;
@@ -1990,9 +2036,8 @@ export class ChatTurnWriter {
     channelId?: string,
     accountId?: string,
     conversationId?: string,
-    endpoint?: string,
   ): string {
-    const weakIdentity = firstString(conversationId, endpoint);
+    const weakIdentity = firstString(conversationId);
     if (!channelId || !weakIdentity) return "";
     return `${ChatTurnWriter.WEAK_SESSION_PREFIX}${this.identityHash([
       channelId,
@@ -2377,6 +2422,8 @@ export class ChatTurnWriter {
     for (const key of this.debounceTimers.keys()) add(key);
     for (const key of this.pendingUserMessages.keys()) add(key);
     for (const key of this.pendingUserMessageMeta.keys()) add(key);
+    for (const key of this.messageHookInboundQueueKeys.values()) add(key);
+    for (const key of this.messageHookDedupSessionKeys.values()) add(key);
     for (const key of this.inFlightPersists.keys()) add(key);
     for (const key of this.w4aSessionChains.keys()) add(key);
     for (const key of this.recentTurnIds.keys()) {

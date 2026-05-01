@@ -842,13 +842,15 @@ export class DkgNodePlugin {
               this.observedTypedOptions('before_prompt_build'),
             );
           }
-          if (typedNeedsRetry('agent_end')) {
-            this.hookSurface.install(
-              'typed',
-              'agent_end',
-              this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
-              this.observedTypedOptions('agent_end'),
-            );
+          for (const event of ['agent_end', 'agent.end']) {
+            if (typedNeedsRetry(event)) {
+              this.hookSurface.install(
+                'typed',
+                event,
+                this.observedTypedHandler(event, (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+                this.observedTypedOptions(event),
+              );
+            }
           }
           for (const event of ['message_received', 'message.received']) {
             if (typedNeedsRetry(event)) {
@@ -960,12 +962,14 @@ export class DkgNodePlugin {
     // and `before_reset` are rare on healthy gateways; tag them so the
     // HookSurface commit-by-timeout warn downgrades to debug (otherwise
     // they false-positive within 30s of startup every time).
-    this.hookSurface.install(
-      'typed',
-      'agent_end',
-      this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
-      this.observedTypedOptions('agent_end'),
-    );
+    for (const event of ['agent_end', 'agent.end']) {
+      this.hookSurface.install(
+        'typed',
+        event,
+        this.observedTypedHandler(event, (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+        this.observedTypedOptions(event),
+      );
+    }
     this.hookSurface.install(
       'typed',
       'before_compaction',
@@ -3206,11 +3210,10 @@ export class DkgNodePlugin {
       };
     };
 
-    // Typed probe candidates include the real underscore message events,
-    // installed dotted message aliases, and probe-only dotted W4a aliases
-    // such as `agent.end`. Probe-only candidates are observability guards:
-    // if live smoke shows one firing, we promote it into the real install set
-    // in a source-backed follow-up rather than assuming it dispatches.
+    // Typed probe candidates include the installed lifecycle/message events
+    // plus a few probe-only candidates. Probe-only candidates are
+    // observability guards: if live smoke shows one firing, we promote it
+    // into the real install set in a source-backed follow-up.
     const typedEvents = [
       'before_prompt_build',
       'agent_end',

@@ -2687,6 +2687,7 @@ describe('DkgNodePlugin', () => {
     const events = onSpy.mock.calls.map((c: any) => c[0]);
     expect(events).toContain('before_prompt_build');
     expect(events).toContain('agent_end');
+    expect(events).toContain('agent.end');
     expect(events).toContain('before_compaction');
     expect(events).toContain('before_reset');
   });
@@ -2733,6 +2734,7 @@ describe('DkgNodePlugin', () => {
     const events1 = onSpy1.mock.calls.map((c: any) => c[0]);
     expect(events1).toContain('before_prompt_build');
     expect(events1).toContain('agent_end');
+    expect(events1).toContain('agent.end');
 
     // Multi-phase init: gateway hands a NEW api on the next register.
     plugin.register(api2);
@@ -2742,6 +2744,7 @@ describe('DkgNodePlugin', () => {
     const events2 = onSpy2.mock.calls.map((c: any) => c[0]);
     expect(events2).toContain('before_prompt_build');
     expect(events2).toContain('agent_end');
+    expect(events2).toContain('agent.end');
 
     // Critically: api1's handlers were NOT torn down. The `allHookSurfaces`
     // set tracks both surfaces; a future emit against api1 would still
@@ -3392,6 +3395,7 @@ describe('DkgNodePlugin', () => {
     const typedHookEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
     expect(typedHookEvents).toContain('before_prompt_build');
     expect(typedHookEvents).toContain('agent_end');
+    expect(typedHookEvents).toContain('agent.end');
   });
 
   it('T359 - typed message hooks and agent_end are wired to ChatTurnWriter', async () => {
@@ -3425,12 +3429,13 @@ describe('DkgNodePlugin', () => {
       client.storeChatTurn = vi.fn().mockResolvedValue(undefined);
 
       expect(typedHandlers.has('agent_end')).toBe(true);
+      expect(typedHandlers.has('agent.end')).toBe(true);
       expect(typedHandlers.has('message_received')).toBe(true);
       expect(typedHandlers.has('message_sent')).toBe(true);
       expect(typedHandlers.has('message.received')).toBe(true);
       expect(typedHandlers.has('message.sent')).toBe(true);
 
-      typedHandlers.get('agent_end')!(
+      typedHandlers.get('agent.end')!(
         { messages: [{ role: 'user', content: 'healthy q' }, { role: 'assistant', content: 'healthy a' }] },
         { channelId: 'telegram', sessionKey: 'healthy-sk' },
       );
@@ -3611,6 +3616,7 @@ describe('DkgNodePlugin', () => {
     const typedEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
     expect(typedEvents).toContain('before_prompt_build');
     expect(typedEvents).toContain('agent_end');
+    expect(typedEvents).toContain('agent.end');
     expect(typedEvents).toContain('before_compaction');
     expect(typedEvents).toContain('before_reset');
   });

@@ -635,7 +635,12 @@ export class DkgMemoryPlugin {
         : registeredOwnership === true
           ? this.registeredApi
           : currentApi ?? this.registeredApi;
-    const shouldStampDisabled = currentOwnership === true || registeredOwnership === true;
+    const targetIsRegisteredApi = !!targetApi && targetApi === this.registeredApi;
+    const ownershipUnknown = currentOwnership === undefined && registeredOwnership === undefined;
+    const shouldStampDisabled =
+      currentOwnership === true ||
+      registeredOwnership === true ||
+      (hadRegisteredCapability && targetIsRegisteredApi && ownershipUnknown);
 
     try {
       if (

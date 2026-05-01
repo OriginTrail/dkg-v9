@@ -1,6 +1,6 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -33,11 +33,17 @@ describe('openclaw-entry', () => {
     }
   });
 
-  async function loadEntryWithFakeRuntime() {
-    const root = mkdtempSync(join(tmpdir(), 'openclaw-entry-test-'));
-    tempRoots.push(root);
+  async function loadEntryWithFakeRuntime(options: { skillText?: string } = {}) {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'openclaw-entry-test-'));
+    tempRoots.push(tempRoot);
+    const root = join(tempRoot, 'adapter-openclaw');
     mkdirSync(join(root, 'dist'), { recursive: true });
     writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8');
+    if (options.skillText !== undefined) {
+      const skillPath = join(tempRoot, 'cli', 'skills', 'dkg-node', 'SKILL.md');
+      mkdirSync(dirname(skillPath), { recursive: true });
+      writeFileSync(skillPath, options.skillText, 'utf8');
+    }
     copyFileSync(new URL('../openclaw-entry.mjs', import.meta.url), join(root, 'openclaw-entry.mjs'));
     writeFileSync(
       join(root, 'dist', 'index.js'),
@@ -893,6 +899,22 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((api as any).workspaceDir).toBeUndefined();
     expect(instance.workspaceDirsAtRegister).toEqual(['/runtime-first', undefined]);
+  });
+
+  it('does not sync skills into installedWorkspace without live workspace evidence', async () => {
+    const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-installed-workspace-'));
+    tempRoots.push(installedWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh skill' });
+    const api = makeDirectPluginConfigApi({
+      stateDir: join(installedWorkspace, '.dkg-adapter'),
+      stateDirSource: 'setup-default',
+      installedWorkspace,
+    });
+
+    entry(api);
+
+    expect((api as any).workspaceDir).toBeUndefined();
+    expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
   it('preserves a caller-provided api.workspaceDir value', async () => {

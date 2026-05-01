@@ -142,10 +142,7 @@ function resolveEntryConfig(api, options = {}) {
     mergedConfig?.agents?.defaults?.workspace ??
     mergedConfig?.workspace ??
     apiWorkspaceDirFrom(anyApi);
-  const syncWorkspaceDir =
-    workspaceDir ??
-    config.installedWorkspace;
-  return { config, bootstrapConfig, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
+  return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
 }
 
 function apiWorkspaceDirFrom(api) {

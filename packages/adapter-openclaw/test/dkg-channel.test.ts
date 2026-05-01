@@ -1522,6 +1522,31 @@ describe('DkgChannelPlugin', () => {
     });
   });
 
+  it('processInbound should persist without throwing when ChatTurnWriter is not wired', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+      },
+    });
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = runtime;
+    api.cfg = mockCfg;
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    plugin.register(api);
+
+    await expect(plugin.processInbound('User message', 'corr-no-writer', 'owner')).resolves.toMatchObject({
+      text: 'Agent reply',
+      correlationId: 'corr-no-writer',
+    });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(storeCalls).toHaveLength(1);
+    expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+  });
+
   it('processInbound should carry attachment refs into the runtime prompt and persist them with the turn', async () => {
     let dispatched: any;
     const attachmentRefs = [

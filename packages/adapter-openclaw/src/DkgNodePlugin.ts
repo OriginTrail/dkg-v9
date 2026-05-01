@@ -457,9 +457,7 @@ export class DkgNodePlugin {
     // Subsequent multi-phase calls should upgrade missing integrations without
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
-      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
       if (runtimeEnabled) {
-        this.registerLocalAgentIntegration(api, registrationMode);
         // Retry typed-hook installs if the first register() call used a
         // setup-runtime api where api.on was undefined. HookSurface records
         // those as installedVia='none' with installError set; we detect
@@ -472,6 +470,10 @@ export class DkgNodePlugin {
         // hooks. Without this, `installHooksIfNeeded` early-returns on
         // null `chatTurnWriter` and W3/W4a/W4b silently never install.
         this.ensureChatTurnWriter(api);
+      }
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      if (runtimeEnabled) {
+        this.registerLocalAgentIntegration(api, registrationMode);
       }
       // T52 — Always run installHooksIfNeeded so the legacy
       // `session_end` cleanup is wired even in setup-only re-entry.

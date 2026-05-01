@@ -2,6 +2,18 @@ import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
 
+/**
+ * Durable direct-channel marker lifecycle:
+ * `markExternalTurnPersistedDurable` creates content-bound markers only after
+ * channel-side daemon `storeChatTurn` succeeds; marker keys include `turnId`
+ * plus canonical user/assistant text to avoid false dedupe for reused IDs or
+ * content. W4a consumes them in `consumeExternalTurnMarkersForPair` during
+ * `runAgentEndPersist`, advancing pair watermarks only after durable commit.
+ * Create/consume failures roll back marker snapshots when
+ * `commitWatermarkStateSync` fails; `setStateDir` migrates per-session `m`
+ * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
+ */
+
 interface Logger {
   info?: (...args: unknown[]) => void;
   warn?: (...args: unknown[]) => void;

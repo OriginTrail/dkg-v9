@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
+import { ChatTurnWriter } from '../src/ChatTurnWriter.js';
 import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -4257,6 +4258,110 @@ describe('DkgNodePlugin', () => {
     } finally {
       await plugin.stop();
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('wires ChatTurnWriter before channel routes can dispatch during setup-only runtime upgrade', async () => {
+    const workspaceDir = fs.mkdtempSync(path.join(tmpdir(), 'dkg-node-writer-order-'));
+    const originalFetch = globalThis.fetch;
+    const markerSpy = vi
+      .spyOn(ChatTurnWriter.prototype, 'markExternalTurnPersistedDurable')
+      .mockResolvedValue(undefined);
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+      memory: { enabled: false },
+    });
+    const storeCalls: unknown[][] = [];
+    let resolveRoute!: () => void;
+    const routeDone = new Promise<void>((resolve) => { resolveRoute = resolve; });
+
+    const runtime = {
+      state: {
+        resolveStateDir: () => path.join(workspaceDir, '.openclaw'),
+      },
+      channel: {
+        routing: {
+          resolveAgentRoute: () => ({ agentId: 'agent-1', sessionKey: 'session-order' }),
+        },
+        session: {
+          resolveStorePath: () => '/tmp/store',
+          readSessionUpdatedAt: () => undefined,
+          recordInboundSession: async () => {},
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: () => ({}),
+          formatAgentEnvelope: () => '[DKG UI Owner] Immediate inbound',
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Immediate reply' });
+          },
+        },
+      },
+    };
+    const cfg = { session: { dmScope: 'main' }, agents: {} };
+    const makeApi = (
+      registrationMode: 'setup-only' | 'setup-runtime',
+      registerHttpRoute: (...args: unknown[]) => void = () => {},
+    ) => ({
+      config: {},
+      registrationMode,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerChannel: () => {},
+      registerHttpRoute,
+      on: () => {},
+      logger: { info: () => {}, warn: () => {}, debug: () => {} },
+      runtime,
+      cfg,
+      workspaceDir,
+    } as any);
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    }) as any;
+
+    try {
+      plugin.register(makeApi('setup-only'));
+      (plugin as any).client.storeChatTurn = vi.fn(async (...args: unknown[]) => {
+        storeCalls.push(args);
+      });
+
+      const registerHttpRoute = (route: any) => {
+        if (route.method !== 'POST' || route.path !== '/api/dkg-channel/inbound') {
+          return;
+        }
+        const res = {
+          writeHead: vi.fn(),
+          end: vi.fn(() => resolveRoute()),
+        };
+        route.handler({
+          body: {
+            text: 'Immediate inbound',
+            correlationId: 'corr-writer-order',
+            identity: 'owner',
+          },
+        }, res);
+      };
+
+      plugin.register(makeApi('setup-runtime', registerHttpRoute));
+      await routeDone;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(storeCalls).toHaveLength(1);
+      expect(markerSpy).toHaveBeenCalledWith({
+        sessionKey: 'session-order',
+        turnId: 'corr-writer-order',
+        user: 'Immediate inbound',
+        assistant: 'Immediate reply',
+      });
+      expect((plugin as any).channelPlugin.chatTurnWriter).toBe((plugin as any).chatTurnWriter);
+    } finally {
+      markerSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      await plugin.stop();
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
     }
   });
 

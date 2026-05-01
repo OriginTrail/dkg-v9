@@ -1370,16 +1370,16 @@ export class ChatTurnWriter {
     const accountId = firstString(ctx.accountId) ?? "";
     const conversationId = firstString(ctx.conversationId) ?? "";
     const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
+    const scopeParts = conversationId
+      ? [channelId, accountId, conversationId]
+      : [channelId, accountId, conversationId, sessionKey];
     const messageId = this.messageEventId(ev);
     if (messageId) {
-      const identityParts = conversationId
-        ? [channelId, accountId, conversationId, messageId]
-        : [channelId, accountId, conversationId, sessionKey, messageId];
       return [
         "message-hook",
         direction,
         "msg",
-        this.identityHash(identityParts),
+        this.identityHash([...scopeParts, messageId]),
       ].join("::");
     }
     if (direction === "outbound") {
@@ -1391,7 +1391,7 @@ export class ChatTurnWriter {
           "message-hook",
           direction,
           "inbound-msg",
-          this.identityHash([channelId, accountId, conversationId, sessionKey, ...inboundIds, text]),
+          this.identityHash([...scopeParts, ...inboundIds, text]),
         ].join("::");
       }
       const arrivalIds = pendingMeta
@@ -1402,14 +1402,14 @@ export class ChatTurnWriter {
           "message-hook",
           direction,
           "arrival",
-          this.identityHash([channelId, accountId, conversationId, sessionKey, ...arrivalIds, text]),
+          this.identityHash([...scopeParts, ...arrivalIds, text]),
         ].join("::");
       }
       return [
         "message-hook",
         direction,
         "turn-text",
-        this.identityHash([channelId, accountId, conversationId, sessionKey, userText, text]),
+        this.identityHash([...scopeParts, userText, text]),
       ].join("::");
     }
     return "";
@@ -2645,11 +2645,14 @@ export class ChatTurnWriter {
     conversationId?: string;
     sessionKey?: string;
   }): string[] {
-    return Array.from(new Set([
+    const cursors = [
       this.concreteSessionCursorKey(parts),
       this.weakConversationCursorKey(parts),
-      this.conversationlessSessionCursorKey(parts),
-    ].filter((key) => key.length > 0)));
+    ];
+    if (!parts.conversationId) {
+      cursors.push(this.conversationlessSessionCursorKey(parts));
+    }
+    return Array.from(new Set(cursors.filter((key) => key.length > 0)));
   }
 
   private typedW4bMarkerCursorKeysFromSessionId(sessionId: string): string[] {
@@ -2669,6 +2672,12 @@ export class ChatTurnWriter {
   }): string[] {
     const ids = new Set<string>();
     if (identity.sessionId) ids.add(identity.sessionId);
+    if (identity.channelId && identity.conversationId) {
+      const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+      if (weakSession) {
+        ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
+      }
+    }
     if (!identity.channelId || !identity.sessionKey) return Array.from(ids);
     if (typeof identity.accountId !== "string" || typeof identity.conversationId !== "string") {
       return Array.from(ids);

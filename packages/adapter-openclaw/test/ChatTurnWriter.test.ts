@@ -704,7 +704,7 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).pendingUserMessages.size).toBe(0);
   });
 
-  it("T359 - strong typed session without conversation promotes when conversation arrives", async () => {
+  it("T359 - conversationless marker does not suppress concrete W4a without conversation proof", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "strong typed q", metadata: { messageId: "strong-in-1" } },
       { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
@@ -733,8 +733,9 @@ describe("ChatTurnWriter", () => {
     const strongSessionId = "openclaw:telegram:bot:chat-real:real-sk";
     expect((restarted as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
     expect((restarted as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
-    expect((restarted as any).cachedWatermarks.get(strongSessionId)).toBe(0);
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(strongSessionId);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("strong typed q");
   });
 
   it("T359 - repeated same-text typed replies without outbound messageIds do not dedupe distinct turns", async () => {
@@ -820,6 +821,94 @@ describe("ChatTurnWriter", () => {
       "session A q",
       "session B q",
     ]);
+  });
+
+  it("T359 - outbound dedupe ignores session key once conversation identity is known", () => {
+    const weakSession = (writer as any).weakSessionKey("telegram", "bot", "chat-dedup");
+    const weakInboundKey = (writer as any).messageHookDedupKey(
+      "outbound",
+      {
+        sessionKey: weakSession,
+        context: {
+          channelId: "telegram",
+          accountId: "bot",
+          conversationId: "chat-dedup",
+          content: "dedup a",
+        },
+      },
+      "dedup a",
+      [{ messageId: "dedup-in" }],
+      "dedup q",
+    );
+    const strongInboundKey = (writer as any).messageHookDedupKey(
+      "outbound",
+      {
+        sessionKey: "real-sk",
+        context: {
+          channelId: "telegram",
+          accountId: "bot",
+          conversationId: "chat-dedup",
+          content: "dedup a",
+        },
+      },
+      "dedup a",
+      [{ messageId: "dedup-in" }],
+      "dedup q",
+    );
+    const weakArrivalKey = (writer as any).messageHookDedupKey(
+      "outbound",
+      {
+        sessionKey: weakSession,
+        context: {
+          channelId: "telegram",
+          accountId: "bot",
+          conversationId: "chat-dedup",
+          content: "dedup a",
+        },
+      },
+      "dedup a",
+      [{ arrivalId: "arrival::shared" }],
+      "dedup q",
+    );
+    const strongArrivalKey = (writer as any).messageHookDedupKey(
+      "outbound",
+      {
+        sessionKey: "real-sk",
+        context: {
+          channelId: "telegram",
+          accountId: "bot",
+          conversationId: "chat-dedup",
+          content: "dedup a",
+        },
+      },
+      "dedup a",
+      [{ arrivalId: "arrival::shared" }],
+      "dedup q",
+    );
+
+    expect(weakInboundKey).toBe(strongInboundKey);
+    expect(weakArrivalKey).toBe(strongArrivalKey);
+  });
+
+  it("T359 - concrete reset clears synthetic weak typed session state", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "stale weak q", metadata: { messageId: "stale-weak-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-reset-weak" },
+    );
+
+    const weakSession = (writer as any).weakSessionKey("telegram", "bot", "chat-reset-weak");
+    const weakSessionId = `openclaw:telegram:bot:chat-reset-weak:${weakSession}`;
+    expect((writer as any).pendingUserMessages.get(weakSessionId)).toEqual(["stale weak q"]);
+
+    await writer.onBeforeReset({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-reset-weak",
+      sessionKey: "real-sk",
+    });
+
+    expect((writer as any).pendingUserMessages.has(weakSessionId)).toBe(false);
+    expect((writer as any).pendingUserMessageMeta.has(weakSessionId)).toBe(false);
   });
 
   it("T359 - reset clears only the affected session's message-hook dedupe", async () => {

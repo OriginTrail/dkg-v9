@@ -88,6 +88,14 @@ const STATE_DIR_SOURCE_PRIORITY: Record<ChatTurnWriterStateDirSource, number> = 
   home: 5,
 };
 
+function channelConfigFingerprint(config: DkgOpenClawConfig['channel']): string | null {
+  if (!config?.enabled) return null;
+  return JSON.stringify({
+    enabled: true,
+    port: config.port ?? 9201,
+  });
+}
+
 const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
@@ -148,6 +156,7 @@ export class DkgNodePlugin {
 
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
+  private channelPluginConfigFingerprint: string | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
@@ -1286,14 +1295,17 @@ export class DkgNodePlugin {
 
     // --- Channel module ---
     const channelConfig = this.config.channel;
-    if (!channelConfig?.enabled && this.channelPlugin) {
+    const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
+    if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
       this.channelPlugin.setPreDispatchReAssert(null);
       void this.channelPlugin.stop({ updateGatewayStatus: false });
       this.channelPlugin = null;
+      this.channelPluginConfigFingerprint = null;
     }
     if (channelConfig?.enabled) {
       if (!this.channelPlugin) {
         this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+        this.channelPluginConfigFingerprint = nextChannelFingerprint;
       }
       this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
       this.channelPlugin.register(api);

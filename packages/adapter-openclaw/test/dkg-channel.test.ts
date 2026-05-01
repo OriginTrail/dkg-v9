@@ -118,6 +118,40 @@ describe('DkgChannelPlugin', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
   });
 
+  it('captures full runtime config when api.config is adapter plugin config', () => {
+    const { runtime } = makeMockRuntime();
+    const fullConfig = {
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: '/runtime-workspace',
+        },
+      },
+    };
+    const api = makeApi({
+      config: {
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+      } as any,
+      runtime: {
+        ...runtime,
+        config: fullConfig,
+      },
+      registerChannel: trackFn(),
+      registerHttpRoute: trackFn(),
+    } as any);
+
+    plugin.register(api);
+
+    expect((plugin as any).cfg).toBe(fullConfig);
+  });
+
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
     const reassertSpy = vi.fn();
     plugin.setPreDispatchReAssert(reassertSpy);

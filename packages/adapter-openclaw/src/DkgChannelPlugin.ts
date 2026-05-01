@@ -32,6 +32,7 @@ import type {
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import type { ChatTurnWriter } from './ChatTurnWriter.js';
+import { resolveOpenClawMergedConfig } from './openclaw-config.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -501,7 +502,7 @@ export class DkgChannelPlugin {
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg = (api as any).cfg ?? (api as any).config ?? this.runtime?.cfg ?? this.runtime?.config;
+    this.cfg = resolveOpenClawMergedConfig(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {

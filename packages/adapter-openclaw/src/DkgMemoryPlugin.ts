@@ -47,6 +47,7 @@ import type {
   MemorySource,
   OpenClawPluginApi,
 } from './types.js';
+import { resolveOpenClawMergedConfig } from './openclaw-config.js';
 
 // ---------------------------------------------------------------------------
 // Conventions — addresses, assertion names, RDF vocabulary
@@ -713,19 +714,13 @@ export class DkgMemoryPlugin {
  * (`'adapter-openclaw'`, matching the manifest and the value setup.ts
  * writes during slot election).
  *
- * Some OpenClaw gateway versions expose the merged config on `api.cfg`
- * instead of `api.config` — `DkgChannelPlugin.register` already handles
- * this divergence, so mirror the same fallback order here to avoid
- * false negatives on those runtimes.
+ * Some OpenClaw gateway versions expose the merged config on `api.cfg`,
+ * `runtime.cfg`, or `runtime.config`, while others pass the adapter's
+ * validated plugin config directly as `api.config`. Only the merged config
+ * carries `plugins.slots.memory`, so skip plugin-shaped config objects here.
  */
 function isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
-  const anyApi = api as any;
-  const runtime = anyApi?.runtime;
-  const mergedConfig =
-    (anyApi?.cfg as Record<string, unknown> | undefined) ??
-    (anyApi?.config as Record<string, unknown> | undefined) ??
-    (runtime?.cfg as Record<string, unknown> | undefined) ??
-    (runtime?.config as Record<string, unknown> | undefined);
+  const mergedConfig = resolveOpenClawMergedConfig(api);
   const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
   const slots = plugins?.slots as Record<string, unknown> | undefined;
   return slots?.memory === 'adapter-openclaw';

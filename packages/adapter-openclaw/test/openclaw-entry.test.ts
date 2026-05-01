@@ -180,7 +180,8 @@ describe('openclaw-entry', () => {
       memory: { enabled: true },
       channel: { enabled: false },
     });
-    expect((api as any).workspaceDir).toBe('/work');
+    expect((api as any).workspaceDir).toBeUndefined();
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined]);
   });
 
   it('accepts api.config when the gateway passes validated plugin config directly', async () => {
@@ -306,5 +307,36 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((secondApi as any).workspaceDir).toBe('/cfg-workspace');
     expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/cfg-workspace']);
+  });
+
+  it('does not let installedWorkspace mask a later runtime workspace', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      stateDir: '/setup/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/setup',
+    });
+
+    entry(api);
+    expect((api as any).workspaceDir).toBeUndefined();
+
+    // Simulate a stale api.workspaceDir left by an older entry wrapper or
+    // caller, then prove a higher-priority runtime workspace replaces it.
+    (api as any).workspaceDir = '/setup';
+    (api as any).runtime = {
+      config: {
+        agents: {
+          defaults: {
+            workspace: '/runtime-workspace',
+          },
+        },
+      },
+    };
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe('/runtime-workspace');
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/runtime-workspace']);
   });
 });

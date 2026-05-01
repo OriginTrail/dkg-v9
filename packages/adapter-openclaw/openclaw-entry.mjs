@@ -10,11 +10,14 @@ let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
-  const { config, workspaceDir } = resolveEntryConfig(api);
+  const { config, workspaceDir, apiWorkspaceDir } = resolveEntryConfig(api);
 
-  // Pass workspace directory to the API for auto-detection.
-  if (workspaceDir && !api.workspaceDir) {
-    api.workspaceDir = workspaceDir;
+  // Pass only runtime/cfg workspace evidence to the API for auto-detection.
+  // `installedWorkspace` remains setup metadata consumed by DkgNodePlugin's
+  // resolver; writing it onto api.workspaceDir would make it look like a live
+  // runtime workspace and could mask a later higher-priority runtime value.
+  if (apiWorkspaceDir) {
+    api.workspaceDir = apiWorkspaceDir;
   }
 
   if (instance) {
@@ -84,9 +87,11 @@ function resolveEntryConfig(api) {
     workspaceConfig?.workspace ??
     mergedConfig?.agents?.defaults?.workspace ??
     mergedConfig?.workspace ??
-    api.workspaceDir ??
+    anyApi?.workspaceDir;
+  const syncWorkspaceDir =
+    workspaceDir ??
     config.installedWorkspace;
-  return { config, workspaceDir };
+  return { config, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir };
 }
 
 function isObject(value) {
@@ -95,6 +100,9 @@ function isObject(value) {
 
 function looksLikePluginConfig(value) {
   if (!isObject(value)) return false;
+  if (isObject(value.plugins) || isObject(value.agents) || typeof value.workspace === 'string') {
+    return false;
+  }
   return [
     'daemonUrl',
     'dkgHome',

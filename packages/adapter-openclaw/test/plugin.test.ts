@@ -68,6 +68,121 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('reads memory slot ownership from runtime config when api.config is adapter plugin config', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        daemonUrl: 'http://localhost:9200',
+        stateDir: '/workspace/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/workspace',
+        memory: { enabled: true },
+      },
+      runtime: {
+        config: {
+          plugins: {
+            slots: {
+              memory: 'adapter-openclaw',
+            },
+          },
+        },
+      },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) {
+        return { ok: true, status: 200, json: async () => ({ peerId: 'p-runtime-config' }) } as Response;
+      }
+      if (url.includes('/api/agent/identity')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ identity: { agentAddress: '0x0000000000000000000000000000000000000001' } }),
+        } as Response;
+      }
+      if (url.includes('/api/context-graph/list')) {
+        return { ok: true, status: 200, json: async () => ({ contextGraphs: [] }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+    try {
+      plugin.register(mockApi);
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('recreates the channel module when refreshed channel config changes', () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockResolvedValue(undefined);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: true },
+      });
+      (plugin as any).client = {};
+      (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+      (plugin as any).chatTurnWriter = {} as any;
+      const registerMemoryCapability = vi.fn();
+      const mockApi = {
+        config: {
+          plugins: {
+            slots: {
+              memory: 'adapter-openclaw',
+            },
+          },
+        },
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability,
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      const chatTurnWriter = (plugin as any).chatTurnWriter;
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: true },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const secondChannelPlugin = (plugin as any).channelPlugin;
+
+      expect(firstChannelPlugin).toBeDefined();
+      expect(secondChannelPlugin).toBeDefined();
+      expect(secondChannelPlugin).not.toBe(firstChannelPlugin);
+      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
+      expect((secondChannelPlugin as any).chatTurnWriter).toBe(chatTurnWriter);
+      expect((secondChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
+      expect(registerSpy).toHaveBeenCalledTimes(2);
+      expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
   it('registers session_end hook and all exported tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];

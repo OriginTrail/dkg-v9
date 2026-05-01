@@ -316,6 +316,59 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed response");
   });
 
+  it("T359 - typed message normalization accepts structured and ctx text content", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: [{ type: "text", text: "typed array hello" }] },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-array", messageId: "array-in-1" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-array", content: "typed ctx response" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("typed array hello");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed ctx response");
+  });
+
+  it("T359 - typed message normalization preserves alternate provider id fields for replay markers", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "alt id q", message_id: "alt-id-in" },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-alt-id", sessionKey: "sk" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "alt id a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-alt-id", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+
+    const sessionId = "openclaw:telegram:bot:chat-alt-id:sk";
+    expect((writer as any).w4bSessionCounts.get(sessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    await restarted.onBeforeCompaction({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-alt-id",
+      sessionKey: "sk",
+    });
+
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "alt id q", metadata: { message_id: "alt-id-in" } },
+        { role: "assistant", content: "alt id a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-alt-id", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(0);
+    restarted.flushSync();
+  });
+
   it("T359 - typed and internal W4b surfaces for the same Telegram message persist once", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "same inbound", metadata: { messageId: "same-in-1" } },

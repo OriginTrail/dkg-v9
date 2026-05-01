@@ -970,13 +970,7 @@ export class ChatTurnWriter {
     const ctx = hookCtx && typeof hookCtx === "object" ? hookCtx : {};
     const eventContext = event.context && typeof event.context === "object" ? event.context : {};
     const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
-    const content = [
-      event.content,
-      event.text,
-      event.body,
-      eventContext.content,
-      metadata.content,
-    ].find((value) => typeof value === "string" && value.trim().length > 0) as string | undefined;
+    const content = this.extractTypedMessageContent(event, eventContext, metadata, ctx);
     if (!content) return null;
 
     const channelId = firstString(
@@ -1013,7 +1007,19 @@ export class ChatTurnWriter {
       return null;
     }
 
-    const messageId = firstString(ctx.messageId, event.messageId, eventContext.messageId, metadata.messageId, metadata.id);
+    const messageId = firstString(
+      ctx.messageId,
+      ctx.MessageId,
+      ctx.message_id,
+      ctx.id,
+      ...this.extractMessageIds({
+        ...event,
+        context: eventContext,
+        metadata,
+        content,
+        role: direction === "inbound" ? "user" : "assistant",
+      } as ChatTurnMessage),
+    );
     const successValue = eventContext.success ?? event.success;
     const context: NonNullable<InternalMessageEvent["context"]> = {
       channelId,
@@ -1031,6 +1037,26 @@ export class ChatTurnWriter {
       text: content,
       context,
     };
+  }
+
+  private extractTypedMessageContent(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string {
+    for (const value of [
+      event.content,
+      event.text,
+      event.body,
+      eventContext.content,
+      metadata.content,
+      ctx.content,
+    ]) {
+      const text = this.extractText(value as ChatTurnMessage["content"]).trim();
+      if (text) return text;
+    }
+    return "";
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {

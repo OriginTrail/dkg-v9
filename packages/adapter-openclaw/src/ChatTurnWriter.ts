@@ -506,7 +506,9 @@ export class ChatTurnWriter {
     if (ctx?.channelId === "dkg-ui") return;
     const sessionId = this.deriveSessionId(ctx);
     if (!sessionId) return;
-    const externalCursorKey = this.externalCursorKeyFromHookPayload(undefined, ctx);
+    const identity = this.identityFieldsFromPayload(ctx);
+    const externalCursorKey = this.externalCursorKeyFromSessionKey(identity.sessionKey);
+    const weakConversationCursorKey = this.weakConversationCursorKey(identity);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -526,7 +528,7 @@ export class ChatTurnWriter {
       .catch(() => undefined)
       .then(async () => {
         if (resetAtSchedule) await resetAtSchedule;
-        await this.runAgentEndPersist(event, sessionId, externalCursorKey);
+        await this.runAgentEndPersist(event, sessionId, externalCursorKey, weakConversationCursorKey);
       });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
@@ -541,7 +543,12 @@ export class ChatTurnWriter {
     // ordering; flush() drains via inFlightPersists.
   }
 
-  private async runAgentEndPersist(event: AgentEndContext, sessionId: string, externalCursorKey?: string): Promise<void> {
+  private async runAgentEndPersist(
+    event: AgentEndContext,
+    sessionId: string,
+    externalCursorKey?: string,
+    weakConversationCursorKey?: string,
+  ): Promise<void> {
     try {
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
       // session count (minus 1, because count is 1-based). When typed
@@ -584,6 +591,22 @@ export class ChatTurnWriter {
               throw new Error("Failed to write external chat-turn marker consumption");
             }
             if (externalMarkerAction.skip) continue;
+          }
+          const weakMarker = weakConversationCursorKey
+            ? this.weakW4bExternalMarkerId(user, assistant)
+            : "";
+          if (weakConversationCursorKey && weakMarker && this.hasExternalTurnMarker(weakConversationCursorKey, weakMarker)) {
+            const previousWeakMarkerCount =
+              this.externalTurnMarkers.get(weakConversationCursorKey)?.get(weakMarker) ?? 0;
+            const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
+            this.consumeExternalTurnMarker(weakConversationCursorKey, weakMarker);
+            this.bumpWatermark(sessionId, pairIndex);
+            if (!this.commitWatermarkStateSync(sessionId)) {
+              this.restoreExternalTurnMarkerCount(weakConversationCursorKey, weakMarker, previousWeakMarkerCount);
+              this.restoreWatermarkState(sessionId, watermarkSnapshot);
+              throw new Error("Failed to write weak W4b chat-turn marker consumption");
+            }
+            continue;
           }
           // W4a turnId mixes pair position into the hash so backfill of
           // two same-text pairs (e.g. user said "hi" twice) produces
@@ -1210,6 +1233,7 @@ export class ChatTurnWriter {
                 completionSessionId,
                 (this.w4bSessionCounts.get(completionSessionId) ?? 0) + 1,
               );
+              this.markWeakW4bTurnPersisted(completionSessionId, userText, assistantText);
               // T17 — Persist the new count to disk via the
               // debounced flush so a process restart preserves
               // the "skip these pairs in computeDelta" floor.
@@ -2124,6 +2148,19 @@ export class ChatTurnWriter {
     return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
+  private weakW4bExternalMarkerId(user: string, assistant: string): string {
+    return `weak-w4b::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
+  }
+
+  private markWeakW4bTurnPersisted(sessionId: string, user: string, assistant: string): void {
+    const cursor = this.weakConversationCursorKeyFromSessionId(sessionId);
+    if (!cursor) return;
+    const marker = this.weakW4bExternalMarkerId(user, assistant);
+    const bucket = this.externalTurnMarkers.get(cursor) ?? new Map<string, number>();
+    bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+    this.externalTurnMarkers.set(cursor, bucket);
+  }
+
   private consumeExternalTurnMarkersForPair(
     sessionKeyCursor: string,
     turnIds: string[],
@@ -2385,12 +2422,6 @@ export class ChatTurnWriter {
     };
   }
 
-  private externalCursorKeyFromHookPayload(event?: any, ctx?: any): string {
-    const ctxFields = this.identityFieldsFromPayload(ctx);
-    const eventFields = this.identityFieldsFromPayload(event);
-    return this.externalCursorKeyFromSessionKey(ctxFields.sessionKey ?? eventFields.sessionKey);
-  }
-
   /**
    * DKG-side session id for an internal message event. Uses the full
    * envelope (`channelId + accountId + conversationId + sessionKey`)
@@ -2444,6 +2475,25 @@ export class ChatTurnWriter {
   private externalCursorKeyFromSessionKey(sessionKey?: unknown): string {
     if (typeof sessionKey !== "string" || sessionKey.trim().length === 0) return "";
     return `openclaw:transcript:${this.encodeIdField(this.sanitize(sessionKey))}`;
+  }
+
+  private weakConversationCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+  }): string {
+    if (!parts.channelId || !parts.conversationId) return "";
+    return `openclaw:weak:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.conversationId)),
+    ])}`;
+  }
+
+  private weakConversationCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || !this.isWeakSessionKey(parsed.sessionKey) || !parsed.conversationId) return "";
+    return `openclaw:weak:${this.identityHash([parsed.channelId, parsed.accountId, parsed.conversationId])}`;
   }
 
   private collectResetSessionIds(identity: {

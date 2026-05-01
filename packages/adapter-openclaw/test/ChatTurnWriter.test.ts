@@ -456,6 +456,41 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - weak typed persist marker suppresses later real-session W4a duplicate", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak marker q", metadata: { messageId: "weak-marker-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-marker" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak marker a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-marker" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-weak-marker");
+    const weakSessionId = `openclaw:telegram:bot:chat-weak-marker:${weakSessionKey}`;
+    expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "weak marker q" },
+        { role: "assistant", content: "weak marker a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-marker", sessionKey: "agent:main:real" });
+    await flushMicrotasks();
+
+    const strongSessionId = "openclaw:telegram:bot:chat-weak-marker:agent%3Amain%3Areal";
+    expect((restarted as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((restarted as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+    expect((restarted as any).cachedWatermarks.get(strongSessionId)).toBe(0);
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    restarted.flushSync();
+  });
+
   it("T359 - same-message queue promotion preserves inbound arrival order", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "older weak inbound", metadata: { messageId: "order-old" } },

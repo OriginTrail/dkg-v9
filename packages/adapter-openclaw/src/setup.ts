@@ -29,7 +29,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { blueGreenSlotReady, findPackageRepoDir, requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 import { resolveDkgCli } from './resolve-dkg-cli.js';
-import { sameResolvedPath } from './state-dir-path.js';
+import {
+  defaultStateDirForWorkspace,
+  legacyStateDirForWorkspace,
+  sameResolvedPath,
+} from './state-dir-path.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -942,10 +946,6 @@ export type AdapterEntryConfig = Pick<
   'daemonUrl' | 'stateDir' | 'stateDirSource' | 'memory' | 'channel'
 >;
 
-function defaultStateDirForWorkspace(workspaceDir: string): string {
-  return join(workspaceDir, '.openclaw');
-}
-
 export function mergeOpenClawConfig(
   openclawConfigPath: string,
   adapterPath: string,
@@ -1054,6 +1054,9 @@ export function mergeOpenClawConfig(
 
   const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
   const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
+  const isSetupOwnedDefaultForWorkspace = (stateDir: string, workspaceDir: string): boolean =>
+    sameResolvedPath(stateDir, defaultStateDirForWorkspace(workspaceDir)) ||
+    sameResolvedPath(stateDir, legacyStateDirForWorkspace(workspaceDir));
   const incomingStateDirIsSetupDefault =
     entryConfig.stateDirSource === 'setup-default' &&
     !!incomingStateDir &&
@@ -1062,7 +1065,7 @@ export function mergeOpenClawConfig(
     existingEntryConfig.stateDirSource === 'setup-default' &&
     !!existingStateDir &&
     !!priorInstalledWorkspace &&
-    sameResolvedPath(existingStateDir, defaultStateDirForWorkspace(priorInstalledWorkspace));
+    isSetupOwnedDefaultForWorkspace(existingStateDir, priorInstalledWorkspace);
   let preservedExistingStateDir = false;
   if (typeof existingEntryConfig.stateDir === 'string' && !existingEntryConfig.stateDir.trim()) {
     delete existingEntryConfig.stateDir;

@@ -15,7 +15,7 @@
       },
       "stateDir": {
         "type": "string",
-        "description": "Directory for adapter runtime state such as chat-turn watermarks. Setup writes a workspace-scoped default when available."
+        "description": "Directory for adapter runtime state such as chat-turn watermarks. Setup writes the workspace-scoped default <workspace>/.dkg-adapter when available."
       },
       "stateDirSource": {
         "type": "string",

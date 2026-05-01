@@ -10,54 +10,24 @@ let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
-
-  if (instance) {
-    log.info?.('[dkg-entry] Re-registering plugin surfaces (channel, memory, tools) into new registry (gateway multi-phase init)');
-    instance.register(api);
-    registerLifecycleService(api, log);
-    return;
-  }
-
-  // Mirror the fallback order used by isMemorySlotOwnedByThisAdapter in
-  // DkgMemoryPlugin.ts — some OpenClaw gateway versions expose the merged
-  // config on api.cfg / runtime.cfg instead of api.config.
-  const anyApi = api;
-  const runtime = anyApi?.runtime;
-  const mergedConfig =
-    anyApi?.cfg ??
-    anyApi?.config ??
-    runtime?.cfg ??
-    runtime?.config ??
-    {};
-
-  // Workspace directory is still needed for the SKILL.md sync below and for
-  // downstream auto-detection, even though per-workspace config.json is gone.
-  let workspaceDir = mergedConfig?.agents?.defaults?.workspace;
-  if (!workspaceDir) {
-    workspaceDir = mergedConfig?.workspace ?? api.workspaceDir;
-  }
-
-  // Read DKG config from the OpenClaw plugin entry
-  // (plugins.entries["adapter-openclaw"].config in openclaw.json).
-  const entryConfig = mergedConfig?.plugins?.entries?.['adapter-openclaw']?.config ?? {};
-  const config = { ...entryConfig };
-
-  // Deep-clone integration sub-configs so we don't mutate the incoming config.
-  if (entryConfig.memory) config.memory = { ...entryConfig.memory };
-  if (entryConfig.channel) config.channel = { ...entryConfig.channel };
-
-  // Env override: DKG_DAEMON_URL trumps the config-file value.
-  if (process.env.DKG_DAEMON_URL) {
-    config.daemonUrl = process.env.DKG_DAEMON_URL;
-  }
+  const { config, workspaceDir } = resolveEntryConfig(api);
 
   // Pass workspace directory to the API for auto-detection.
   if (workspaceDir && !api.workspaceDir) {
     api.workspaceDir = workspaceDir;
   }
 
+  if (instance) {
+    log.info?.('[dkg-entry] Re-registering plugin surfaces (channel, memory, tools) into new registry (gateway multi-phase init)');
+    instance.updateConfig?.(config);
+    instance.register(api);
+    registerLifecycleService(api, log);
+    syncSkillToWorkspace(workspaceDir, log);
+    return;
+  }
+
   log.info?.(
-    `[dkg-entry] config (from openclaw.json entry config) - daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, `
+    `[dkg-entry] config (from OpenClaw plugin config) - daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, `
       + `memory.enabled: ${config.memory?.enabled}, `
       + `channel.enabled: ${config.channel?.enabled}, `
       + `registrationMode: ${api.registrationMode ?? 'full'}`,
@@ -72,6 +42,89 @@ export default function (api) {
   // The CLI dist ships the canonical template; the workspace copy goes stale
   // after adapter/CLI upgrades unless re-synced. This runs on every plugin
   // load, is idempotent (skips when content matches), and non-fatal.
+  syncSkillToWorkspace(workspaceDir, log);
+
+  log.info?.('[dkg-entry] DkgNodePlugin registered');
+}
+
+function resolveEntryConfig(api) {
+  const anyApi = api;
+  const runtime = anyApi?.runtime;
+  const fullConfigCandidates = [
+    anyApi?.cfg,
+    runtime?.cfg,
+    runtime?.config,
+    anyApi?.config,
+  ].filter(isObject);
+  const mergedConfig =
+    fullConfigCandidates.find((candidate) => isObject(candidate.plugins) || isObject(candidate.agents)) ??
+    {};
+  const entryConfigs = fullConfigCandidates
+    .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
+    .filter(isObject);
+  const directConfigs = [
+    anyApi?.pluginConfig,
+    looksLikePluginConfig(anyApi?.config) ? anyApi.config : undefined,
+    runtime?.pluginConfig,
+  ].filter(isObject);
+  const config = mergePluginConfigs(...entryConfigs, ...directConfigs);
+
+  if (process.env.DKG_DAEMON_URL) {
+    config.daemonUrl = process.env.DKG_DAEMON_URL;
+  }
+
+  const workspaceDir =
+    mergedConfig?.agents?.defaults?.workspace ??
+    mergedConfig?.workspace ??
+    api.workspaceDir ??
+    config.installedWorkspace;
+  return { config, workspaceDir };
+}
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function looksLikePluginConfig(value) {
+  if (!isObject(value)) return false;
+  return [
+    'daemonUrl',
+    'dkgHome',
+    'stateDir',
+    'stateDirSource',
+    'installedWorkspace',
+    'memory',
+    'channel',
+  ].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function mergePluginConfigs(...configs) {
+  const merged = {};
+  for (const config of configs) {
+    const priorMemory = isObject(merged.memory) ? merged.memory : undefined;
+    const priorChannel = isObject(merged.channel) ? merged.channel : undefined;
+    const nextMemory = isObject(config.memory) ? config.memory : undefined;
+    const nextChannel = isObject(config.channel) ? config.channel : undefined;
+    Object.assign(merged, config);
+    if (priorMemory || nextMemory) {
+      if (nextMemory) {
+        merged.memory = { ...(priorMemory ?? {}), ...nextMemory };
+      } else if (!Object.prototype.hasOwnProperty.call(config, 'memory')) {
+        merged.memory = priorMemory;
+      }
+    }
+    if (priorChannel || nextChannel) {
+      if (nextChannel) {
+        merged.channel = { ...(priorChannel ?? {}), ...nextChannel };
+      } else if (!Object.prototype.hasOwnProperty.call(config, 'channel')) {
+        merged.channel = priorChannel;
+      }
+    }
+  }
+  return merged;
+}
+
+function syncSkillToWorkspace(workspaceDir, log) {
   try {
     // Try both monorepo and npm-installed relative paths. The CLI
     // package ships `skills/` in its `files` array. In the monorepo the
@@ -93,8 +146,6 @@ export default function (api) {
   } catch (err) {
     log.debug?.(`[dkg-entry] SKILL.md sync skipped: ${err.message}`);
   }
-
-  log.info?.('[dkg-entry] DkgNodePlugin registered');
 }
 
 function registerLifecycleService(api, log) {

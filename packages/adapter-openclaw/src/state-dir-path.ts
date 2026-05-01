@@ -1,6 +1,29 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
+export type ChatTurnWriterStateLayout = 'direct' | 'nested';
+
+export function defaultStateDirForWorkspace(workspaceDir: string): string {
+  return join(workspaceDir, '.dkg-adapter');
+}
+
+export function legacyStateDirForWorkspace(workspaceDir: string): string {
+  return join(workspaceDir, '.openclaw');
+}
+
+export function watermarkPathForStateDir(
+  stateDir: string,
+  layout: ChatTurnWriterStateLayout = 'nested',
+): string {
+  return layout === 'direct'
+    ? join(stateDir, 'chat-turn-watermarks.json')
+    : join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json');
+}
+
+export function legacyWatermarkPathForStateDir(stateDir: string): string {
+  return watermarkPathForStateDir(stateDir, 'nested');
+}
+
 export function canonicalPathForCompare(path: string): string {
   const absolute = resolve(path);
   const missingParts: string[] = [];

@@ -3116,7 +3116,7 @@ describe('DkgNodePlugin', () => {
     delete process.env.OPENCLAW_STATE_DIR;
     const tmpRoot = require('os').tmpdir();
     const workspaceDir = path.join(tmpRoot, `dkg-t24-workspace-${Date.now()}`);
-    const homeDir = `${require('os').homedir()}/.openclaw`;
+    const homeDir = path.join(require('os').homedir(), '.openclaw');
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -3132,7 +3132,7 @@ describe('DkgNodePlugin', () => {
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiFallback);
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
 
       // Force setStateDir to fail.
       const writer = (plugin as any).chatTurnWriter;
@@ -3154,7 +3154,7 @@ describe('DkgNodePlugin', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Failure: migration target cleared, but stateDir stays at fallback.
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
       expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
 
       // A second register() with the SAME apiBetter MUST re-trigger the
@@ -3164,11 +3164,11 @@ describe('DkgNodePlugin', () => {
       // The migration was triggered again — `chatTurnWriterMigrationTarget`
       // should be set during the in-flight async work.
       const target = (plugin as any).chatTurnWriterMigrationTarget;
-      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.openclaw');
+      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter');
       // Wait for retry to settle.
       await new Promise((r) => setTimeout(r, 50));
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
     } finally {
       if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3190,7 +3190,7 @@ describe('DkgNodePlugin', () => {
     delete process.env.OPENCLAW_STATE_DIR;
     const tmpRoot = require('os').tmpdir();
     const workspaceDir = path.join(tmpRoot, `dkg-t18-workspace-${Date.now()}`);
-    const homeDir = `${require('os').homedir()}/.openclaw`;
+    const homeDir = path.join(require('os').homedir(), '.openclaw');
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -3207,7 +3207,7 @@ describe('DkgNodePlugin', () => {
       } as unknown as OpenClawPluginApi;
       plugin.register(apiFallback);
       const writer1 = (plugin as any).chatTurnWriter;
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
 
       // Second register with workspaceDir → triggers in-place migration.
       const apiBetter: OpenClawPluginApi = {
@@ -3227,19 +3227,19 @@ describe('DkgNodePlugin', () => {
       // migration. While the async `setStateDir` is in flight,
       // `chatTurnWriterMigrationTarget` reflects the target.
       expect((plugin as any).chatTurnWriterMigrationTarget?.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
       // Wait for the fire-and-forget setStateDir to complete.
       await new Promise((r) => setTimeout(r, 100));
       // After success, chatTurnWriterStateDir flips and migration
       // target clears.
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
       expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
       const path2 = (writer2 as any).watermarkFilePath as string;
       expect(path2.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
     } finally {
       if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3590,7 +3590,7 @@ describe('DkgNodePlugin', () => {
       const watermarkPath: string = (ctw as any).watermarkFilePath;
       const normalized = watermarkPath.replace(/\\/g, '/');
       // Must have fallen through empty env to workspaceDir-derived path.
-      expect(normalized).toContain('/tmp/dkg-t26-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      expect(normalized).toContain('/tmp/dkg-t26-workspace/.dkg-adapter/chat-turn-watermarks.json');
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
       else process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3616,7 +3616,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        '/tmp/dkg-t26-workspace-ws/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        '/tmp/dkg-t26-workspace-ws/.dkg-adapter/chat-turn-watermarks.json',
       );
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
@@ -3629,7 +3629,7 @@ describe('DkgNodePlugin', () => {
     // straight to `~/.openclaw` when `runtime.state.resolveStateDir()` and
     // `OPENCLAW_STATE_DIR` were both absent, so two workspaces on the
     // same machine would share `chat-turn-watermarks.json`. The new
-    // fallback prefers `api.workspaceDir + '/.openclaw'` when present.
+    // fallback prefers the workspace-local `.dkg-adapter` default when present.
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     try {
@@ -3650,14 +3650,13 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const ctw = (plugin as any).chatTurnWriter;
       expect(ctw).toBeDefined();
-      // ChatTurnWriter stores the resolved stateDir privately and writes
-      // `<stateDir>/dkg-adapter/chat-turn-watermarks.json`. Inspecting
-      // `watermarkFilePath` confirms the workspace-derived path won.
+      // ChatTurnWriter stores setup/workspace default watermarks directly
+      // under `.dkg-adapter`, without the legacy nested subdirectory.
       const watermarkPath: string = (ctw as any).watermarkFilePath;
       // Normalize separators for cross-platform path comparison (Windows
       // path.join produces backslashes from a forward-slash workspaceDir).
       const normalized = watermarkPath.replace(/\\/g, '/');
-      expect(normalized).toContain('/tmp/dkg-r162-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      expect(normalized).toContain('/tmp/dkg-r162-workspace/.dkg-adapter/chat-turn-watermarks.json');
       // Must NOT have fallen back to the home dir.
       expect(normalized).not.toContain(homedir().replace(/\\/g, '/') + '/.openclaw/dkg-adapter');
       // The home-dir fallback warn must NOT have fired.
@@ -3730,7 +3729,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       await plugin.stop();
     } finally {
@@ -3802,7 +3801,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       expect(watermarkPath.replace(/\\/g, '/')).not.toContain(staleConfigStateDir.replace(/\\/g, '/'));
       await plugin.stop();
@@ -3811,6 +3810,50 @@ describe('DkgNodePlugin', () => {
       else process.env.OPENCLAW_STATE_DIR = prevEnv;
       try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
       try { fs.rmSync(staleInstalledWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - stale setup-owned stateDir marker falls back to installedWorkspace default, not config', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const installedWorkspace = path.join(require('os').tmpdir(), `dkg-t75-installed-workspace-${Date.now()}`);
+    const staleWorkspace = path.join(require('os').tmpdir(), `dkg-t75-stale-marker-${Date.now()}`);
+    const staleConfigStateDir = path.join(staleWorkspace, '.openclaw');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace,
+        stateDir: staleConfigStateDir,
+        stateDirSource: 'setup-default',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const targetStateDir = path.join(installedWorkspace, '.dkg-adapter');
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        targetStateDir.replace(/\\/g, '/'),
+      );
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(targetStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(watermarkPath.replace(/\\/g, '/')).not.toContain(staleConfigStateDir.replace(/\\/g, '/'));
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(installedWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(staleWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   });
 
@@ -3877,7 +3920,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(apiWithoutWorkspace);
       const writer = (plugin as any).chatTurnWriter;
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        staleConfigStateDir.replace(/\\/g, '/'),
+        path.join(staleInstalledWorkspace, '.dkg-adapter').replace(/\\/g, '/'),
       );
 
       const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
@@ -3891,8 +3934,8 @@ describe('DkgNodePlugin', () => {
         workspaceDir,
       } as unknown as OpenClawPluginApi;
       plugin.register(apiWithWorkspace);
-      const targetStateDir = path.join(workspaceDir, '.openclaw');
-      expect(setStateDirSpy).toHaveBeenCalledWith(targetStateDir);
+      const targetStateDir = path.join(workspaceDir, '.dkg-adapter');
+      expect(setStateDirSpy).toHaveBeenCalledWith(targetStateDir, expect.objectContaining({ stateLayout: 'direct' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -3959,7 +4002,7 @@ describe('DkgNodePlugin', () => {
         registerHook: () => {},
         on: () => {},
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
-        runtime: { state: { resolveStateDir: () => path.join(aliasWorkspace, '.openclaw') } },
+        runtime: { state: { resolveStateDir: () => path.join(aliasWorkspace, '.dkg-adapter') } },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiRuntimeAlias);
       expect(setStateDirSpy).toHaveBeenCalledTimes(1);
@@ -4009,7 +4052,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        currentWorkspace.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        currentWorkspace.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       await plugin.stop();
     } finally {
@@ -4129,7 +4172,7 @@ describe('DkgNodePlugin', () => {
         runtime: { state: { resolveStateDir: () => runtimeStateDir } },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiWithRuntime);
-      expect(setStateDirSpy).toHaveBeenCalledWith(runtimeStateDir);
+      expect(setStateDirSpy).toHaveBeenCalledWith(runtimeStateDir, expect.objectContaining({ stateLayout: 'nested' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -4171,7 +4214,7 @@ describe('DkgNodePlugin', () => {
 
       process.env.OPENCLAW_STATE_DIR = envStateDir;
       plugin.register(mockApi);
-      expect(setStateDirSpy).toHaveBeenCalledWith(envStateDir);
+      expect(setStateDirSpy).toHaveBeenCalledWith(envStateDir, expect.objectContaining({ stateLayout: 'nested' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -4375,7 +4418,7 @@ describe('DkgNodePlugin', () => {
 
     const runtime = {
       state: {
-        resolveStateDir: () => path.join(workspaceDir, '.openclaw'),
+        resolveStateDir: () => path.join(workspaceDir, '.dkg-adapter'),
       },
       channel: {
         routing: {

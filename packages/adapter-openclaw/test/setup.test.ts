@@ -755,7 +755,7 @@ describe('mergeOpenClawConfig', () => {
   it('writes entry.config.stateDir when setup provides a workspace-scoped default', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
-    const stateDir = join(defaultInstalledWorkspace, '.openclaw');
+    const stateDir = join(defaultInstalledWorkspace, '.dkg-adapter');
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
@@ -773,7 +773,7 @@ describe('mergeOpenClawConfig', () => {
   it('does not mark an incoming stateDir as setup-owned without the setup marker', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
-    const stateDir = join(defaultInstalledWorkspace, '.openclaw');
+    const stateDir = join(defaultInstalledWorkspace, '.dkg-adapter');
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
@@ -868,7 +868,7 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(defaultInstalledWorkspace, '.openclaw'),
+      stateDir: join(defaultInstalledWorkspace, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
@@ -900,7 +900,7 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(secondWs, '.openclaw'),
+      stateDir: join(secondWs, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
@@ -921,7 +921,7 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(firstWs, '.openclaw'),
+      stateDir: join(firstWs, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
@@ -929,16 +929,48 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(secondWs, '.openclaw'),
+      stateDir: join(secondWs, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.dkg-adapter'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
+  });
+
+  it('rewrites the legacy setup-owned .openclaw default to .dkg-adapter on re-merge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const ws = join(testDir, 'workspace-legacy-default');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              installedWorkspace: ws,
+              stateDir: join(ws, '.openclaw'),
+              stateDirSource: 'setup-default',
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: join(ws, '.dkg-adapter'),
+      stateDirSource: 'setup-default',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, ws);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(ws, '.dkg-adapter'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
+    expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(ws);
   });
 
   it('updates setup-owned stateDir when existing installedWorkspace and stateDir have surrounding whitespace', () => {
@@ -962,14 +994,14 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(secondWs, '.openclaw'),
+      stateDir: join(secondWs, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.dkg-adapter'));
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 
@@ -1002,14 +1034,14 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
-      stateDir: join(secondWs, '.openclaw'),
+      stateDir: join(secondWs, '.dkg-adapter'),
       stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.dkg-adapter'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
@@ -3503,7 +3535,7 @@ describe('runSetup Step 5 — faucet funding', () => {
       // short-circuit Step 7 (merge).
       const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
       expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
-      expect(cfg.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(env.workspace, '.openclaw'));
+      expect(cfg.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(env.workspace, '.dkg-adapter'));
     } finally {
       env.restore();
     }

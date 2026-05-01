@@ -47,6 +47,78 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).cachedWatermarks.size).toBe(0);
   });
 
+  it("writes direct layout watermarks without the legacy dkg-adapter subdirectory", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-direct-"));
+    const directWriter = new ChatTurnWriter({
+      client: mockClient,
+      logger: mockLogger,
+      stateDir: directStateDir,
+      stateLayout: "direct",
+    });
+    try {
+      directWriter.onAgentEnd({
+        sessionId: "test-direct",
+        messages: [
+          { role: "user", content: "direct layout user" },
+          { role: "assistant", content: "direct layout assistant" },
+        ],
+      }, { channelId: "ch", sessionKey: "direct" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      directWriter.flushSync();
+
+      expect(fs.existsSync(path.join(directStateDir, "chat-turn-watermarks.json"))).toBe(true);
+      expect(fs.existsSync(path.join(directStateDir, "dkg-adapter", "chat-turn-watermarks.json"))).toBe(false);
+    } finally {
+      directWriter.flushSync();
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy workspace default watermarks into the direct layout by max values", () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-legacy-workspace-"));
+    const legacyStateDir = path.join(workspace, ".openclaw");
+    const newStateDir = path.join(workspace, ".dkg-adapter");
+    const legacyFile = path.join(legacyStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    const newFile = path.join(newStateDir, "chat-turn-watermarks.json");
+    const newNestedFile = path.join(newStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.mkdirSync(newStateDir, { recursive: true });
+      fs.mkdirSync(path.dirname(newNestedFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        "openclaw:tg:::legacy-only": { w: 2, b: 1 },
+        "openclaw:tg:::shared": { w: 3, b: 9 },
+      }));
+      fs.writeFileSync(newNestedFile, JSON.stringify({
+        "openclaw:tg:::nested-only": { w: 6, b: 2 },
+        "openclaw:tg:::shared": { w: 8, b: 0 },
+      }));
+      fs.writeFileSync(newFile, JSON.stringify({
+        "openclaw:tg:::new-only": { w: 11, b: 4 },
+        "openclaw:tg:::shared": { w: 7, b: 1 },
+      }));
+
+      const migrated = new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      });
+      migrated.flushSync();
+
+      const persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted["openclaw:tg:::legacy-only"]).toEqual({ w: 2, b: 1 });
+      expect(persisted["openclaw:tg:::nested-only"]).toEqual({ w: 6, b: 2 });
+      expect(persisted["openclaw:tg:::new-only"]).toEqual({ w: 11, b: 4 });
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 8, b: 9 });
+      expect(fs.existsSync(legacyFile)).toBe(true);
+      expect(fs.existsSync(newNestedFile)).toBe(true);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("calls storeChatTurn on onAgentEnd with ctx", async () => {
     const event: AgentEndContext = {
       sessionId: "test-session",

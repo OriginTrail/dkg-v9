@@ -44,7 +44,12 @@ import type {
 } from './types.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { canonicalPathForCompare } from './state-dir-path.js';
+import {
+  canonicalPathForCompare,
+  defaultStateDirForWorkspace,
+  legacyStateDirForWorkspace,
+  type ChatTurnWriterStateLayout,
+} from './state-dir-path.js';
 
 // Same eth-address shape accepted by `toEip55Checksum`. Kept local so the
 // dkg_query explicit `agent_address` normalization can avoid throwing for
@@ -128,7 +133,7 @@ const AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS = 30_000;
 const AUTO_RECALL_QUERY_MAX_CHARS = 500;
 
 export class DkgNodePlugin {
-  private readonly config: DkgOpenClawConfig;
+  private config: DkgOpenClawConfig;
 
   // Resolved DKG home directory. Computed once at register() time via
   // `resolveDkgHome` so DkgDaemonClient reads the node-level `auth.token`
@@ -209,6 +214,7 @@ export class DkgNodePlugin {
   // the writer at the upgraded location.
   private chatTurnWriterStateDir: string | null = null;
   private chatTurnWriterStateDirSource: ChatTurnWriterStateDirSource | null = null;
+  private chatTurnWriterStateLayout: ChatTurnWriterStateLayout | null = null;
   // T24 — Tracks the target stateDir of an in-flight async migration.
   // The migration is fire-and-forget from `register()` so we need a
   // separate flag from `chatTurnWriterStateDir` (which only flips on
@@ -375,6 +381,18 @@ export class DkgNodePlugin {
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
+  }
+
+  updateConfig(config?: DkgOpenClawConfig): void {
+    if (!config || typeof config !== 'object') return;
+    const next: DkgOpenClawConfig = { ...this.config, ...config };
+    if (this.config.memory || config.memory) {
+      next.memory = { ...(this.config.memory ?? {}), ...(config.memory ?? {}) };
+    }
+    if (this.config.channel || config.channel) {
+      next.channel = { ...(this.config.channel ?? {}), ...(config.channel ?? {}) };
+    }
+    this.config = next;
   }
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
@@ -562,11 +580,11 @@ export class DkgNodePlugin {
     //   1. `runtime.state.resolveStateDir()` — gateway-provided, workspace-scoped.
     //   2. `OPENCLAW_STATE_DIR` env override — operator-controlled, opt-in.
     //   3. explicit `config.stateDir` — user-controlled config override.
-    //   4. `api.workspaceDir + .openclaw` — gateway-provided current workspace.
+    //   4. `api.workspaceDir + .dkg-adapter` — gateway-provided current workspace.
     //   5. setup-owned `config.stateDir` — fallback for older gateways.
     //   6. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
-    const homeDir = `${homedir()}/.openclaw`;
+    const homeDir = join(homedir(), '.openclaw');
     // T26 — Normalize each source through trim+non-empty before the
     // `??` chain. Pre-fix `??` treated empty string as a real value,
     // so an accidentally-empty `OPENCLAW_STATE_DIR=''` (or whitespace-
@@ -582,14 +600,20 @@ export class DkgNodePlugin {
     const trimmedWorkspaceDir = trimmedNonEmpty(workspaceDir);
     const configuredStateDir = trimmedNonEmpty(this.config.stateDir);
     const configuredStateDirSource = trimmedNonEmpty(this.config.stateDirSource);
+    const configuredHasSetupDefaultSource = configuredStateDirSource === 'setup-default';
     const setupWorkspaceDir = trimmedNonEmpty(this.config.installedWorkspace);
-    const setupDefaultStateDir = setupWorkspaceDir ? join(setupWorkspaceDir, '.openclaw') : undefined;
+    const setupDefaultStateDir = setupWorkspaceDir ? defaultStateDirForWorkspace(setupWorkspaceDir) : undefined;
+    const legacySetupDefaultStateDir = setupWorkspaceDir ? legacyStateDirForWorkspace(setupWorkspaceDir) : undefined;
+    const matchesPath = (a: string | undefined, b: string | undefined): boolean =>
+      !!a && !!b && canonicalPathForCompare(a) === canonicalPathForCompare(b);
     const configuredIsSetupDefault =
-      configuredStateDirSource === 'setup-default' &&
+      configuredHasSetupDefaultSource &&
       !!configuredStateDir &&
-      !!setupDefaultStateDir &&
-      canonicalPathForCompare(configuredStateDir) === canonicalPathForCompare(setupDefaultStateDir);
-    const workspaceStateDir = trimmedWorkspaceDir ? join(trimmedWorkspaceDir, '.openclaw') : undefined;
+      (
+        matchesPath(configuredStateDir, setupDefaultStateDir) ||
+        matchesPath(configuredStateDir, legacySetupDefaultStateDir)
+      );
+    const workspaceStateDir = trimmedWorkspaceDir ? defaultStateDirForWorkspace(trimmedWorkspaceDir) : undefined;
     const runtimeStateDir = trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.());
     const envStateDir = trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR);
     let stateDir = homeDir;
@@ -600,16 +624,42 @@ export class DkgNodePlugin {
     } else if (envStateDir) {
       stateDir = envStateDir;
       stateDirSource = 'env';
-    } else if (!configuredIsSetupDefault && configuredStateDir) {
+    } else if (!configuredHasSetupDefaultSource && configuredStateDir) {
       stateDir = configuredStateDir;
       stateDirSource = 'config';
     } else if (workspaceStateDir) {
       stateDir = workspaceStateDir;
       stateDirSource = 'workspace';
+    } else if (configuredIsSetupDefault && setupDefaultStateDir) {
+      stateDir = setupDefaultStateDir;
+      stateDirSource = 'setup-default';
+    } else if (configuredHasSetupDefaultSource && setupDefaultStateDir) {
+      stateDir = setupDefaultStateDir;
+      stateDirSource = 'setup-default';
     } else if (configuredStateDir) {
       stateDir = configuredStateDir;
-      stateDirSource = 'setup-default';
+      stateDirSource = configuredHasSetupDefaultSource ? 'setup-default' : 'config';
     }
+
+    const knownWorkspaceDefaultStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir]
+      .filter((candidate): candidate is string => !!candidate)
+      .map((candidate) => defaultStateDirForWorkspace(candidate));
+    const stateDirIsKnownWorkspaceDefault = knownWorkspaceDefaultStateDirs.some((candidate) =>
+      matchesPath(stateDir, candidate),
+    );
+    const stateLayout: ChatTurnWriterStateLayout =
+      stateDirSource === 'workspace' ||
+      (stateDirSource === 'setup-default' && stateDirIsKnownWorkspaceDefault) ||
+      (stateDirSource === 'runtime' && stateDirIsKnownWorkspaceDefault)
+        ? 'direct'
+        : 'nested';
+    const legacyStateDirs = [trimmedWorkspaceDir, setupWorkspaceDir]
+      .filter((candidate): candidate is string => !!candidate)
+      .filter((candidate) => matchesPath(stateDir, defaultStateDirForWorkspace(candidate)))
+      .map((candidate) => legacyStateDirForWorkspace(candidate))
+      .filter((candidate, index, all) =>
+        all.findIndex((other) => matchesPath(other, candidate)) === index,
+      );
 
     const inferCurrentStateDirSource = (currentStateDir: string): ChatTurnWriterStateDirSource => {
       const current = canonicalPathForCompare(currentStateDir);
@@ -617,13 +667,14 @@ export class DkgNodePlugin {
         !!candidate && current === canonicalPathForCompare(candidate);
       if (matches(runtimeStateDir)) return 'runtime';
       if (matches(envStateDir)) return 'env';
-      if (matches(configuredStateDir)) return configuredIsSetupDefault ? 'setup-default' : 'config';
+      if (matches(setupDefaultStateDir)) return 'setup-default';
+      if (matches(configuredStateDir)) return configuredHasSetupDefaultSource ? 'setup-default' : 'config';
       if (matches(workspaceStateDir)) return 'workspace';
       if (current === canonicalPathForCompare(homeDir)) return 'home';
       return 'config';
     };
     const canMigrateWithinSource = (source: ChatTurnWriterStateDirSource): boolean =>
-      source === 'runtime' || source === 'env' || source === 'workspace';
+      source === 'runtime' || source === 'env' || source === 'workspace' || source === 'setup-default';
     const stateDirSourceLabel = (source: ChatTurnWriterStateDirSource, currentStateDir: string): string => {
       if (source === 'home') return `fallback '${homeDir}'`;
       if (source === 'setup-default') return `setup-owned '${currentStateDir}'`;
@@ -641,7 +692,11 @@ export class DkgNodePlugin {
       if (!currentStateDir) return;
       const currentCanonicalStateDir = canonicalPathForCompare(currentStateDir);
       const nextCanonicalStateDir = canonicalPathForCompare(stateDir);
-      if (currentCanonicalStateDir === nextCanonicalStateDir) return;
+      const currentStateLayout = this.chatTurnWriterStateLayout ?? 'nested';
+      const sameStateFile =
+        currentCanonicalStateDir === nextCanonicalStateDir &&
+        currentStateLayout === stateLayout;
+      if (sameStateFile) return;
       // T24 — Suppress re-trigger when an async migration to this
       // exact stateDir is already in flight. Without this, two
       // concurrent register() calls before the migration settles
@@ -653,15 +708,20 @@ export class DkgNodePlugin {
       ) return;
       const currentStateDirSource =
         this.chatTurnWriterStateDirSource ?? inferCurrentStateDirSource(currentStateDir);
+      const isSameDirLayoutMigration =
+        currentCanonicalStateDir === nextCanonicalStateDir &&
+        currentStateLayout !== stateLayout &&
+        stateDirSource !== 'home';
       const isUpgrade =
-        (
+        isSameDirLayoutMigration ||
+        ((
           STATE_DIR_SOURCE_PRIORITY[stateDirSource] < STATE_DIR_SOURCE_PRIORITY[currentStateDirSource] ||
           (
             stateDirSource === currentStateDirSource &&
             canMigrateWithinSource(stateDirSource)
           )
         ) &&
-        stateDirSource !== 'home';
+        stateDirSource !== 'home');
       if (!isUpgrade) return; // Don't downgrade or sidestep.
       const sourceLabel = stateDirSourceLabel(currentStateDirSource, currentStateDir);
       api.logger.info?.(
@@ -684,10 +744,11 @@ export class DkgNodePlugin {
       // would suppress all future retries because the field would
       // already match the desired target.
       this.chatTurnWriterMigrationTarget = stateDir;
-      this.chatTurnWriter.setStateDir(stateDir).then(
+      this.chatTurnWriter.setStateDir(stateDir, { stateLayout, legacyStateDirs }).then(
         () => {
           this.chatTurnWriterStateDir = stateDir;
           this.chatTurnWriterStateDirSource = stateDirSource;
+          this.chatTurnWriterStateLayout = stateLayout;
           this.chatTurnWriterMigrationTarget = null;
         },
         (err: any) => {
@@ -707,9 +768,16 @@ export class DkgNodePlugin {
         'Set config.stateDir or OPENCLAW_STATE_DIR explicitly to silence this.',
       );
     }
-    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+    this.chatTurnWriter = new ChatTurnWriter({
+      client: this.client,
+      logger: api.logger,
+      stateDir,
+      stateLayout,
+      legacyStateDirs,
+    });
     this.chatTurnWriterStateDir = stateDir;
     this.chatTurnWriterStateDirSource = stateDirSource;
+    this.chatTurnWriterStateLayout = stateLayout;
     this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
 

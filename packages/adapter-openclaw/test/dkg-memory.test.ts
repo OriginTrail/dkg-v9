@@ -122,6 +122,20 @@ describe('DkgMemoryPlugin.register', () => {
     expect(((result.manager as DkgMemorySearchManager) as any).deps.client.baseUrl).toBe('http://localhost:9300');
   });
 
+  it('does not rebuild the memory runtime when the slot moved before client refresh', () => {
+    const api = makeApi();
+    plugin.register(api);
+    const nextClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9300' });
+    (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+
+    plugin.setClient(nextClient);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('registers an inactive capability when disabled after owning the slot', async () => {
     const api = makeApi();
     plugin.register(api);
@@ -137,6 +151,19 @@ describe('DkgMemoryPlugin.register', () => {
 
     plugin.reAssertCapability();
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not stamp the inactive capability when another plugin owns the memory slot', () => {
+    const api = makeApi();
+    plugin.register(api);
+    (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+
+    expect(plugin.disable(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('registers a prompt builder that teaches WM identity selection', () => {

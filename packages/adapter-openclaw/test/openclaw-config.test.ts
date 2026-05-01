@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
   resolveOpenClawMergedConfig,
@@ -19,6 +20,19 @@ describe('openclaw-config helpers', () => {
     expect(looksLikeAdapterPluginConfig({
       workspace: '/workspace',
       stateDir: '/workspace/.dkg-adapter',
+    })).toBe(false);
+    expect(looksLikeAdapterPluginConfig({
+      session: { dmScope: 'main' },
+      stateDir: '/workspace/.dkg-adapter',
+    })).toBe(false);
+    expect(isStateMetadataOnlyAdapterConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    })).toBe(true);
+    expect(isStateMetadataOnlyAdapterConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      memory: { enabled: true },
     })).toBe(false);
   });
 
@@ -66,6 +80,29 @@ describe('openclaw-config helpers', () => {
     } as any;
 
     expect(resolveOpenClawMergedConfig(api)).toBe(fullConfig);
+  });
+
+  it('keeps live api.cfg ahead of stale api.config when both are exposed', () => {
+    const liveConfig = {
+      plugins: {
+        slots: {
+          memory: 'adapter-openclaw',
+        },
+      },
+    };
+    const staleConfig = {
+      plugins: {
+        slots: {
+          memory: 'other-plugin',
+        },
+      },
+    };
+    const api = {
+      cfg: liveConfig,
+      config: staleConfig,
+    } as any;
+
+    expect(resolveOpenClawMergedConfig(api)).toBe(liveConfig);
   });
 
   it('skips empty api.config and falls back to api.cfg route config', () => {

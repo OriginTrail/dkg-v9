@@ -599,16 +599,26 @@ export class DkgMemoryPlugin {
     private readonly resolver: DkgMemorySessionResolver,
   ) {}
 
-  setClient(client: DkgDaemonClient): void {
+  setClient(
+    client: DkgDaemonClient,
+    options: { reRegister?: boolean; api?: OpenClawPluginApi } = {},
+  ): void {
     this.client = client;
+    if (options.reRegister === false) return;
+    const targetApi = options.api ?? this.registeredApi;
     if (
-      this.registeredApi &&
+      targetApi &&
       this.registeredCapability &&
-      typeof this.registeredApi.registerMemoryCapability === 'function'
+      typeof targetApi.registerMemoryCapability === 'function'
     ) {
-      const capability = this.buildCapability(this.registeredApi);
-      this.registeredApi.registerMemoryCapability(capability);
+      if (!isMemorySlotOwnedByThisAdapter(targetApi)) {
+        this.invalidateRegistration();
+        return;
+      }
+      const capability = this.buildCapability(targetApi);
+      targetApi.registerMemoryCapability(capability);
       this.registeredCapability = capability;
+      this.registeredApi = targetApi;
     }
   }
 
@@ -622,7 +632,8 @@ export class DkgMemoryPlugin {
       if (
         hadRegisteredCapability &&
         targetApi &&
-        typeof targetApi.registerMemoryCapability === 'function'
+        typeof targetApi.registerMemoryCapability === 'function' &&
+        isMemorySlotOwnedByThisAdapter(targetApi)
       ) {
         targetApi.registerMemoryCapability(buildDisabledMemoryCapability());
         return true;

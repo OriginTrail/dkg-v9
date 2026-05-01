@@ -14,12 +14,31 @@ const ADAPTER_PLUGIN_CONFIG_KEYS = [
   'channel',
 ] as const;
 
+const STATE_METADATA_CONFIG_KEYS = [
+  'stateDir',
+  'stateDirSource',
+  'installedWorkspace',
+] as const;
+
 export function looksLikeAdapterPluginConfig(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
-  if (isObjectRecord(value.plugins) || isObjectRecord(value.agents) || typeof value.workspace === 'string') {
+  if (
+    isObjectRecord(value.plugins) ||
+    isObjectRecord(value.agents) ||
+    isObjectRecord(value.session) ||
+    typeof value.workspace === 'string'
+  ) {
     return false;
   }
   return ADAPTER_PLUGIN_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+export function isStateMetadataOnlyAdapterConfig(value: unknown): boolean {
+  if (!isObjectRecord(value) || !looksLikeAdapterPluginConfig(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((key) =>
+    (STATE_METADATA_CONFIG_KEYS as readonly string[]).includes(key)
+  );
 }
 
 export function mergeAdapterPluginConfigs<T extends Record<string, unknown>>(
@@ -64,8 +83,8 @@ export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<stri
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
   return [
-    anyApi?.config,
     anyApi?.cfg,
+    anyApi?.config,
     runtime?.cfg,
     runtime?.config,
   ].find((candidate) =>

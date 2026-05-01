@@ -276,6 +276,50 @@ describe('DkgNodePlugin', () => {
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
+  it('does not clear another plugin memory slot when refreshed config disables memory', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
+
+    (mockApi.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+    (plugin as any).initialized = true;
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9300',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
+    oldMemoryPlugin.reAssertCapability();
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('registers session_end hook and all exported tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];

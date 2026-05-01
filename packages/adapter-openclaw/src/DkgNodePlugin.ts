@@ -429,7 +429,7 @@ export class DkgNodePlugin {
     this.client = new DkgDaemonClient({ baseUrl: next.daemonUrl, dkgHome: next.dkgHome });
     this.chatTurnWriter?.setClient(this.client);
     this.channelPlugin?.setClient(this.client);
-    this.memoryPlugin?.setClient(this.client);
+    this.memoryPlugin?.setClient(this.client, { reRegister: false });
   }
 
   private resetDaemonScopedCachesForClientChange(): void {

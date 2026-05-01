@@ -38,6 +38,7 @@ export {
 } from './DkgMemoryPlugin.js';
 export {
   isObjectRecord,
+  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
   resolveOpenClawMergedConfig,

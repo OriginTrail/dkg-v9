@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DkgNodePlugin,
   isObjectRecord,
+  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
 } from './dist/index.js';
@@ -82,13 +83,21 @@ function resolveEntryConfig(api) {
   const entryConfigs = fullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObjectRecord);
-  const directConfigs = [
-    runtime?.pluginConfig,
-    looksLikeAdapterPluginConfig(anyApi?.config) ? anyApi.config : undefined,
+  const currentDirectConfigs = [
+    directApiConfigFrom(anyApi?.config),
     anyApi?.pluginConfig,
   ].filter(isObjectRecord);
+  const fallbackDirectConfigs = [
+    runtime?.pluginConfig,
+  ].filter(isObjectRecord);
+  const directConfigs = currentDirectConfigs.length > 0
+    ? currentDirectConfigs
+    : fallbackDirectConfigs;
   const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
-  const configIsPartial = entryConfigs.length === 0;
+  const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
+  const configIsPartial =
+    !hasConfigSource ||
+    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
 
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -104,6 +113,22 @@ function resolveEntryConfig(api) {
     workspaceDir ??
     config.installedWorkspace;
   return { config, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
+}
+
+function directApiConfigFrom(config) {
+  if (!isObjectRecord(config)) return undefined;
+  if (
+    isObjectRecord(config.plugins) ||
+    isObjectRecord(config.agents) ||
+    isObjectRecord(config.session) ||
+    typeof config.workspace === 'string'
+  ) {
+    return undefined;
+  }
+  if (looksLikeAdapterPluginConfig(config) || Object.keys(config).length === 0) {
+    return config;
+  }
+  return undefined;
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

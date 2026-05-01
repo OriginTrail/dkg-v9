@@ -51,13 +51,19 @@ describe('openclaw-entry', () => {
         "  'memory',",
         "  'channel',",
         '];',
+        "const STATE_METADATA_CONFIG_KEYS = ['stateDir', 'stateDirSource', 'installedWorkspace'];",
         'export function isObjectRecord(value) {',
         "  return !!value && typeof value === 'object' && !Array.isArray(value);",
         '}',
         'export function looksLikeAdapterPluginConfig(value) {',
         '  if (!isObjectRecord(value)) return false;',
-        "  if (isObjectRecord(value.plugins) || isObjectRecord(value.agents) || typeof value.workspace === 'string') return false;",
+        "  if (isObjectRecord(value.plugins) || isObjectRecord(value.agents) || isObjectRecord(value.session) || typeof value.workspace === 'string') return false;",
         '  return ADAPTER_PLUGIN_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(value, key));',
+        '}',
+        'export function isStateMetadataOnlyAdapterConfig(value) {',
+        '  if (!looksLikeAdapterPluginConfig(value)) return false;',
+        '  const keys = Object.keys(value);',
+        '  return keys.length > 0 && keys.every((key) => STATE_METADATA_CONFIG_KEYS.includes(key));',
         '}',
         'export function mergeAdapterPluginConfigs(...configs) {',
         '  const merged = {};',
@@ -411,7 +417,7 @@ describe('openclaw-entry', () => {
     });
   });
 
-  it('refreshes singleton config before multi-phase re-registration', async () => {
+  it('treats operational direct plugin config as an authoritative singleton refresh', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -430,11 +436,42 @@ describe('openclaw-entry', () => {
       stateDir: '/second/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/second',
+    });
+    expect(instance.config.memory).toBeUndefined();
+    expect(instance.config.channel).toBeUndefined();
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.registerCalls).toEqual([firstApi, secondApi]);
+  });
+
+  it('treats empty direct pluginConfig as authoritative so omitted keys can clear stale config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({});
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toEqual({});
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+  });
+
+  it('treats a re-registration with no config source as partial', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi(undefined as any);
+    delete (secondApi as any).pluginConfig;
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9200',
       memory: { enabled: true },
       channel: { enabled: false },
     });
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
-    expect(instance.registerCalls).toEqual([firstApi, secondApi]);
   });
 
   it('merges direct-only partial re-registration without dropping existing modules', async () => {
@@ -455,6 +492,38 @@ describe('openclaw-entry', () => {
       stateDir: '/partial/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/partial',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+  });
+
+  it('does not backfill stale runtime plugin config when current direct config is state-only partial', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      stateDir: '/partial-current/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial-current',
+    }, {
+      runtime: {
+        pluginConfig: {
+          daemonUrl: 'http://127.0.0.1:9550',
+          memory: { enabled: false },
+          channel: { enabled: true, port: 9551 },
+        },
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: '/partial-current/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial-current',
       memory: { enabled: true },
       channel: { enabled: false },
     });

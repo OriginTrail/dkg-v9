@@ -30,7 +30,7 @@ is published, score non-zero from the first proof period after that.
 
 ## Daemon auto-update is built-in (operators don't have to upgrade manually)
 
-`packages/cli/src/daemon/auto-update.ts` + `daemon/lifecycle.ts:735-781` +
+`packages/cli/src/daemon/auto-update.ts` + `daemon/lifecycle.ts:802-869` +
 `cli.ts:163,210` implement a polling auto-update with supervised restart.
 The testnet config (`network/testnet.json`) sets:
 
@@ -43,52 +43,63 @@ The testnet config (`network/testnet.json`) sets:
 }
 ```
 
-Implications for the cutover:
+### What each install mode polls (this matters for the cutover)
 
-- **Trigger = merge to `main`**, not a release tag. The daemon polls the
-  branch tip, not the latest GitHub Release. Once PR #357 merges, every
-  testnet node picks the new commit up within ≤ 5 min.
-- **Source per install mode**:
-  - Standalone install (`npm install -g @origintrail-official/dkg`):
-    daemon polls npm for newer versions and runs `npm install -g` on hit.
-    On testnet most operators run the standalone install, so the
-    `branch: main` polling path doesn't apply unless they switched to
-    a monorepo checkout — they get updates as soon as the new npm
-    version is published (Phase A step 2).
-  - Monorepo install (operator runs from a git checkout): daemon polls
-    `OriginTrail/dkg@main`, does a blue/green slot swap to the new
-    commit. No npm publish required for these operators — they update
-    the moment the merge commit lands.
-- After update: daemon exits with `DAEMON_EXIT_CODE_RESTART`. The CLI
-  parent (`runForegroundSupervisor` / background variant) catches that
-  exit code and respawns the daemon against the new code.
+`isStandaloneInstall()` (config.ts) decides at boot which polling
+backend the daemon uses, and the two backends look at completely
+different remote sources:
+
+| Install mode | Detect | Polls | Triggered by |
+|---|---|---|---|
+| **Standalone** (`npm install -g @origintrail-official/dkg`) | no monorepo ancestor on disk | `https://registry.npmjs.org/@origintrail-official/dkg` (`dist-tags.latest` + pre-release tags) | a new **npm publish** of `@origintrail-official/dkg` |
+| **Monorepo** (operator runs from a git checkout) | monorepo ancestor present | `OriginTrail/dkg@main` via the GitHub commits API | a new **commit on `main`** of `OriginTrail/dkg` |
+
+`network/testnet.json#autoUpdate.repo+branch` is **only** consulted by
+the monorepo backend. Standalone daemons ignore it — they go straight
+to npm. On testnet most operators run standalone, so **merge-to-main
+alone does not roll the cutover out to them**: the npm publish is what
+moves the standalone fleet.
+
+After update on either backend, the daemon exits with
+`DAEMON_EXIT_CODE_RESTART`; the CLI parent
+(`runForegroundSupervisor` / background variant) catches that exit
+code and respawns the daemon against the new code (or the new npm
+version's code).
 
 **Operators do nothing for the code update** — they only do the one-time
-state wipe in Phase C.
+state wipe in Phase C, which is itself automatic.
 
 ## Phase A — Maintainer release (one-shot)
 
 1. Make sure `network/<env>.json#chainResetMarker` is bumped to a fresh
    value in the PR that you're about to merge (suggested format:
    `<purpose>-<yyyy-mm-dd>`, e.g. `v10-rs-staking-consolidation-2026-04-30`).
-   This is what triggers Phase C's auto-wipe on every operator's daemon.
-2. **Merge the PR to `main`**. That's the trigger for monorepo-install
-   operators — their daemons will swap slots within ≤ 5 min and pick up
-   both the new code and the new marker.
-3. (Optional but recommended) Tag the merge commit and publish to npm
-   so standalone-install operators (the majority on testnet) also get
-   the new code:
+   This is what triggers Phase C's auto-wipe on every operator's daemon
+   AFTER they pick up the new code.
+2. **Merge the PR to `main`**. This is the trigger for monorepo-install
+   operators only — their daemons swap slots within ≤ 5 min and pick
+   up both the new code and the new marker. **Standalone operators
+   are NOT updated by this step** (see install-mode table above).
+3. **Tag the merge commit and publish to npm.** This is what rolls the
+   cutover out to the standalone-install majority on testnet. **Not
+   optional** for a testnet reset — without it the chainResetMarker
+   never reaches standalone fleets and Phase C doesn't fire.
    ```bash
    git tag v10.x.y
    git push origin v10.x.y
    ```
    The `release.yml` workflow builds binaries + creates the GitHub
-   Release; npm publish is a manual step per `docs/RELEASE.md`. Once
-   the new npm version is up, standalone daemons pick it up on their
-   next 5-min poll.
-4. From this point on, no operator code-update action needed for any
-   install mode — they're all on the new build (and the new marker)
-   within minutes.
+   Release; the npm publish is a manual step per `docs/RELEASE.md`.
+   Once the new npm version is up, standalone daemons pick it up on
+   their next 5-min poll, run `npm install <pkg>@<version>` into the
+   inactive slot, and swap.
+4. (Optional helper) Operators who want to skip the wait and pull the
+   update right now can run `dkg update` — same code path as the
+   poll, just on demand. Works for both install modes.
+5. From this point on (≤ 5 min after the npm version is up), all
+   testnet nodes — standalone and monorepo alike — are running the
+   new build with the bumped marker, and Phase C's auto-wipe has
+   already fired during their respawn.
 
 ## Phase B — Contracts deploy (deployer)
 

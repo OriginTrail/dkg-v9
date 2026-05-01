@@ -107,13 +107,29 @@ describe("ChatTurnWriter", () => {
       });
       migrated.flushSync();
 
-      const persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      let persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
       expect(persisted["openclaw:tg:::legacy-only"]).toEqual({ w: 2, b: 1 });
       expect(persisted["openclaw:tg:::nested-only"]).toBeUndefined();
       expect(persisted["openclaw:tg:::new-only"]).toEqual({ w: 11, b: 4 });
       expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 7, b: 9 });
       expect(fs.existsSync(legacyFile)).toBe(true);
       expect(fs.existsSync(newNestedFile)).toBe(true);
+
+      fs.writeFileSync(newFile, JSON.stringify({
+        "openclaw:tg:::shared": { w: 1, b: 1 },
+      }));
+      const restarted = new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      });
+      restarted.flushSync();
+
+      persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted["openclaw:tg:::legacy-only"]).toBeUndefined();
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 1, b: 1 });
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }

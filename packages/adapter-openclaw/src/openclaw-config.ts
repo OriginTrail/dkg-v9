@@ -74,7 +74,6 @@ function hasOpenClawConfigSignal(value: Record<string, unknown>): boolean {
   return (
     isObjectRecord(value.plugins) ||
     isObjectRecord(value.agents) ||
-    isObjectRecord(value.session) ||
     typeof value.workspace === 'string'
   );
 }

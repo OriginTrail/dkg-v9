@@ -120,6 +120,28 @@ describe('openclaw-config helpers', () => {
     expect(resolveOpenClawMergedConfig(api)).toBe(routeConfig);
   });
 
+  it('skips session-only route metadata and falls back to runtime config', () => {
+    const runtimeConfig = {
+      plugins: {
+        slots: {
+          memory: 'other-plugin',
+        },
+      },
+    };
+    const api = {
+      config: {
+        session: {
+          dmScope: 'main',
+        },
+      },
+      runtime: {
+        config: runtimeConfig,
+      },
+    } as any;
+
+    expect(resolveOpenClawMergedConfig(api)).toBe(runtimeConfig);
+  });
+
   it('deep-merges memory and channel partials without dropping prior subconfig', () => {
     expect(mergeAdapterPluginConfigs(
       {

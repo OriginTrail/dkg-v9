@@ -459,9 +459,7 @@ export class DkgNodePlugin {
     // Subsequent multi-phase calls should upgrade missing integrations without
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
-      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
       if (runtimeEnabled) {
-        this.registerLocalAgentIntegration(api, registrationMode);
         // Retry typed-hook installs if the first register() call used a
         // setup-runtime api where api.on was undefined. HookSurface records
         // those as installedVia='none' with installError set; we detect
@@ -474,6 +472,10 @@ export class DkgNodePlugin {
         // hooks. Without this, `installHooksIfNeeded` early-returns on
         // null `chatTurnWriter` and W3/W4a/W4b silently never install.
         this.ensureChatTurnWriter(api);
+      }
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      if (runtimeEnabled) {
+        this.registerLocalAgentIntegration(api, registrationMode);
       }
       // T52 — Always run installHooksIfNeeded so the legacy
       // `session_end` cleanup is wired even in setup-only re-entry.
@@ -708,6 +710,7 @@ export class DkgNodePlugin {
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     this.chatTurnWriterStateDir = stateDir;
     this.chatTurnWriterStateDirSource = stateDirSource;
+    this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
 
 
@@ -1187,6 +1190,7 @@ export class DkgNodePlugin {
       if (!this.channelPlugin) {
         this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
       }
+      this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
       this.channelPlugin.register(api);
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
@@ -1588,6 +1592,7 @@ export class DkgNodePlugin {
       this.peerIdDeferredRetryTimer = null;
     }
     await this.channelPlugin?.stop();
+    try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
   }
 
   getClient(): DkgDaemonClient {

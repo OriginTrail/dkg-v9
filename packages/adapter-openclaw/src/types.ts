@@ -126,6 +126,10 @@ export interface ChannelInboundMessage {
   text: string;
   /** Correlation ID for request-reply tracking. */
   correlationId?: string;
+  /** Optional transcript session key when the caller already knows the resolved route. */
+  sessionKey?: string;
+  /** OpenClaw context-style alias for `sessionKey`. */
+  SessionKey?: string;
 }
 
 /** Outbound reply from OpenClaw to an external channel. */
@@ -136,6 +140,10 @@ export interface ChannelOutboundReply {
   text: string;
   /** Session-internal turn ID. */
   turnId?: string;
+  /** OpenClaw transcript session key resolved for this channel dispatch. */
+  sessionKey?: string;
+  /** OpenClaw context-style alias for `sessionKey` returned by legacy routes. */
+  SessionKey?: string;
   /** Tool calls made during this turn. */
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }

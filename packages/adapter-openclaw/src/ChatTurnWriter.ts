@@ -2,6 +2,18 @@ import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
 
+/**
+ * Durable direct-channel marker lifecycle:
+ * `markExternalTurnPersistedDurable` creates content-bound markers only after
+ * channel-side daemon `storeChatTurn` succeeds; marker keys include `turnId`
+ * plus canonical user/assistant text to avoid false dedupe for reused IDs or
+ * content. W4a consumes them in `consumeExternalTurnMarkersForPair` during
+ * `runAgentEndPersist`, advancing pair watermarks only after durable commit.
+ * Create/consume failures roll back marker snapshots when
+ * `commitWatermarkStateSync` fails; `setStateDir` migrates per-session `m`
+ * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
+ */
+
 interface Logger {
   info?: (...args: unknown[]) => void;
   warn?: (...args: unknown[]) => void;
@@ -12,6 +24,9 @@ interface Logger {
 export interface ChatTurnMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | Array<{ type: string; text?: string }>;
+  context?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  [k: string]: unknown;
   /**
    * Optional list of tool invocations the model issued in this assistant
    * step. Present on intermediate assistant messages that exist solely to
@@ -27,6 +42,26 @@ export interface ChatTurnMessage {
 export interface AgentEndContext {
   sessionId: string;
   messages: ChatTurnMessage[];
+}
+
+interface ComputedChatTurnPair {
+  user: string;
+  assistant: string;
+  pairIndex: number;
+  externalTurnIds: string[];
+  externalDirect: boolean;
+}
+
+interface ExternalMarkerAction {
+  skip: boolean;
+  markers: string[];
+  rollbackMarkers: string[];
+}
+
+interface WatermarkStateSnapshot {
+  cachedHad: boolean;
+  cachedIndex?: number;
+  pendingIndex?: number;
 }
 
 /**
@@ -114,6 +149,12 @@ export class ChatTurnWriter {
   // worst case is W4a skipping pairs that W4b actually wrote — same
   // failure mode as the lastIdx peek hit, no new data loss.
   private w4bSessionCounts: Map<string, number> = new Map();
+  // Direct-channel persists (Node-UI through DkgChannelPlugin) bypass
+  // ChatTurnWriter's daemon write path but append to the same OpenClaw
+  // transcript. These durable correlation markers let later W4a backfill
+  // skip exactly those already-persisted UI pairs across restarts without
+  // confusing two legitimate same-content turns.
+  private externalTurnMarkers: Map<string, Map<string, number>> = new Map();
   // In-flight persist tracking — `resetSessionState()` awaits these so a
   // pre-reset persist can't advance the just-reset watermark afterward.
   // Both W4a (`onAgentEnd`) and W4b (`onMessageSent`) MUST register their
@@ -228,10 +269,15 @@ export class ChatTurnWriter {
     // persist's increment that landed in live during the write
     // window is preserved. On write failure live is unchanged —
     // concurrent persists keep their advances; nothing got wiped.
+    const destinationFileExisted = fs.existsSync(newWatermarkFilePath);
+    const destinationWm = new Map<string, number>();
+    const destinationBc = new Map<string, number>();
+    const destinationMarkers = new Map<string, Map<string, number>>();
     const mergedWm = new Map(this.cachedWatermarks);
     const mergedBc = new Map(this.w4bSessionCounts);
+    const mergedMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
     try {
-      if (fs.existsSync(newWatermarkFilePath)) {
+      if (destinationFileExisted) {
         const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === "object") {
@@ -240,10 +286,24 @@ export class ChatTurnWriter {
             if (typeof val === "number") {
               w = val;
             } else if (val && typeof val === "object") {
-              const obj = val as { w?: unknown; b?: unknown };
+              const obj = val as { w?: unknown; b?: unknown; m?: unknown };
               if (typeof obj.w === "number") w = obj.w;
               if (typeof obj.b === "number") b = obj.b;
+              if (obj.m && typeof obj.m === "object" && !Array.isArray(obj.m)) {
+                this.mergeExternalTurnMarkers(
+                  destinationMarkers,
+                  key,
+                  obj.m as Record<string, unknown>,
+                );
+                this.mergeExternalTurnMarkers(
+                  mergedMarkers,
+                  key,
+                  obj.m as Record<string, unknown>,
+                );
+              }
             }
+            destinationWm.set(key, w);
+            destinationBc.set(key, b);
             mergedWm.set(key, Math.max(mergedWm.get(key) ?? -1, w));
             mergedBc.set(key, Math.max(mergedBc.get(key) ?? 0, b));
           }
@@ -265,7 +325,11 @@ export class ChatTurnWriter {
       if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
       // T45 — Pass the merged temp maps explicitly so live state
       // stays untouched if the write fails.
-      wrote = this.writeWatermarkFile(newWatermarkFilePath, { wm: mergedWm, bc: mergedBc });
+      wrote = this.writeWatermarkFile(newWatermarkFilePath, {
+        wm: mergedWm,
+        bc: mergedBc,
+        markers: mergedMarkers,
+      });
     } catch (err) {
       // T23 — Surface BOTH mkdirSync failures (ENOTDIR / ENOENT on
       // an unwritable parent) AND writeWatermarkFile failures
@@ -280,18 +344,52 @@ export class ChatTurnWriter {
       // T45 — Commit by union-merging back into live. If a concurrent
       // persist advanced live's watermark during the write window,
       // its increment is preserved (max takes the higher of merged-
-      // from-destination and post-flush-live). If no concurrent
-      // persist arrived, live ends up exactly equal to mergedWm/Bc.
+      // from-destination and post-flush-live). External markers are
+      // exact daemon-success facts, so identical marker keys merge
+      // idempotently instead of adding counts.
       for (const [key, val] of mergedWm) {
         this.cachedWatermarks.set(key, Math.max(this.cachedWatermarks.get(key) ?? -1, val));
       }
       for (const [key, val] of mergedBc) {
         this.w4bSessionCounts.set(key, Math.max(this.w4bSessionCounts.get(key) ?? 0, val));
       }
+      for (const [key, markers] of mergedMarkers) {
+        const live = this.externalTurnMarkers.get(key) ?? new Map<string, number>();
+        for (const [marker, count] of markers) {
+          if (count > 0) live.set(marker, Math.max(live.get(marker) ?? 0, count));
+        }
+        if (live.size > 0) this.externalTurnMarkers.set(key, live);
+      }
+      const finalDiskWm = this.snapshotWatermarksForWrite();
+      wrote = this.writeWatermarkFile(newWatermarkFilePath, {
+        wm: finalDiskWm,
+        bc: this.w4bSessionCounts,
+        markers: this.externalTurnMarkers,
+      });
+      if (!wrote) {
+        this.logger.warn?.(
+          "[ChatTurnWriter.setStateDir] Final post-commit rewrite at new path failed; preserving old path for retry.",
+          { newWatermarkFilePath },
+        );
+        if (!this.writeWatermarkFile()) {
+          this.logger.warn?.(
+            "[ChatTurnWriter.setStateDir] Failed to preserve post-commit state at old path after migration rewrite failure.",
+            { oldWatermarkFilePath: this.watermarkFilePath, newWatermarkFilePath },
+          );
+        }
+        this.restoreFailedMigrationDestination(
+          newWatermarkFilePath,
+          destinationFileExisted,
+          destinationWm,
+          destinationBc,
+          destinationMarkers,
+        );
+      }
     }
-    // T45 — On failure, live state is already untouched. No restore
-    // needed; concurrent persists' advances during the failed merge
-    // are preserved automatically.
+    // T45 - If the initial new-path write failed, live state is still
+    // untouched. If only the final post-union rewrite failed, live may
+    // hold merged state but the old path is preserved so a retry or
+    // normal flush can serialize it without switching to a stale file.
     if (wrote) {
       // Only NOW commit the swap. Subsequent normal writes via
       // `writeWatermarkFile()` (no explicit target) will hit the new
@@ -309,27 +407,6 @@ export class ChatTurnWriter {
       // depends on them.
       this.stateDir = newStateDir;
       this.watermarkFilePath = newWatermarkFilePath;
-      // T54 — Final rewrite at the new path with the post-union live
-      // state. The earlier `writeWatermarkFile(newWatermarkFilePath,
-      // { wm: mergedWm, bc: mergedBc })` wrote a SNAPSHOT taken
-      // before the union; any late persist that fired between
-      // `flush()` returning and the union step landed in live but
-      // not in the file. Without this rewrite, a process crash
-      // before the next debounce flush would leave the new file
-      // stale, and the restarted writer would load the snapshot
-      // and replay turns the daemon already has (daemon does not
-      // dedup — ADR-002). Best-effort; if this write fails, live
-      // still has the unioned state in memory and the next debounce
-      // flush at this path catches up. Race window narrows from
-      // "merge+write+union" (multi-step) to "between this final
-      // rewrite and the next persist's debounce" (~50ms cap, same
-      // shape as the writer's normal durability gap).
-      try { this.writeWatermarkFile(); } catch (err) {
-        this.logger.warn?.(
-          "[ChatTurnWriter.setStateDir] Final post-commit rewrite at new path failed; next debounce flush will retry.",
-          { err, newWatermarkFilePath },
-        );
-      }
     } else {
       // T23/T27 — Internal state stays at the OLD path so a future
       // setStateDir(newStateDir) retry re-attempts the write. The
@@ -364,12 +441,23 @@ export class ChatTurnWriter {
             if (typeof val === "number") {
               this.cachedWatermarks.set(key, val);
             } else if (val && typeof val === "object") {
-              const obj = val as { w?: unknown; b?: unknown };
+              const obj = val as { w?: unknown; b?: unknown; m?: unknown };
               if (typeof obj.w === "number") {
                 this.cachedWatermarks.set(key, obj.w);
               }
               if (typeof obj.b === "number") {
                 this.w4bSessionCounts.set(key, obj.b);
+              }
+              if (obj.m && typeof obj.m === "object" && !Array.isArray(obj.m)) {
+                const markers = new Map<string, number>();
+                for (const [hash, count] of Object.entries(obj.m as Record<string, unknown>)) {
+                  if (typeof count === "number" && count > 0) {
+                    markers.set(hash, count);
+                  }
+                }
+                if (markers.size > 0) {
+                  this.externalTurnMarkers.set(key, markers);
+                }
               }
             }
           }
@@ -387,6 +475,7 @@ export class ChatTurnWriter {
     if (ctx?.channelId === "dkg-ui") return;
     const sessionId = this.deriveSessionId(ctx);
     if (!sessionId) return;
+    const externalCursorKey = this.externalCursorKeyFromHookPayload(undefined, ctx);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -399,11 +488,15 @@ export class ChatTurnWriter {
     // ensures the NEXT fire's work runs only after this fire's work
     // settles. `flush()` still drains the persist via `inFlightPersists`
     // tracked inside `runAgentEndPersist` → `trackPersistJob`.
+    const resetAtSchedule = this.pendingResets.get(sessionId);
     const previous = this.w4aSessionChains.get(sessionId) ?? Promise.resolve();
     const work = previous
       // Never block the next fire on the previous fire's failure.
       .catch(() => undefined)
-      .then(() => this.runAgentEndPersist(event, sessionId));
+      .then(async () => {
+        if (resetAtSchedule) await resetAtSchedule;
+        await this.runAgentEndPersist(event, sessionId, externalCursorKey);
+      });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
       // Cleanup so idle sessions don't accumulate empty chains. Only
@@ -417,13 +510,8 @@ export class ChatTurnWriter {
     // ordering; flush() drains via inFlightPersists.
   }
 
-  private async runAgentEndPersist(event: AgentEndContext, sessionId: string): Promise<void> {
+  private async runAgentEndPersist(event: AgentEndContext, sessionId: string, externalCursorKey?: string): Promise<void> {
     try {
-      // If a compaction/reset is mid-flight for this session, wait for it
-      // before reading the watermark. Otherwise we'd compute the delta
-      // against stale state.
-      const pendingReset = this.pendingResets.get(sessionId);
-      if (pendingReset) await pendingReset;
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
       // session count (minus 1, because count is 1-based). When typed
       // hooks were unavailable for a stretch (e.g., the `setup-runtime`
@@ -444,8 +532,28 @@ export class ChatTurnWriter {
       const lastIdx = pairs.length - 1;
       const job = this.trackPersistJob(sessionId, async () => {
         for (let i = 0; i < pairs.length; i++) {
-          const { user, assistant, pairIndex } = pairs[i];
+          const { user, assistant, pairIndex, externalTurnIds } = pairs[i];
           if (!user && !assistant) continue;
+          const externalMarkerAction = externalCursorKey
+            ? this.consumeExternalTurnMarkersForPair(
+              externalCursorKey,
+              externalTurnIds,
+              user,
+              assistant,
+            )
+            : { skip: false, markers: [], rollbackMarkers: [] };
+          if (externalCursorKey && externalMarkerAction.markers.length > 0) {
+            const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
+            if (externalMarkerAction.skip) this.bumpWatermark(sessionId, pairIndex);
+            if (!this.commitWatermarkStateSync(sessionId)) {
+              for (const marker of externalMarkerAction.rollbackMarkers) {
+                this.restoreExternalTurnMarker(externalCursorKey, marker);
+              }
+              this.restoreWatermarkState(sessionId, watermarkSnapshot);
+              throw new Error("Failed to write external chat-turn marker consumption");
+            }
+            if (externalMarkerAction.skip) continue;
+          }
           // W4a turnId mixes pair position into the hash so backfill of
           // two same-text pairs (e.g. user said "hi" twice) produces
           // distinct turnIds and BOTH persist.
@@ -576,7 +684,7 @@ export class ChatTurnWriter {
       // Reset is SESSION-SCOPED. The hook returns the reset promise so
       // OpenClaw's typed-hook dispatcher awaits it — the next `agent_end`
       // for this session can't race past the in-flight cleanup.
-      await this.runReset(this.deriveSessionId(ctx));
+      await this.runReset(this.resetIdentityFromHookPayload(event, ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
@@ -585,9 +693,65 @@ export class ChatTurnWriter {
   async onBeforeReset(event: any, ctx?: any): Promise<void> {
     try {
       this.flushSync();
-      await this.runReset(this.deriveSessionId(ctx));
+      await this.runReset(this.resetIdentityFromHookPayload(event, ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
+    }
+  }
+
+  async markExternalTurnPersistedDurable(opts: {
+    sessionKey?: string;
+    turnId?: string;
+    user: string;
+    assistant: string;
+  }): Promise<void> {
+    const externalCursorKey = this.externalCursorKeyFromSessionKey(opts.sessionKey);
+    const markers = [
+      this.externalTurnMarkerId(opts.turnId, opts.user, opts.assistant),
+    ].filter(Boolean);
+    if (!externalCursorKey || markers.length === 0) return;
+    const previousMarkerCounts = markers.map((marker) => ({
+      marker,
+      count: this.externalTurnMarkers.get(externalCursorKey)?.get(marker) ?? 0,
+    }));
+    for (const marker of markers) {
+      this.restoreExternalTurnMarker(externalCursorKey, marker);
+    }
+    if (!this.commitWatermarkStateSync(externalCursorKey)) {
+      for (const previous of previousMarkerCounts) {
+        this.restoreExternalTurnMarkerCount(externalCursorKey, previous.marker, previous.count);
+      }
+      throw new Error("Failed to write external chat-turn marker");
+    }
+  }
+
+  private restoreFailedMigrationDestination(
+    newWatermarkFilePath: string,
+    destinationFileExisted: boolean,
+    destinationWm: Map<string, number>,
+    destinationBc: Map<string, number>,
+    destinationMarkers: Map<string, Map<string, number>>,
+  ): void {
+    try {
+      if (destinationFileExisted) {
+        if (!this.writeWatermarkFile(newWatermarkFilePath, {
+          wm: destinationWm,
+          bc: destinationBc,
+          markers: destinationMarkers,
+        })) {
+          this.logger.warn?.(
+            "[ChatTurnWriter.setStateDir] Failed to restore destination file after migration rewrite failure.",
+            { newWatermarkFilePath },
+          );
+        }
+      } else if (fs.existsSync(newWatermarkFilePath)) {
+        fs.unlinkSync(newWatermarkFilePath);
+      }
+    } catch (err) {
+      this.logger.warn?.(
+        "[ChatTurnWriter.setStateDir] Failed to clean up destination file after migration rewrite failure.",
+        { err, newWatermarkFilePath },
+      );
     }
   }
 
@@ -597,31 +761,54 @@ export class ChatTurnWriter {
    * mid-reset. Without this gate, a fast post-compaction `agent_end`
    * could read the stale watermark before the reset finishes draining.
    */
-  private async runReset(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    // T4 — Drain any queued (but not yet started) agent_end chain
-    // work BEFORE registering this reset in `pendingResets`. The
-    // chain's `.then(() => runAgentEndPersist(...))` delays
-    // `trackPersistJob` registration by one microtask, so a chained-
-    // but-not-yet-running fire wouldn't appear in `inFlightPersists`
-    // (which `resetSessionState` awaits). Critically, this drain
-    // happens BEFORE `pendingResets.set` — otherwise the chained
-    // `runAgentEndPersist` would see our pending reset, await it,
-    // and deadlock against itself. Draining first lets the chained
-    // work see no-pending-reset and run with the pre-compaction
-    // state; the reset then wipes after the work completes.
-    const chain = this.w4aSessionChains.get(sessionId);
-    if (chain) {
-      await chain.catch(() => undefined);
+  private async runReset(identity: {
+    sessionId: string;
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+    externalCursorKey?: string;
+  }): Promise<void> {
+    const sessionIds = this.collectResetSessionIds(identity);
+    if (sessionIds.length === 0) return;
+    const preResetChains = new Map<string, Promise<void>>();
+    for (const sessionId of sessionIds) {
+      const chain = this.w4aSessionChains.get(sessionId);
+      if (chain) preResetChains.set(sessionId, chain);
     }
-    const reset = this.resetSessionState(sessionId);
-    this.pendingResets.set(sessionId, reset);
+    let startReset!: () => void;
+    const reset = new Promise<void>((resolve, reject) => {
+      startReset = () => {
+        void (async () => {
+          // T4/T81 — Set the pending reset gate before draining older
+          // W4a chain work. onAgentEnd captures the reset promise at
+          // scheduling time, so chain entries queued before this reset do
+          // not wait on themselves, while new W4a/W4b/internal-hook work
+          // that arrives after the gate is installed waits or replays.
+          // T101 - Await the pre-gate snapshot only; post-gate W4a work
+          // waits on this reset and must not become something reset awaits.
+          for (const sessionId of sessionIds) {
+            const chain = preResetChains.get(sessionId);
+            if (chain) {
+              await chain.catch(() => undefined);
+            }
+          }
+          await this.resetSessionState(sessionIds);
+        })().then(resolve, reject);
+      };
+    });
+    for (const sessionId of sessionIds) {
+      this.pendingResets.set(sessionId, reset);
+    }
+    startReset();
     try {
       await reset;
     } finally {
       // Only delete if no newer reset replaced ours.
-      if (this.pendingResets.get(sessionId) === reset) {
-        this.pendingResets.delete(sessionId);
+      for (const sessionId of sessionIds) {
+        if (this.pendingResets.get(sessionId) === reset) {
+          this.pendingResets.delete(sessionId);
+        }
       }
     }
   }
@@ -637,37 +824,44 @@ export class ChatTurnWriter {
    * `persistOne` calls `saveWatermark(0)`, leaving stale state for the next
    * `agent_end` against a smaller post-compaction array.
    */
-  private async resetSessionState(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    const inFlight = this.inFlightPersists.get(sessionId);
-    if (inFlight && inFlight.size > 0) {
-      // Snapshot the set — settle every job (success or failure) before
-      // wiping watermark state so a late completion can't reintroduce it.
-      const pending = Array.from(inFlight);
-      await Promise.allSettled(pending);
+  private async resetSessionState(sessionIds: string[] | string): Promise<void> {
+    const ids = Array.isArray(sessionIds) ? sessionIds : [sessionIds].filter(Boolean);
+    if (ids.length === 0) return;
+    for (const sessionId of ids) {
+      const inFlight = this.inFlightPersists.get(sessionId);
+      if (inFlight && inFlight.size > 0) {
+        // Snapshot the set — settle every job (success or failure) before
+        // wiping watermark state so a late completion can't reintroduce it.
+        const pending = Array.from(inFlight);
+        await Promise.allSettled(pending);
+      }
     }
-    this.inFlightPersists.delete(sessionId);
-    this.w4aSessionChains.delete(sessionId);
-    this.cachedWatermarks.delete(sessionId);
-    const entry = this.debounceTimers.get(sessionId);
-    if (entry) {
-      clearTimeout(entry.timer);
-      this.debounceTimers.delete(sessionId);
+    for (const sessionId of ids) {
+      this.inFlightPersists.delete(sessionId);
+      this.cachedWatermarks.delete(sessionId);
+      const entry = this.debounceTimers.get(sessionId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        this.debounceTimers.delete(sessionId);
+      }
+      // `conversationKeyFromInternalEvent` and `composeSessionId` produce the
+      // same string shape (`openclaw:<channelId>:<accountId>:<conversationId>:<sessionKey>`),
+      // so a session reset deletes its pending entry by exact key — no
+      // sessionKey suffix matching, which would falsely clear unrelated
+      // conversations whose sessionKey shares a trailing fragment OR contains
+      // raw `:` (e.g. the `agent:<agentId>:<identity>` keys created in
+      // `DkgChannelPlugin`).
+      this.pendingUserMessages.delete(sessionId);
+      this.clearSessionTurnIds(sessionId);
+      // R18.2 — Reset the W4b session count too. After compaction the
+      // `messages[]` array is rewritten, so the W4b count's "I persisted
+      // N turns" no longer maps to the new pair indices. Leaving stale
+      // count would skip new pairs in `computeDelta`.
+      this.w4bSessionCounts.delete(sessionId);
     }
-    // `conversationKeyFromInternalEvent` and `composeSessionId` produce the
-    // same string shape (`openclaw:<channelId>:<accountId>:<conversationId>:<sessionKey>`),
-    // so a session reset deletes its pending entry by exact key — no
-    // sessionKey suffix matching, which would falsely clear unrelated
-    // conversations whose sessionKey shares a trailing fragment OR contains
-    // raw `:` (e.g. the `agent:<agentId>:<identity>` keys created in
-    // `DkgChannelPlugin`).
-    this.pendingUserMessages.delete(sessionId);
-    this.clearSessionTurnIds(sessionId);
-    // R18.2 — Reset the W4b session count too. After compaction the
-    // `messages[]` array is rewritten, so the W4b count's "I persisted
-    // N turns" no longer maps to the new pair indices. Leaving stale
-    // count would skip new pairs in `computeDelta`.
-    this.w4bSessionCounts.delete(sessionId);
+    // External markers record daemon-success facts from direct-channel
+    // persists. Preserve them across reset/compaction so the reset W4a replay
+    // can still consume the marker instead of duplicating the stored UI turn.
     this.writeWatermarkFile();
   }
 
@@ -678,6 +872,11 @@ export class ChatTurnWriter {
       if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
+      const pendingReset = this.pendingResets.get(conversationKey);
+      if (pendingReset) {
+        void pendingReset.then(() => this.onMessageReceived(ev)).catch(() => undefined);
+        return;
+      }
       const text = readEventText(ev);
       // R15.2 — Skip attachment-only / non-text inbound events. `readEventText`
       // returns "" when the envelope carries no text payload (e.g. an image
@@ -823,8 +1022,10 @@ export class ChatTurnWriter {
         // it. Without tracking, a `message:sent` write mid-compaction
         // could land its `saveWatermark()` after the reset clears state.
         this.trackPersistJob(sessionId, async () => {
+          let daemonPersisted = false;
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
+            daemonPersisted = true;
             // Post-success: stamp the content-only `w4bOrigin` key on
             // the SHORT-TTL cross-path map (T5) so a later W4a
             // `agent_end` last-pair peek can see that W4b already
@@ -859,9 +1060,19 @@ export class ChatTurnWriter {
               // backfill (count resets to 0, watermark file is
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
-              this.scheduleWatermarkFlush(sessionId);
+              if (!this.commitWatermarkStateSync(sessionId)) {
+                this.scheduleWatermarkFlush(sessionId, { retryOnFailure: true, attempts: 3 });
+                throw new Error("Failed to write W4b chat-turn watermark");
+              }
             }
           } catch (err) {
+            if (daemonPersisted) {
+              this.logger.error?.(
+                "[ChatTurnWriter.onMessageSent] Persist succeeded but durable W4b state write failed",
+                { err },
+              );
+              return;
+            }
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure
             // there's no `agent_end` backfill — the messages array doesn't
@@ -1095,15 +1306,56 @@ export class ChatTurnWriter {
   }
 
   flushSync(): void {
-    let applied = false;
-    for (const [sessionId, entry] of this.debounceTimers.entries()) {
-      clearTimeout(entry.timer);
-      this.cachedWatermarks.set(sessionId, entry.pendingIndex);
-      applied = true;
-    }
-    this.debounceTimers.clear();
+    const applied = this.applyPendingWatermarks();
     if (applied) {
       this.writeWatermarkFile();
+    }
+  }
+
+  private applyPendingWatermarks(sessionId?: string): boolean {
+    let applied = false;
+    for (const [key, entry] of Array.from(this.debounceTimers.entries())) {
+      if (sessionId && key !== sessionId) continue;
+      clearTimeout(entry.timer);
+      this.cachedWatermarks.set(key, entry.pendingIndex);
+      this.debounceTimers.delete(key);
+      applied = true;
+    }
+    return applied;
+  }
+
+  private commitWatermarkStateSync(sessionId?: string): boolean {
+    this.applyPendingWatermarks(sessionId);
+    return this.writeWatermarkFile();
+  }
+
+  private snapshotWatermarksForWrite(): Map<string, number> {
+    const wm = new Map(this.cachedWatermarks);
+    for (const [key, entry] of this.debounceTimers.entries()) {
+      wm.set(key, entry.pendingIndex);
+    }
+    return wm;
+  }
+
+  private snapshotWatermarkState(sessionId: string): WatermarkStateSnapshot {
+    return {
+      cachedHad: this.cachedWatermarks.has(sessionId),
+      cachedIndex: this.cachedWatermarks.get(sessionId),
+      pendingIndex: this.debounceTimers.get(sessionId)?.pendingIndex,
+    };
+  }
+
+  private restoreWatermarkState(sessionId: string, snapshot: WatermarkStateSnapshot): void {
+    const existing = this.debounceTimers.get(sessionId);
+    if (existing) clearTimeout(existing.timer);
+    this.debounceTimers.delete(sessionId);
+    if (snapshot.cachedHad) {
+      this.cachedWatermarks.set(sessionId, snapshot.cachedIndex ?? -1);
+    } else {
+      this.cachedWatermarks.delete(sessionId);
+    }
+    if (snapshot.pendingIndex !== undefined) {
+      this.saveWatermark(sessionId, snapshot.pendingIndex);
     }
   }
 
@@ -1119,8 +1371,8 @@ export class ChatTurnWriter {
   private computeDelta(
     messages: ChatTurnMessage[],
     savedUpTo: number,
-  ): Array<{ user: string; assistant: string; pairIndex: number }> {
-    const pairs: Array<{ user: string; assistant: string; pairIndex: number }> = [];
+  ): ComputedChatTurnPair[] {
+    const pairs: ComputedChatTurnPair[] = [];
     // R19.1 — Queue of unmatched user messages. Two transcript shapes
     // were previously mis-parsed:
     //   * `[user1, user2, assistant]` — the prior single-slot
@@ -1136,7 +1388,11 @@ export class ChatTurnWriter {
     // non-tool-call assistant turn. Any assistant carrying tool calls
     // is treated as intermediate regardless of whether it also has
     // text content.
-    const pendingUsers: string[] = [];
+    const pendingUsers: Array<{
+      text: string;
+      externalTurnIds: string[];
+      externalDirect: boolean;
+    }> = [];
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
@@ -1149,7 +1405,13 @@ export class ChatTurnWriter {
         // assistant-only pair (`{ user: "", assistant: reply }`)
         // for any image-only user message followed by a reply.
         const userText = this.extractText(msg.content);
-        if (userText) pendingUsers.push(userText);
+        if (userText) {
+          pendingUsers.push({
+            text: userText,
+            externalTurnIds: this.extractExternalTurnIds(msg),
+            externalDirect: this.hasExternalDirectChannelMetadata(msg),
+          });
+        }
       } else if (msg.role === "assistant") {
         const text = this.extractText(msg.content);
         const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
@@ -1190,13 +1452,19 @@ export class ChatTurnWriter {
           // put so a later real reply gets the same index.
           continue;
         }
-        const userText = pendingUsers.join("\n");
+        const userText = pendingUsers.map((pending) => pending.text).join("\n");
+        const externalDirect = pendingUsers.length === 1 && pendingUsers[0].externalDirect;
+        const externalTurnIds = externalDirect
+          ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
+          : [];
         pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {
           pairs.push({
             user: userText,
             assistant: this.stripRecalledMemory(text),
             pairIndex,
+            externalTurnIds,
+            externalDirect,
           });
         }
         pairIndex++;
@@ -1249,6 +1517,69 @@ export class ChatTurnWriter {
       "",
     );
     return out.trim();
+  }
+
+  private extractExternalTurnIds(msg: ChatTurnMessage): string[] {
+    const ids = new Set<string>();
+    const add = (value: unknown): void => {
+      if (typeof value === "string" && value.trim()) ids.add(value.trim());
+    };
+
+    add((msg as any).dkgTurnId);
+    add((msg as any).DkgTurnId);
+    add((msg as any).turnId);
+    add((msg as any).correlationId);
+
+    const context = msg.context;
+    if (context && typeof context === "object") {
+      add((context as any).dkgTurnId);
+      add((context as any).DkgTurnId);
+      add((context as any).turnId);
+      add((context as any).correlationId);
+      add((context as any).CorrelationId);
+    }
+
+    const metadata = msg.metadata;
+    if (metadata && typeof metadata === "object") {
+      add((metadata as any).dkgTurnId);
+      add((metadata as any).DkgTurnId);
+      add((metadata as any).turnId);
+      add((metadata as any).correlationId);
+      add((metadata as any).CorrelationId);
+    }
+
+    return Array.from(ids);
+  }
+
+  private hasExternalDirectChannelMetadata(msg: ChatTurnMessage): boolean {
+    const values: unknown[] = [
+      (msg as any).channelId,
+      (msg as any).provider,
+      (msg as any).Provider,
+      (msg as any).surface,
+      (msg as any).Surface,
+    ];
+    const context = msg.context;
+    if (context && typeof context === "object") {
+      values.push(
+        (context as any).channelId,
+        (context as any).provider,
+        (context as any).Provider,
+        (context as any).surface,
+        (context as any).Surface,
+      );
+    }
+    const metadata = msg.metadata;
+    if (metadata && typeof metadata === "object") {
+      values.push(
+        (metadata as any).channelId,
+        (metadata as any).provider,
+        (metadata as any).Provider,
+        (metadata as any).surface,
+        (metadata as any).Surface,
+      );
+    }
+    return values.some((value) => typeof value === "string" && value === "dkg-ui");
   }
 
   /**
@@ -1313,6 +1644,102 @@ export class ChatTurnWriter {
   }
   private w4bOriginKey(user: string, assistant: string): string {
     return `w4b-content::${this.contentHash(user, assistant)}`;
+  }
+
+  private externalTurnMarkerId(turnId?: unknown, user?: string, assistant?: string): string {
+    if (typeof turnId !== "string" || turnId.trim().length === 0) return "";
+    const idHash = createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16);
+    if (typeof user !== "string" || typeof assistant !== "string") {
+      return `external-id::${idHash}`;
+    }
+    return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
+  }
+
+  private consumeExternalTurnMarkersForPair(
+    sessionKeyCursor: string,
+    turnIds: string[],
+    user: string,
+    assistant: string,
+  ): ExternalMarkerAction {
+    for (const turnId of turnIds) {
+      const marker = this.externalTurnMarkerId(turnId, user, assistant);
+      if (marker && this.hasExternalTurnMarker(sessionKeyCursor, marker)) {
+        // Content-bound exact markers are durable daemon-success facts,
+        // not one-shot tickets. Keep them for later reset/compaction
+        // replays until a future transcript-retention cursor can prove
+        // safe GC.
+        return { skip: true, markers: [marker], rollbackMarkers: [] };
+      }
+    }
+    return { skip: false, markers: [], rollbackMarkers: [] };
+  }
+
+  private hasExternalTurnMarker(sessionKeyCursor: string, marker: string): boolean {
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
+    return (bucket?.get(marker) ?? 0) > 0;
+  }
+
+  private consumeExternalTurnMarker(sessionKeyCursor: string, marker: string): boolean {
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
+    if (!bucket) return false;
+    const count = bucket.get(marker) ?? 0;
+    if (count <= 0) return false;
+    if (count === 1) {
+      bucket.delete(marker);
+    } else {
+      bucket.set(marker, count - 1);
+    }
+    if (bucket.size === 0) {
+      this.externalTurnMarkers.delete(sessionKeyCursor);
+    }
+    return true;
+  }
+
+  private restoreExternalTurnMarker(sessionKeyCursor: string, marker: string): void {
+    if (!marker) return;
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor) ?? new Map<string, number>();
+    bucket.set(marker, Math.max(bucket.get(marker) ?? 0, 1));
+    this.externalTurnMarkers.set(sessionKeyCursor, bucket);
+  }
+
+  private restoreExternalTurnMarkerCount(sessionKeyCursor: string, marker: string, count: number): void {
+    if (!marker) return;
+    const bucket = this.externalTurnMarkers.get(sessionKeyCursor);
+    if (count > 0) {
+      const target = bucket ?? new Map<string, number>();
+      target.set(marker, count);
+      this.externalTurnMarkers.set(sessionKeyCursor, target);
+      return;
+    }
+    if (!bucket) return;
+    bucket.delete(marker);
+    if (bucket.size === 0) {
+      this.externalTurnMarkers.delete(sessionKeyCursor);
+    }
+  }
+
+  private cloneExternalTurnMarkers(
+    source: Map<string, Map<string, number>>,
+  ): Map<string, Map<string, number>> {
+    const clone = new Map<string, Map<string, number>>();
+    for (const [key, markers] of source) {
+      clone.set(key, new Map(markers));
+    }
+    return clone;
+  }
+
+  private mergeExternalTurnMarkers(
+    target: Map<string, Map<string, number>>,
+    key: string,
+    markers: Record<string, unknown>,
+  ): void {
+    const bucket = target.get(key) ?? new Map<string, number>();
+    for (const [marker, count] of Object.entries(markers)) {
+      if (typeof count === "number" && count > 0) {
+        bucket.set(marker, Math.max(bucket.get(marker) ?? 0, count));
+      }
+    }
+    if (bucket.size > 0) target.set(key, bucket);
   }
 
   /**
@@ -1414,13 +1841,63 @@ export class ChatTurnWriter {
    * `deriveSessionIdFromEvent` for dedup.
    */
   private deriveSessionId(ctx?: any): string {
-    if (!ctx || !ctx.channelId || !ctx.sessionKey) return "";
-    return this.composeSessionId({
-      channelId: ctx.channelId,
-      accountId: ctx.accountId,
-      conversationId: ctx.conversationId,
-      sessionKey: ctx.sessionKey,
-    });
+    const identity = this.identityFieldsFromPayload(ctx);
+    if (!identity.channelId || !identity.sessionKey) return "";
+    return this.composeSessionId(identity);
+  }
+
+  private identityFieldsFromPayload(payload?: any): {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  } {
+    if (!payload || typeof payload !== "object") return {};
+    const nested = typeof payload.context === "object" && payload.context ? payload.context : {};
+    const pick = (key: "channelId" | "accountId" | "conversationId" | "sessionKey"): string | undefined => {
+      const direct = payload[key];
+      if (typeof direct === "string") return direct;
+      const nestedValue = (nested as any)[key];
+      return typeof nestedValue === "string" ? nestedValue : undefined;
+    };
+    return {
+      channelId: pick("channelId"),
+      accountId: pick("accountId"),
+      conversationId: pick("conversationId"),
+      sessionKey: pick("sessionKey"),
+    };
+  }
+
+  private resetIdentityFromHookPayload(event?: any, ctx?: any): {
+    sessionId: string;
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+    externalCursorKey?: string;
+  } {
+    const ctxFields = this.identityFieldsFromPayload(ctx);
+    const eventFields = this.identityFieldsFromPayload(event);
+    const identity = {
+      channelId: ctxFields.channelId ?? eventFields.channelId,
+      accountId: ctxFields.accountId ?? eventFields.accountId,
+      conversationId: ctxFields.conversationId ?? eventFields.conversationId,
+      sessionKey: ctxFields.sessionKey ?? eventFields.sessionKey,
+    };
+    const sessionId = identity.channelId && identity.sessionKey
+      ? this.composeSessionId(identity)
+      : "";
+    return {
+      ...identity,
+      sessionId,
+      externalCursorKey: this.externalCursorKeyFromSessionKey(identity.sessionKey),
+    };
+  }
+
+  private externalCursorKeyFromHookPayload(event?: any, ctx?: any): string {
+    const ctxFields = this.identityFieldsFromPayload(ctx);
+    const eventFields = this.identityFieldsFromPayload(event);
+    return this.externalCursorKeyFromSessionKey(ctxFields.sessionKey ?? eventFields.sessionKey);
   }
 
   /**
@@ -1469,6 +1946,89 @@ export class ChatTurnWriter {
       this.encodeIdField(this.sanitize(String(p ?? ""))),
     );
     return `openclaw:${ids.join(":")}`;
+  }
+
+  private externalCursorKeyFromSessionKey(sessionKey?: unknown): string {
+    if (typeof sessionKey !== "string" || sessionKey.trim().length === 0) return "";
+    return `openclaw:transcript:${this.encodeIdField(this.sanitize(sessionKey))}`;
+  }
+
+  private collectResetSessionIds(identity: {
+    sessionId: string;
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string[] {
+    const ids = new Set<string>();
+    if (identity.sessionId) ids.add(identity.sessionId);
+    if (!identity.channelId || !identity.sessionKey) return Array.from(ids);
+    if (typeof identity.accountId !== "string" || typeof identity.conversationId !== "string") {
+      return Array.from(ids);
+    }
+    const expected = {
+      channelId: this.encodeIdField(this.sanitize(identity.channelId)),
+      accountId: this.encodeIdField(this.sanitize(identity.accountId)),
+      conversationId: this.encodeIdField(this.sanitize(identity.conversationId)),
+      sessionKey: this.encodeIdField(this.sanitize(identity.sessionKey)),
+    };
+    for (const candidate of this.collectKnownSessionIds()) {
+      const parsed = this.parseComposedSessionId(candidate);
+      if (!parsed) continue;
+      if (parsed.channelId !== expected.channelId) continue;
+      if (parsed.sessionKey !== expected.sessionKey) continue;
+      if (parsed.accountId !== expected.accountId) continue;
+      if (parsed.conversationId !== expected.conversationId) continue;
+      ids.add(candidate);
+    }
+    return Array.from(ids);
+  }
+
+  private collectKnownSessionIds(): Set<string> {
+    const ids = new Set<string>();
+    const add = (key: string): void => {
+      if (this.parseComposedSessionId(key)) ids.add(key);
+    };
+    for (const key of this.cachedWatermarks.keys()) add(key);
+    for (const key of this.w4bSessionCounts.keys()) add(key);
+    for (const key of this.debounceTimers.keys()) add(key);
+    for (const key of this.pendingUserMessages.keys()) add(key);
+    for (const key of this.inFlightPersists.keys()) add(key);
+    for (const key of this.w4aSessionChains.keys()) add(key);
+    for (const key of this.recentTurnIds.keys()) {
+      add(this.sessionIdFromCompositeDedupKey(key));
+    }
+    for (const key of this.crossPathStamps.keys()) {
+      add(this.sessionIdFromCompositeDedupKey(key));
+    }
+    for (const key of this.crossPathInflight.keys()) {
+      add(this.sessionIdFromCompositeDedupKey(key));
+    }
+    return ids;
+  }
+
+  private sessionIdFromCompositeDedupKey(key: string): string {
+    if (!key.startsWith("openclaw:")) return "";
+    const parts = key.split(":");
+    if (parts.length < 5) return "";
+    const sessionId = parts.slice(0, 5).join(":");
+    return this.parseComposedSessionId(sessionId) ? sessionId : "";
+  }
+
+  private parseComposedSessionId(sessionId: string): {
+    channelId: string;
+    accountId: string;
+    conversationId: string;
+    sessionKey: string;
+  } | null {
+    const parts = sessionId.split(":");
+    if (parts.length !== 5 || parts[0] !== "openclaw") return null;
+    return {
+      channelId: parts[1],
+      accountId: parts[2],
+      conversationId: parts[3],
+      sessionKey: parts[4],
+    };
   }
 
   /**
@@ -1535,15 +2095,32 @@ export class ChatTurnWriter {
    * T17 — Schedule a debounced watermark-file flush WITHOUT changing
    * the pending watermark value. Used by W4b's `w4bSessionCounts`
    * increment so the new count lands on disk via the same file write
-   * that watermark updates use. If a flush is already scheduled, no-op
-   * — it will pick up the new w4bCount when it fires.
+   * that watermark updates use. Retry flushes may take over an existing
+   * non-retry debounce timer while preserving that timer's pending
+   * watermark index.
    */
-  private scheduleWatermarkFlush(sessionId: string): void {
-    if (this.debounceTimers.has(sessionId)) return;
-    const currentWatermark = this.cachedWatermarks.get(sessionId) ?? -1;
-    const timer = setTimeout(() => {
-      this.writeWatermarkFile();
+  private scheduleWatermarkFlush(
+    sessionId: string,
+    opts: { retryOnFailure?: boolean; attempts?: number; pendingIndex?: number } = {},
+  ): void {
+    const existing = this.debounceTimers.get(sessionId);
+    if (existing) {
+      if (!opts.retryOnFailure) return;
+      clearTimeout(existing.timer);
       this.debounceTimers.delete(sessionId);
+      opts = { ...opts, pendingIndex: existing.pendingIndex };
+    }
+    const currentWatermark = opts.pendingIndex ?? this.cachedWatermarks.get(sessionId) ?? -1;
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(sessionId);
+      this.cachedWatermarks.set(sessionId, currentWatermark);
+      const wrote = this.writeWatermarkFile();
+      if (!wrote && opts.retryOnFailure && (opts.attempts ?? 1) > 1) {
+        this.scheduleWatermarkFlush(sessionId, {
+          retryOnFailure: true,
+          attempts: (opts.attempts ?? 1) - 1,
+        });
+      }
     }, 50);
     this.debounceTimers.set(sessionId, { timer, pendingIndex: currentWatermark });
   }
@@ -1630,7 +2207,11 @@ export class ChatTurnWriter {
 
   private writeWatermarkFile(
     targetPath: string = this.watermarkFilePath,
-    overrideMaps?: { wm: Map<string, number>; bc: Map<string, number> },
+    overrideMaps?: {
+      wm: Map<string, number>;
+      bc: Map<string, number>;
+      markers?: Map<string, Map<string, number>>;
+    },
   ): boolean {
     try {
       // T17 — Emit the new `{ w: <watermark>, b: <w4bCount> }` shape so
@@ -1652,15 +2233,28 @@ export class ChatTurnWriter {
       // concurrent persist arriving during the merge+write window
       // doesn't get wiped on write failure, and the merged values
       // only become "the source of truth" once the write succeeded.
-      const wm = overrideMaps?.wm ?? this.cachedWatermarks;
+      // T100 - Normal writes serialize every pending debounce watermark
+      // into the durable snapshot without clearing unrelated timers. A
+      // scoped sync commit for one session must not write a stale cached
+      // watermark for another session that is still waiting on debounce.
+      const wm = overrideMaps?.wm ?? this.snapshotWatermarksForWrite();
       const bc = overrideMaps?.bc ?? this.w4bSessionCounts;
-      const allKeys = new Set<string>([...wm.keys(), ...bc.keys()]);
-      const data: Record<string, { w: number; b: number }> = {};
+      const markersByKey = overrideMaps?.markers ?? this.externalTurnMarkers;
+      const allKeys = new Set<string>([
+        ...wm.keys(),
+        ...bc.keys(),
+        ...markersByKey.keys(),
+      ]);
+      const data: Record<string, { w: number; b: number; m?: Record<string, number> }> = {};
       for (const key of allKeys) {
+        const markers = markersByKey.get(key);
         data[key] = {
           w: wm.get(key) ?? -1,
           b: bc.get(key) ?? 0,
         };
+        if (markers && markers.size > 0) {
+          data[key].m = Object.fromEntries(markers.entries());
+        }
       }
       const tmpPath = `${targetPath}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");

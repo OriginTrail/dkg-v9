@@ -1721,6 +1721,15 @@ export class ChatTurnWriter {
       this.pendingUserMessages.delete(fromKey);
     }
     this.pendingUserMessageMeta.delete(fromKey);
+    this.rebindMessageHookInboundQueueKeys(fromKey, toKey);
+  }
+
+  private rebindMessageHookInboundQueueKeys(fromKey: string, toKey: string): void {
+    for (const [key, queueKey] of Array.from(this.messageHookInboundQueueKeys.entries())) {
+      if (queueKey !== fromKey) continue;
+      this.messageHookInboundQueueKeys.set(key, toKey);
+      this.messageHookDedupSessionKeys.set(key, toKey);
+    }
   }
 
   private w4bInflightGuardSessionIds(identity: {
@@ -2788,7 +2797,7 @@ export class ChatTurnWriter {
 
   private weakConversationCursorKeyFromSessionId(sessionId: string): string {
     const parsed = this.parseComposedSessionId(sessionId);
-    if (!parsed || !this.isWeakSessionKey(parsed.sessionKey) || !parsed.conversationId) return "";
+    if (!parsed || !parsed.conversationId) return "";
     return `openclaw:weak:${this.identityHash([parsed.channelId, parsed.accountId, parsed.conversationId])}`;
   }
 

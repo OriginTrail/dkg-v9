@@ -718,6 +718,33 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - strong typed W4b marker writes weak conversation cursor for session rotation", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "rotated marker q", metadata: { messageId: "rotated-marker-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-rotated-marker", sessionKey: "agent:a" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "rotated marker a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-rotated-marker", sessionKey: "agent:a" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "rotated marker q", metadata: { messageId: "rotated-marker-in" } },
+        { role: "assistant", content: "rotated marker a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-rotated-marker", sessionKey: "agent:b" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    restarted.flushSync();
+  });
+
   it("T359 - per-message weak marker skips only the matching repeated occurrence", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "repeat marker q", metadata: { messageId: "repeat-target-in" } },
@@ -805,6 +832,67 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-order:real-sk");
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("older weak inbound\nlater strong inbound");
+  });
+
+  it("T359 - queue promotion rebinds all inbound dedupe keys for failed-send redelivery", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "move all first", metadata: { messageId: "move-all-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-move-all" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "move all second", metadata: { messageId: "move-all-2" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-move-all" },
+    );
+    writer.onMessageReceived({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-move-all",
+        content: "move all second",
+        messageId: "move-all-2",
+      },
+    } as any);
+
+    await writer.onMessageSent({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-move-all",
+        content: "failed move all",
+        success: false,
+        messageId: "move-all-failed",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    writer.onMessageReceived({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-move-all",
+        content: "move all first",
+        messageId: "move-all-1",
+      },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-move-all",
+        content: "redelivered move all",
+        success: true,
+        messageId: "move-all-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("move all first");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("redelivered move all");
   });
 
   it("T359 - queue promotion appends later weak duplicates after earlier strong messages", async () => {

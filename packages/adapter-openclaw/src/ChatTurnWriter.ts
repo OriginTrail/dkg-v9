@@ -1427,14 +1427,14 @@ export class ChatTurnWriter {
     const messages = this.pendingUserMessages.get(fromKey);
     if (messages && messages.length > 0) {
       const target = this.pendingUserMessages.get(toKey) ?? [];
-      target.push(...messages);
+      target.unshift(...messages);
       this.pendingUserMessages.set(toKey, target);
       this.pendingUserMessages.delete(fromKey);
     }
     const meta = this.pendingUserMessageMeta.get(fromKey);
     if (meta && meta.length > 0) {
       const target = this.pendingUserMessageMeta.get(toKey) ?? [];
-      target.push(...meta);
+      target.unshift(...meta);
       this.pendingUserMessageMeta.set(toKey, target);
       this.pendingUserMessageMeta.delete(fromKey);
     }
@@ -1450,10 +1450,9 @@ export class ChatTurnWriter {
     const strongSessionId = this.composeSessionId(identity);
     const candidateSessionIds = new Set<string>();
     if (identity.conversationId) {
-      const weakSessionKey = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
-      if (weakSessionKey) {
-        candidateSessionIds.add(this.composeSessionId({ ...identity, sessionKey: weakSessionKey }));
-      }
+      // A weak typed session only proves channel/account/conversation, not the
+      // agent-specific sessionKey. Keep conversation-scoped weak state isolated
+      // unless an exact same-message dedupe path rekeys its pending inbound.
       candidateSessionIds.add(this.composeSessionId({ ...identity, conversationId: "" }));
     }
 

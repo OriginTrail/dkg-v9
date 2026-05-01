@@ -190,6 +190,7 @@ export class HookSurface {
     const existing = this.installedHandlers.get(key);
     if (existing) {
       if (kind === 'internal' && !this.ownsCurrentInternalHook(event)) {
+        this.clearCommitTimer(key);
         try {
           existing.unsubscribe();
         } catch {
@@ -236,6 +237,7 @@ export class HookSurface {
     if (!unsubscribe) return null;
 
     this.installedHandlers.set(key, { handler, unsubscribe });
+    this.clearCommitTimer(key);
 
     const timer = setTimeout(() => {
       const s = this.stats.get(key);
@@ -506,12 +508,15 @@ export class HookSurface {
     this.stats.set(key, { ...prev, fireCount, commitState: nextState });
 
     if (fireCount === 1) {
-      const timer = this.commitTimers.get(key);
-      if (timer) {
-        clearTimeout(timer);
-        this.commitTimers.delete(key);
-      }
+      this.clearCommitTimer(key);
     }
+  }
+
+  private clearCommitTimer(key: string): void {
+    const timer = this.commitTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.commitTimers.delete(key);
   }
 }
 

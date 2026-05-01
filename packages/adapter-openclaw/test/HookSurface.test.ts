@@ -118,6 +118,30 @@ describe("HookSurface", () => {
       expect(replacement.get("message:sent")).toHaveLength(1);
       expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
     });
+
+    it("resets the commit timer when re-installing a stale internal hook", () => {
+      vi.useFakeTimers();
+      try {
+        const logger = mkLogger();
+        const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 100 });
+        hs.install("internal", "message:sent", vi.fn());
+        vi.advanceTimersByTime(50);
+
+        const replacement = new Map<string, any[]>([["message:sent", []]]);
+        (globalThis as any)[INTERNAL_HOOK_SYMBOL] = replacement;
+        hs.install("internal", "message:sent", vi.fn());
+
+        vi.advanceTimersByTime(49);
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+        vi.advanceTimersByTime(1);
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+
+        vi.advanceTimersByTime(50);
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("legacy kind (api.registerHook)", () => {

@@ -420,7 +420,7 @@ describe("ChatTurnWriter", () => {
     ]);
   });
 
-  it("T359 - weak typed session state promotes to real session before W4a backfill", async () => {
+  it("T359 - weak typed session counts do not auto-promote to an unrelated real session", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "weak typed q", metadata: { messageId: "weak-in-1" } },
       { channelId: "telegram", accountId: "bot", conversationId: "chat-weak" },
@@ -441,20 +441,66 @@ describe("ChatTurnWriter", () => {
     restarted.onAgentEnd({
       sessionId: "test",
       messages: [
-        { role: "user", content: "weak typed q" },
-        { role: "assistant", content: "weak typed a" },
+        { role: "user", content: "fresh real-session q" },
+        { role: "assistant", content: "fresh real-session a" },
       ],
-    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak", sessionKey: "real-sk" });
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak", sessionKey: "agent:alternate:real" });
     await flushMicrotasks();
 
-    const strongSessionId = "openclaw:telegram:bot:chat-weak:real-sk";
-    expect((restarted as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
-    expect((restarted as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    const strongSessionId = "openclaw:telegram:bot:chat-weak:agent%3Aalternate%3Areal";
+    expect((restarted as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((restarted as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(strongSessionId);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("fresh real-session q");
     restarted.flushSync();
   });
 
-  it("T359 - in-flight weak W4b completion writes to promoted session state", async () => {
+  it("T359 - same-message queue promotion preserves inbound arrival order", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "older weak inbound", metadata: { messageId: "order-old" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-order" },
+    );
+    writer.onMessageReceived({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-order",
+        content: "later strong inbound",
+        messageId: "order-later",
+      },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-order",
+        content: "older weak inbound",
+        messageId: "order-old",
+      },
+    } as any);
+
+    await writer.onMessageSent({
+      sessionKey: "real-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-order",
+        content: "ordered answer",
+        success: true,
+        messageId: "order-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-order:real-sk");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("older weak inbound\nlater strong inbound");
+  });
+
+  it("T359 - in-flight conversationless W4b completion writes to promoted session state", async () => {
     let releaseStore: (() => void) | null = null;
     let storeStarted = false;
     mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
@@ -465,17 +511,16 @@ describe("ChatTurnWriter", () => {
 
     writer.onTypedMessageReceived(
       { from: "user-1", content: "late weak q", metadata: { messageId: "late-weak-in" } },
-      { channelId: "telegram", accountId: "bot", conversationId: "chat-late" },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
     );
     await writer.onTypedMessageSent(
       { to: "user-1", content: "late weak a", success: true },
-      { channelId: "telegram", accountId: "bot", conversationId: "chat-late" },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
     );
     await flushMicrotasks();
     expect(storeStarted).toBe(true);
 
-    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-late");
-    const weakSessionId = `openclaw:telegram:bot:chat-late:${weakSessionKey}`;
+    const weakSessionId = "openclaw:telegram:bot::real-sk";
     const strongSessionId = "openclaw:telegram:bot:chat-late:real-sk";
     expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(true);
 

@@ -43,7 +43,7 @@ export default function (api) {
   }
 
   log.info?.(
-    `[dkg-entry] config (from OpenClaw plugin config) - daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, `
+    `[dkg-entry] config (from OpenClaw plugin config) - daemonUrl: ${bootstrapConfig.daemonUrl ?? 'http://127.0.0.1:9200'}, `
       + `memory.enabled: ${bootstrapConfig.memory?.enabled}, `
       + `channel.enabled: ${bootstrapConfig.channel?.enabled}, `
       + `registrationMode: ${api.registrationMode ?? 'full'}`,

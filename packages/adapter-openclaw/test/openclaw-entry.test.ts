@@ -790,6 +790,11 @@ describe('openclaw-entry', () => {
         memory: { enabled: true },
         channel: { enabled: false },
       });
+      const startupLog = api.logger.info.mock.calls
+        .map(([message]) => String(message))
+        .find((message) => message.includes('[dkg-entry] config'));
+      expect(startupLog).toContain('daemonUrl: http://127.0.0.1:9730');
+      expect(startupLog).not.toContain('http://127.0.0.1:9500');
     } finally {
       if (prevDaemonUrl === undefined) delete process.env.DKG_DAEMON_URL;
       else process.env.DKG_DAEMON_URL = prevDaemonUrl;

@@ -153,18 +153,19 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
   });
 
-  it('registers an inactive capability when the owning api later exposes direct config', () => {
+  it('does not stamp an inactive capability when the owning api no longer proves slot ownership', () => {
     const api = makeApi();
     plugin.register(api);
     api.config = {
       memory: { enabled: false },
     } as any;
 
-    expect(plugin.disable(api)).toBe(true);
+    expect(plugin.disable(api)).toBe(false);
 
-    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
     plugin.reAssertCapability();
-    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('does not stamp the inactive capability when another plugin owns the memory slot', () => {

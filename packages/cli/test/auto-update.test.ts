@@ -20,6 +20,7 @@ const MOCK_BUNDLER_SCRIPT = [
 ].join('\n');
 const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
 const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
+const RUNTIME_BUILD_COMPAT_WRAPPER = 'pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
 const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
 const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
 let mockBundledCliPackageVersion = CLI_VERSION;
@@ -223,7 +224,7 @@ function mockGitUpdateReadFile(
   nodeUiPackageName = '@origintrail-official/dkg-node-ui',
   rootScripts: Record<string, string> = {
     'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
-    'build:runtime': RUNTIME_BUILD_CMD,
+    'build:runtime': RUNTIME_BUILD_COMPAT_WRAPPER,
   },
 ) {
   readFileImpl = async (path: any) => {

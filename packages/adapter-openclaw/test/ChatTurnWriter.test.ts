@@ -362,6 +362,23 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[1][0]).toContain("12345%3A222");
   });
 
+  it("T359 - Telegram topic fallback accepts snake_case chat and thread ids", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "snake topic q", metadata: { chat_id: 12345, message_thread_id: 333, message_id: "snake-topic-in" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "snake topic a", success: true, metadata: { chat_id: 12345, thread_id: 333, message_id: "snake-topic-out" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toContain("12345%3A333");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("snake topic q");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("snake topic a");
+  });
+
   it("T359 - typed message normalization accepts structured and ctx text content", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: [{ type: "text", text: "typed array hello" }] },
@@ -3316,6 +3333,68 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
     expect(persistCalls).toBe(1); // still just the W4a call
     // Release W4a so the test cleans up.
+    releasePersist?.();
+    await flushMicrotasks();
+  });
+
+  it("T359 - weak typed W4b skips concrete W4a cross-path stamp", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak alias q", metadata: { messageId: "weak-alias-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-alias" },
+    );
+    writer.onAgentEnd(
+      { sessionId: "test", messages: [
+        { role: "user", content: "weak alias q" },
+        { role: "assistant", content: "weak alias a" },
+      ] },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-alias", sessionKey: "agent:main:real" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-w4a-alias:agent%3Amain%3Areal");
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak alias a", success: true, metadata: { messageId: "weak-alias-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-alias" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("T359 - weak typed W4b sees concrete W4a in-flight alias", async () => {
+    let releasePersist: (() => void) | null = null;
+    let persistCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      persistCalls++;
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak inflight q", metadata: { messageId: "weak-inflight-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-inflight" },
+    );
+    writer.onAgentEnd(
+      { sessionId: "test", messages: [
+        { role: "user", content: "weak inflight q" },
+        { role: "assistant", content: "weak inflight a" },
+      ] },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-inflight", sessionKey: "agent:main:real" },
+    );
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1);
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak inflight a", success: true, metadata: { messageId: "weak-inflight-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-w4a-inflight" },
+    );
+    await flushMicrotasks();
+    expect(persistCalls).toBe(1);
+
     releasePersist?.();
     await flushMicrotasks();
   });

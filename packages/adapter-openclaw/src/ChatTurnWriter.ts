@@ -521,6 +521,7 @@ export class ChatTurnWriter {
     const externalCursorKey = this.externalCursorKeyFromSessionKey(identity.sessionKey);
     const typedW4bCursorKeys = this.typedW4bMarkerCursorKeys(identity);
     const w4bInflightSessionIds = this.w4bInflightGuardSessionIds(identity, sessionId);
+    const w4aCrossPathSessionIds = this.w4aCrossPathSessionIds(identity, sessionId);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -540,7 +541,14 @@ export class ChatTurnWriter {
       .catch(() => undefined)
       .then(async () => {
         if (resetAtSchedule) await resetAtSchedule;
-        await this.runAgentEndPersist(event, sessionId, externalCursorKey, typedW4bCursorKeys, w4bInflightSessionIds);
+        await this.runAgentEndPersist(
+          event,
+          sessionId,
+          externalCursorKey,
+          typedW4bCursorKeys,
+          w4bInflightSessionIds,
+          w4aCrossPathSessionIds,
+        );
       });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
@@ -561,6 +569,7 @@ export class ChatTurnWriter {
     externalCursorKey?: string,
     typedW4bCursorKeys: string[] = [],
     w4bInflightSessionIds: string[] = [sessionId],
+    w4aCrossPathSessionIds: string[] = [sessionId],
   ): Promise<void> {
     try {
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
@@ -686,7 +695,11 @@ export class ChatTurnWriter {
           // with W4b (earlier pairs are historical backfill). Cleared
           // in `finally` so a failure doesn't leak the reservation.
           const w4aInflightKey = i === lastIdx ? this.w4aOriginKey(user, assistant) : null;
-          if (w4aInflightKey) this.markCrossPathInflight(sessionId, w4aInflightKey);
+          if (w4aInflightKey) {
+            for (const crossPathSessionId of w4aCrossPathSessionIds) {
+              this.markCrossPathInflight(crossPathSessionId, w4aInflightKey);
+            }
+          }
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
             // T55 — Only stamp W4a-origin for the LAST (live) pair.
@@ -706,7 +719,10 @@ export class ChatTurnWriter {
             // content turn outside the cross-path window doesn't
             // false-dedup.
             if (i === lastIdx) {
-              this.markCrossPathStamp(sessionId, this.w4aOriginKey(user, assistant));
+              const w4aOrigin = this.w4aOriginKey(user, assistant);
+              for (const crossPathSessionId of w4aCrossPathSessionIds) {
+                this.markCrossPathStamp(crossPathSessionId, w4aOrigin);
+              }
             }
           } catch (err) {
             // Release the turnId reservation so a retry can re-attempt.
@@ -714,10 +730,18 @@ export class ChatTurnWriter {
             // now a non-mutating peek (R13.1), so W4a never reserved it.
             this.releaseTurnIdReservation(sessionId, turnId);
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
-            if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
+            if (w4aInflightKey) {
+              for (const crossPathSessionId of w4aCrossPathSessionIds) {
+                this.unmarkCrossPathInflight(crossPathSessionId, w4aInflightKey);
+              }
+            }
             return; // leave watermark at last successful pair
           }
-          if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
+          if (w4aInflightKey) {
+            for (const crossPathSessionId of w4aCrossPathSessionIds) {
+              this.unmarkCrossPathInflight(crossPathSessionId, w4aInflightKey);
+            }
+          }
         }
       });
       // T4 — AWAIT the persist job so the per-session chain in
@@ -1122,10 +1146,36 @@ export class ChatTurnWriter {
       event.conversationId,
       eventContext.conversationId,
       metadata.conversationId,
+      ctx.conversation_id,
+      event.conversation_id,
+      eventContext.conversation_id,
+      metadata.conversation_id,
     );
     if (explicit) return explicit;
-    const chatId = firstString(ctx.chatId, event.chatId, eventContext.chatId, metadata.chatId);
-    const threadId = firstString(ctx.threadId, event.threadId, eventContext.threadId, metadata.threadId);
+    const chatId = firstString(
+      ctx.chatId,
+      event.chatId,
+      eventContext.chatId,
+      metadata.chatId,
+      ctx.chat_id,
+      event.chat_id,
+      eventContext.chat_id,
+      metadata.chat_id,
+    );
+    const threadId = firstString(
+      ctx.threadId,
+      event.threadId,
+      eventContext.threadId,
+      metadata.threadId,
+      ctx.thread_id,
+      event.thread_id,
+      eventContext.thread_id,
+      metadata.thread_id,
+      ctx.message_thread_id,
+      event.message_thread_id,
+      eventContext.message_thread_id,
+      metadata.message_thread_id,
+    );
     if (chatId && threadId) return `${chatId}:${threadId}`;
     return threadId ?? chatId;
   }
@@ -1676,6 +1726,21 @@ export class ChatTurnWriter {
       if (weakSession) {
         ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
       }
+    }
+    return Array.from(ids);
+  }
+
+  private w4aCrossPathSessionIds(identity: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }, sessionId: string): string[] {
+    const ids = new Set<string>([sessionId]);
+    if (!identity.channelId || !identity.conversationId) return Array.from(ids);
+    const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+    if (weakSession) {
+      ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
     }
     return Array.from(ids);
   }

@@ -20,6 +20,14 @@ const STATE_METADATA_CONFIG_KEYS = [
   'installedWorkspace',
 ] as const;
 
+const PARTIAL_OVERLAY_CONFIG_KEYS = [
+  'daemonUrl',
+  'dkgHome',
+  'stateDir',
+  'stateDirSource',
+  'installedWorkspace',
+] as const;
+
 export function looksLikeAdapterPluginConfig(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
   if (
@@ -38,6 +46,14 @@ export function isStateMetadataOnlyAdapterConfig(value: unknown): boolean {
   const keys = Object.keys(value);
   return keys.length > 0 && keys.every((key) =>
     (STATE_METADATA_CONFIG_KEYS as readonly string[]).includes(key)
+  );
+}
+
+export function isPartialAdapterConfigOverlay(value: unknown): boolean {
+  if (!isObjectRecord(value) || !looksLikeAdapterPluginConfig(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((key) =>
+    (PARTIAL_OVERLAY_CONFIG_KEYS as readonly string[]).includes(key)
   );
 }
 
@@ -78,17 +94,22 @@ function hasOpenClawConfigSignal(value: Record<string, unknown>): boolean {
   );
 }
 
+function hasMergedPluginConfigSignal(value: Record<string, unknown>): boolean {
+  return isObjectRecord(value.plugins);
+}
+
 export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
-  return [
+  const candidates = [
     anyApi?.cfg,
     anyApi?.config,
     runtime?.cfg,
     runtime?.config,
-  ].find((candidate) =>
+  ].filter((candidate) =>
     isObjectRecord(candidate) &&
     !looksLikeAdapterPluginConfig(candidate) &&
     hasOpenClawConfigSignal(candidate)
   );
+  return candidates.find(hasMergedPluginConfigSignal) ?? candidates[0];
 }

@@ -105,6 +105,28 @@ describe('openclaw-config helpers', () => {
     expect(resolveOpenClawMergedConfig(api)).toBe(liveConfig);
   });
 
+  it('prefers plugin-bearing api.config over route-only api.cfg', () => {
+    const fullConfig = {
+      plugins: {
+        slots: {
+          memory: 'adapter-openclaw',
+        },
+      },
+    };
+    const routeConfig = {
+      agents: {},
+      session: {
+        dmScope: 'main',
+      },
+    };
+    const api = {
+      cfg: routeConfig,
+      config: fullConfig,
+    } as any;
+
+    expect(resolveOpenClawMergedConfig(api)).toBe(fullConfig);
+  });
+
   it('skips empty api.config and falls back to api.cfg route config', () => {
     const routeConfig = {
       agents: {},

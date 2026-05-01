@@ -49,7 +49,7 @@ import type {
 } from './types.js';
 import {
   isObjectRecord,
-  isStateMetadataOnlyAdapterConfig,
+  isPartialAdapterConfigOverlay,
   looksLikeAdapterPluginConfig,
   resolveOpenClawMergedConfig,
 } from './openclaw-config.js';
@@ -809,8 +809,8 @@ function buildDisabledMemoryCapability(): MemoryPluginCapability {
  * Prefer the merged slot owner when it exists; for direct-config-only gateway
  * phases, explicit `memory.enabled` is the scoped ownership signal, and a
  * full adapter-config snapshot that omits `memory` means the memory module is
- * disabled by default. State/setup metadata-only snapshots remain partial and
- * carry no memory-slot intent.
+ * disabled by default. Daemon/home/state metadata-only overlays remain partial
+ * and carry no memory-slot intent.
  */
 type MemorySlotOwnershipSource = 'merged-config' | 'direct-plugin-config';
 
@@ -849,7 +849,7 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
     if (isObjectRecord(memory) && Object.prototype.hasOwnProperty.call(memory, 'enabled')) {
       return memory.enabled === true;
     }
-    if (omittedMemoryMeansDisabled && !isStateMetadataOnlyAdapterConfig(candidate)) {
+    if (omittedMemoryMeansDisabled && !isPartialAdapterConfigOverlay(candidate)) {
       return false;
     }
   }

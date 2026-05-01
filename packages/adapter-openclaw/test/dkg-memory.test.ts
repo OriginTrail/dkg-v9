@@ -243,7 +243,29 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
-  it('treats omitted memory in a refreshed direct full snapshot as disabled', async () => {
+  it('treats omitted memory in a refreshed module-shaped direct full snapshot as disabled', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
+  it('does not treat daemon/home-only direct config as memory disable intent', () => {
     const api = makeApi();
     api.config = {
       memory: { enabled: true },
@@ -254,15 +276,11 @@ describe('DkgMemoryPlugin.register', () => {
 
     api.config = {
       daemonUrl: 'http://localhost:9300',
+      dkgHome: '/current-daemon-home',
     } as any;
 
-    expect(plugin.disable(api)).toBe(true);
-
-    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
-    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
-    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
-    expect(result.manager).toBeNull();
-    expect(result.error).toContain('disabled');
+    expect(plugin.disable(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('does not treat state metadata-only direct config as memory disable intent', () => {

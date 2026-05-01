@@ -1272,6 +1272,97 @@ describe('DkgNodePlugin', () => {
     expect(client.baseUrl).toBe('http://example.com:9200');
   });
 
+  it('refreshes daemon-scoped clients and identity caches after singleton config update', async () => {
+    const originalFetch = globalThis.fetch;
+    const stateDir = path.join(require('os').tmpdir(), `dkg-t75-client-refresh-${Date.now()}`);
+    const oldAgent = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const newAgent = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const flushAsync = async () => {
+      for (let i = 0; i < 25; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const isNew = url.startsWith('http://localhost:9300');
+      if (url.endsWith('/api/status')) {
+        return new Response(JSON.stringify({ peerId: isNew ? 'peer-new' : 'peer-old' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/agent/identity')) {
+        return new Response(JSON.stringify({
+          agentAddress: isNew ? newAgent : oldAgent,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/context-graph/list')) {
+        return new Response(JSON.stringify({
+          contextGraphs: [{ id: isNew ? 'cg-new' : 'cg-old', synced: true, isSystem: false }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      stateDir,
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      registerMemoryCapability: vi.fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      plugin.register(mockApi);
+      await flushAsync();
+      expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
+      expect((plugin as any).nodePeerId).toBe('peer-old');
+      expect((plugin as any).nodeAgentAddress).toBe(oldAgent);
+      expect((plugin as any).availableContextGraphCache).toEqual(['cg-old']);
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9300',
+        stateDir,
+        channel: { enabled: false },
+        memory: { enabled: true },
+      } as any);
+
+      expect(plugin.getClient().baseUrl).toBe('http://localhost:9300');
+      expect((plugin as any).nodePeerId).toBeUndefined();
+      expect((plugin as any).nodeAgentAddress).toBeUndefined();
+      expect((plugin as any).availableContextGraphCache).toEqual([]);
+      expect(((plugin as any).chatTurnWriter as any).client.baseUrl).toBe('http://localhost:9300');
+      expect(((plugin as any).memoryPlugin as any).client.baseUrl).toBe('http://localhost:9300');
+
+      plugin.register(mockApi);
+      await flushAsync();
+      expect((plugin as any).nodePeerId).toBe('peer-new');
+      expect((plugin as any).nodeAgentAddress).toBe(newAgent);
+      expect((plugin as any).availableContextGraphCache).toEqual(['cg-new']);
+    } finally {
+      await plugin.stop();
+      globalThis.fetch = originalFetch;
+      try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('registers OpenClaw through the generic local-agent endpoint', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
@@ -3917,6 +4008,7 @@ describe('DkgNodePlugin', () => {
         registerHook: () => {},
         on: () => {},
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
       } as unknown as OpenClawPluginApi;
 
       plugin.register(mockApi);
@@ -3936,7 +4028,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - explicit config.stateDir pointing at .dkg-adapter uses direct layout', async () => {
+  it('T75 - explicit config.stateDir matching installedWorkspace .dkg-adapter uses direct layout', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-config-direct-${Date.now()}`);
@@ -3944,6 +4036,7 @@ describe('DkgNodePlugin', () => {
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
+        installedWorkspace: workspaceDir,
         stateDir,
         channel: { enabled: false },
         memory: { enabled: false },
@@ -3963,6 +4056,49 @@ describe('DkgNodePlugin', () => {
       expect(watermarkPath.replace(/\\/g, '/')).toBe(
         path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - custom config.stateDir ending .dkg-adapter is not treated as a workspace default without workspace metadata', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-custom-dkg-adapter-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::unrelated': { w: 4, b: 1 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      const legacyState = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+      expect(legacyState['openclaw:tg:::unrelated']).toEqual({ w: 4, b: 1 });
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;

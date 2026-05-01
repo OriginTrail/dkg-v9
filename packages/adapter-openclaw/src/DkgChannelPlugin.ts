@@ -422,9 +422,13 @@ export class DkgChannelPlugin {
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
-    private readonly client: DkgDaemonClient,
+    private client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  setClient(client: DkgDaemonClient): void {
+    this.client = client;
   }
 
   /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */

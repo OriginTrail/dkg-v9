@@ -59,6 +59,12 @@ function resolveEntryConfig(api) {
   const mergedConfig =
     fullConfigCandidates.find((candidate) => isObject(candidate.plugins) || isObject(candidate.agents)) ??
     {};
+  const workspaceConfig =
+    fullConfigCandidates.find((candidate) =>
+      typeof candidate?.agents?.defaults?.workspace === 'string' ||
+      typeof candidate?.workspace === 'string'
+    ) ??
+    {};
   const entryConfigs = fullConfigCandidates
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObject);
@@ -74,6 +80,8 @@ function resolveEntryConfig(api) {
   }
 
   const workspaceDir =
+    workspaceConfig?.agents?.defaults?.workspace ??
+    workspaceConfig?.workspace ??
     mergedConfig?.agents?.defaults?.workspace ??
     mergedConfig?.workspace ??
     api.workspaceDir ??

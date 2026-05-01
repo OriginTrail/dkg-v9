@@ -231,6 +231,10 @@ export class ChatTurnWriter {
     this.migrateLegacyStateDirs(this.legacyStateDirsForLayout(this.stateDir, this.stateLayout, options.legacyStateDirs ?? []));
   }
 
+  setClient(client: any): void {
+    this.client = client;
+  }
+
   /**
    * T18/T21/T22 — Migrate this writer to a new stateDir without losing
    * in-flight work or rolling back newer state at the destination.

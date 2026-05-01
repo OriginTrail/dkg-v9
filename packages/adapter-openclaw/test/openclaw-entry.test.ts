@@ -51,12 +51,7 @@ describe('openclaw-entry', () => {
         '    globalThis.__openclawEntryTestInstances.push(this);',
         '  }',
         '  updateConfig(config) {',
-        '    this.config = {',
-        '      ...this.config,',
-        '      ...(Object.prototype.hasOwnProperty.call(config, "stateDir") ? { stateDir: config.stateDir } : {}),',
-        '      ...(Object.prototype.hasOwnProperty.call(config, "stateDirSource") ? { stateDirSource: config.stateDirSource } : {}),',
-        '      ...(Object.prototype.hasOwnProperty.call(config, "installedWorkspace") ? { installedWorkspace: config.installedWorkspace } : {}),',
-        '    };',
+        '    this.config = { ...config };',
         '  }',
         '  register(api) { this.registerCalls.push(api); this.workspaceDirsAtRegister.push(api.workspaceDir); }',
         '  async stop() { this.stopCalls += 1; }',
@@ -241,7 +236,7 @@ describe('openclaw-entry', () => {
     });
   });
 
-  it('refreshes singleton state config before multi-phase re-registration', async () => {
+  it('refreshes singleton config before multi-phase re-registration', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -256,12 +251,33 @@ describe('openclaw-entry', () => {
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
-      daemonUrl: 'http://127.0.0.1:9200',
+      daemonUrl: 'http://127.0.0.1:9600',
       stateDir: '/second/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/second',
     });
     expect(instance.registerCalls).toEqual([firstApi, secondApi]);
+  });
+
+  it('resolves workspace from runtime.config even when it only carries workspace metadata', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      stateDir: '/runtime-only/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/runtime-only',
+    }, {
+      runtime: {
+        config: {
+          workspace: '/runtime-only',
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe('/runtime-only');
+    expect(instance.workspaceDirsAtRegister).toEqual(['/runtime-only']);
   });
 
   it('sets resolved workspaceDir before singleton re-registration', async () => {

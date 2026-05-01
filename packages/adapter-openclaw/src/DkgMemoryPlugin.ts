@@ -593,10 +593,14 @@ export class DkgMemoryPlugin {
   private registeredApi: OpenClawPluginApi | null = null;
 
   constructor(
-    private readonly client: DkgDaemonClient,
+    private client: DkgDaemonClient,
     private readonly config: NonNullable<DkgOpenClawConfig['memory']>,
     private readonly resolver: DkgMemorySessionResolver,
   ) {}
+
+  setClient(client: DkgDaemonClient): void {
+    this.client = client;
+  }
 
   register(api: OpenClawPluginApi): boolean {
     return this.registerCapability(api);
@@ -639,6 +643,10 @@ export class DkgMemoryPlugin {
   invalidateRegistration(): void {
     this.registeredCapability = null;
     this.registeredApi = null;
+  }
+
+  async close(): Promise<void> {
+    this.invalidateRegistration();
   }
 
   /**

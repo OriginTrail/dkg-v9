@@ -400,6 +400,7 @@ export class DkgChannelPlugin {
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
   private serverStop: Promise<void> | null = null;
+  private serverStopShouldUpdateGatewayStatus = false;
   private gatewayLifecycleStop: (() => void) | null = null;
   private gatewayLifecycleOwner: object | null = null;
   private gatewayLifecyclePendingOwner: object | null = null;
@@ -638,8 +639,12 @@ export class DkgChannelPlugin {
   }
 
   async stop(options: { updateGatewayStatus?: boolean } = {}): Promise<void> {
-    if (this.serverStop) return this.serverStop;
     const updateGatewayStatus = options.updateGatewayStatus !== false;
+    if (this.serverStop) {
+      if (updateGatewayStatus) this.serverStopShouldUpdateGatewayStatus = true;
+      return this.serverStop;
+    }
+    this.serverStopShouldUpdateGatewayStatus = updateGatewayStatus;
     const stopWork = Promise.resolve().then(async () => {
       this.stopping = true;
       this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
@@ -685,7 +690,7 @@ export class DkgChannelPlugin {
         this.clearPendingMarkerPersistence();
       }
       this.stopDrainDeadlineAt = null;
-      if (updateGatewayStatus) {
+      if (this.serverStopShouldUpdateGatewayStatus) {
         this.reportGatewayLifecycleStopped(this.gatewayLifecycleStatusContext, this.gatewayLifecycleStatusOwner);
       }
       this.gatewayLifecycleStop?.();
@@ -698,6 +703,7 @@ export class DkgChannelPlugin {
     } finally {
       if (this.serverStop === stopWork) {
         this.serverStop = null;
+        this.serverStopShouldUpdateGatewayStatus = false;
       }
     }
   }

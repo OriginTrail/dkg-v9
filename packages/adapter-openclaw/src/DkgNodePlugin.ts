@@ -163,6 +163,7 @@ export class DkgNodePlugin {
   private channelPluginStartQueued = false;
   private pendingChannelStartApi: OpenClawPluginApi | null = null;
   private pendingChannelStartRegistrationMode: string | null = null;
+  private pendingChannelStartFingerprint: string | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
@@ -1358,10 +1359,14 @@ export class DkgNodePlugin {
   private queueChannelPluginStartAfterStop(api: OpenClawPluginApi, registrationMode?: string): void {
     this.pendingChannelStartApi = api;
     this.pendingChannelStartRegistrationMode = registrationMode ?? null;
+    this.pendingChannelStartFingerprint = channelConfigFingerprint(this.config.channel);
     if (this.channelPluginStartQueued) return;
     const stopWork = this.channelPluginStopInFlight;
     if (!stopWork) {
       this.startChannelPlugin(api);
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      this.pendingChannelStartFingerprint = null;
       return;
     }
     this.channelPluginStartQueued = true;
@@ -1369,9 +1374,19 @@ export class DkgNodePlugin {
       this.channelPluginStartQueued = false;
       const pendingApi = this.pendingChannelStartApi;
       const pendingRegistrationMode = this.pendingChannelStartRegistrationMode;
+      const pendingFingerprint = this.pendingChannelStartFingerprint;
       this.pendingChannelStartApi = null;
       this.pendingChannelStartRegistrationMode = null;
-      if (!stopped || !pendingApi) return;
+      this.pendingChannelStartFingerprint = null;
+      const currentChannelFingerprint = channelConfigFingerprint(this.config.channel);
+      if (
+        !stopped ||
+        !pendingApi ||
+        !this.config.channel?.enabled ||
+        currentChannelFingerprint !== pendingFingerprint
+      ) {
+        return;
+      }
       const registered = this.startChannelPlugin(pendingApi);
       if (registered && pendingRegistrationMode) {
         this.registerLocalAgentIntegration(pendingApi, pendingRegistrationMode);
@@ -1402,6 +1417,16 @@ export class DkgNodePlugin {
     // --- Channel module ---
     const channelConfig = this.config.channel;
     const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
+    if (!channelConfig?.enabled) {
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      this.pendingChannelStartFingerprint = null;
+      if (this.channelPluginStopInFlight && this.channelPlugin) {
+        void this.channelPlugin.stop({ updateGatewayStatus: true }).catch((err: any) => {
+          api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
+        });
+      }
+    }
     if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
       this.stopChannelPluginForReconfigure(api, {
         updateGatewayStatus: !channelConfig?.enabled,
@@ -1838,6 +1863,7 @@ export class DkgNodePlugin {
     this.clearLocalAgentIntegrationRetry();
     this.pendingChannelStartApi = null;
     this.pendingChannelStartRegistrationMode = null;
+    this.pendingChannelStartFingerprint = null;
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;

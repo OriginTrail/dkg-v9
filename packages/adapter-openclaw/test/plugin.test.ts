@@ -287,6 +287,60 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('cancels a queued channel restart when a later refresh disables the channel', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    let resolveStop!: () => void;
+    const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockImplementation(() => stopPromise);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: false },
+      });
+      (plugin as any).client = {};
+      (plugin as any).chatTurnWriter = {} as any;
+      const mockApi = {
+        config: {},
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((plugin as any).pendingChannelStartApi).toBeNull();
+      expect(stopSpy).toHaveBeenNthCalledWith(1, { updateGatewayStatus: false });
+      expect(stopSpy).toHaveBeenNthCalledWith(2, { updateGatewayStatus: true });
+
+      resolveStop();
+      await stopInFlight;
+
+      expect((plugin as any).channelPlugin).toBeNull();
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
   it('updates gateway status when refreshed config disables the channel module', async () => {
     const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
     const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockResolvedValue(undefined);

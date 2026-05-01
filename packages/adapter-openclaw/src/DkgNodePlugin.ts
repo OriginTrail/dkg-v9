@@ -3206,7 +3206,11 @@ export class DkgNodePlugin {
       };
     };
 
-    // Typed hooks (api.on / api.registerHook) use underscore-separated names.
+    // Typed probe candidates include the real underscore message events,
+    // installed dotted message aliases, and probe-only dotted W4a aliases
+    // such as `agent.end`. Probe-only candidates are observability guards:
+    // if live smoke shows one firing, we promote it into the real install set
+    // in a source-backed follow-up rather than assuming it dispatches.
     const typedEvents = [
       'before_prompt_build',
       'agent_end',

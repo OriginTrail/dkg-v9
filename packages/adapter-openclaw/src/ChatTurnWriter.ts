@@ -230,6 +230,9 @@ export class ChatTurnWriter {
   private messageHookDedup: Map<string, number> = new Map();
   private messageHookInboundQueueKeys: Map<string, string> = new Map();
   private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
+  private static readonly MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS = 5_000;
+  private static readonly MESSAGE_HOOK_DEDUP_MAX_ENTRIES = 2_048;
+  private messageHookLastSweepAt = 0;
   private static readonly WEAK_SESSION_PREFIX = "weak-";
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
@@ -1333,13 +1336,30 @@ export class ChatTurnWriter {
     if (!key) return false;
     const now = Date.now();
     const ttl = ChatTurnWriter.MESSAGE_HOOK_DEDUP_TTL_MS;
-    for (const [existingKey, ts] of this.messageHookDedup) {
-      if (now - ts > ttl) {
-        this.messageHookDedup.delete(existingKey);
-        this.messageHookInboundQueueKeys.delete(existingKey);
-      }
+    const existingTs = this.messageHookDedup.get(key);
+    if (existingTs !== undefined) {
+      if (now - existingTs <= ttl) return true;
+      this.messageHookDedup.delete(key);
+      this.messageHookInboundQueueKeys.delete(key);
     }
-    if (this.messageHookDedup.has(key)) return true;
+    if (
+      now - this.messageHookLastSweepAt >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS ||
+      this.messageHookDedup.size >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_MAX_ENTRIES
+    ) {
+      for (const [existingKey, ts] of this.messageHookDedup) {
+        if (now - ts > ttl) {
+          this.messageHookDedup.delete(existingKey);
+          this.messageHookInboundQueueKeys.delete(existingKey);
+        }
+      }
+      this.messageHookLastSweepAt = now;
+    }
+    while (this.messageHookDedup.size >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_MAX_ENTRIES) {
+      const oldestKey = this.messageHookDedup.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.messageHookDedup.delete(oldestKey);
+      this.messageHookInboundQueueKeys.delete(oldestKey);
+    }
     this.messageHookDedup.set(key, now);
     return false;
   }
@@ -1348,8 +1368,8 @@ export class ChatTurnWriter {
     const existing = this.parseComposedSessionId(existingKey);
     const candidate = this.parseComposedSessionId(candidateKey);
     if (!existing || !candidate) return false;
-    const existingStrong = existing.sessionKey.length > 0 && existing.sessionKey !== existing.conversationId;
-    const candidateStrong = candidate.sessionKey.length > 0 && candidate.sessionKey !== candidate.conversationId;
+    const existingStrong = existing.sessionKey.length > 0 && !this.isWeakSessionKey(existing.sessionKey);
+    const candidateStrong = candidate.sessionKey.length > 0 && !this.isWeakSessionKey(candidate.sessionKey);
     return candidateStrong && !existingStrong;
   }
 

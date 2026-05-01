@@ -826,6 +826,7 @@ function memorySlotOwnershipForApi(api: OpenClawPluginApi): MemorySlotOwnership 
   if (slots && Object.prototype.hasOwnProperty.call(slots, 'memory')) {
     return { owned: slots.memory === 'adapter-openclaw', source: 'merged-config' };
   }
+  if (mergedConfig) return undefined;
   const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);
   if (directMemoryEnabled === undefined) return undefined;
   return { owned: directMemoryEnabled, source: 'direct-plugin-config' };

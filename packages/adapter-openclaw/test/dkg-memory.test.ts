@@ -190,6 +190,17 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
+  it('does not use direct memory fallback when merged config exists without a memory slot', () => {
+    const api = makeApi();
+    delete (api.config as any).plugins.slots.memory;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+  });
+
   it('does not stamp the inactive capability when another plugin owns the memory slot', () => {
     const api = makeApi();
     plugin.register(api);

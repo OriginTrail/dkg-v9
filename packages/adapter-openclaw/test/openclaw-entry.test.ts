@@ -471,7 +471,7 @@ describe('openclaw-entry', () => {
     });
   });
 
-  it('treats fully materialized direct plugin config as an authoritative singleton refresh', async () => {
+  it('merges direct plugin config into the singleton without requiring a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -495,7 +495,7 @@ describe('openclaw-entry', () => {
       memory: { enabled: false },
       channel: { enabled: true, port: 9601 },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
     expect(instance.registerCalls).toEqual([firstApi, secondApi]);
   });
 
@@ -521,7 +521,7 @@ describe('openclaw-entry', () => {
       memory: { enabled: true },
       channel: { enabled: true },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
   it('does not let empty api.config hide runtime pluginConfig fallback', async () => {
@@ -634,7 +634,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('treats sparse direct re-registration config as a full snapshot', async () => {
+  it('treats module-shaped direct re-registration config as partial', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -648,10 +648,10 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9800',
-      channel: { port: 9801 },
+      memory: { enabled: true },
+      channel: { enabled: false, port: 9801 },
     });
-    expect(instance.config).not.toHaveProperty('memory');
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
   it('does not backfill stale runtime config when current direct config is state-only partial', async () => {

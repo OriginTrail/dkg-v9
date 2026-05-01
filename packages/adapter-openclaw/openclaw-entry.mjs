@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import {
   DkgNodePlugin,
   isObjectRecord,
-  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
 } from './dist/index.js';
@@ -14,13 +13,6 @@ let instance = null;
 const lifecycleServiceApis = new WeakMap();
 const entryAssignedWorkspaceDirs = new WeakMap();
 let lifecycleOwnerToken = null;
-const PARTIAL_DIRECT_CONFIG_KEYS = new Set([
-  'daemonUrl',
-  'dkgHome',
-  'stateDir',
-  'stateDirSource',
-  'installedWorkspace',
-]);
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -125,7 +117,7 @@ function resolveEntryConfig(api, options = {}) {
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
   const configIsPartial =
     !hasConfigSource ||
-    (entryConfigs.length === 0 && directConfigs.every(isPartialDirectAdapterConfig));
+    (entryConfigs.length === 0 && directConfigs.length > 0);
   const currentConfigSources = [
     ...currentEntryConfigs,
     ...currentDirectConfigs,
@@ -194,13 +186,6 @@ function directPluginConfigFrom(config) {
     return config;
   }
   return undefined;
-}
-
-function isPartialDirectAdapterConfig(config) {
-  if (isStateMetadataOnlyAdapterConfig(config)) return true;
-  if (!looksLikeAdapterPluginConfig(config)) return false;
-  const keys = Object.keys(config);
-  return keys.length > 0 && keys.every((key) => PARTIAL_DIRECT_CONFIG_KEYS.has(key));
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

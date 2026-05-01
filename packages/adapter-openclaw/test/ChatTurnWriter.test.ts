@@ -454,6 +454,61 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - in-flight weak W4b completion writes to promoted session state", async () => {
+    let releaseStore: (() => void) | null = null;
+    let storeStarted = false;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      storeStarted = true;
+      await new Promise<void>((resolve) => { releaseStore = resolve; });
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "late weak q", metadata: { messageId: "late-weak-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-late" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "late weak a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-late" },
+    );
+    await flushMicrotasks();
+    expect(storeStarted).toBe(true);
+
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-late");
+    const weakSessionId = `openclaw:telegram:bot:chat-late:${weakSessionKey}`;
+    const strongSessionId = "openclaw:telegram:bot:chat-late:real-sk";
+    expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(true);
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "late weak q" },
+        { role: "assistant", content: "late weak a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-late", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(false);
+    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(true);
+
+    releaseStore!();
+    await writer.flush();
+
+    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+    expect((writer as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
+    expect((writer as any).crossPathInflight.size).toBe(0);
+
+    await writer.onBeforeReset({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-late",
+      sessionKey: "real-sk",
+    });
+    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((writer as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+  });
+
   it("T359 - typed endpoint-only events without session identity are dropped", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "endpoint-only q" },

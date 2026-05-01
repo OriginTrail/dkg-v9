@@ -183,6 +183,7 @@ export class ChatTurnWriter {
   // persist jobs here, otherwise the reset assumption "all persists for
   // this session are tracked" is silently violated.
   private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
+  private promotedSessionIds: Map<string, string> = new Map();
   // Per-session reset promises. `onAgentEnd` / `onMessageSent` await these
   // before processing so a compacted message array can't be read against
   // a stale watermark while the reset is still draining.
@@ -695,13 +696,26 @@ export class ChatTurnWriter {
     const job = run();
     bucket.add(job);
     job.finally(() => {
-      const b = this.inFlightPersists.get(sessionId);
-      if (b) {
-        b.delete(job);
-        if (b.size === 0) this.inFlightPersists.delete(sessionId);
-      }
+      this.deleteTrackedPersistJob(sessionId, job);
     }).catch(() => {});
     return job;
+  }
+
+  private deleteTrackedPersistJob(sessionId: string, job: Promise<void>): void {
+    const candidates = new Set([sessionId, this.resolvePromotedSessionId(sessionId)]);
+    let removed = false;
+    for (const candidate of candidates) {
+      const bucket = this.inFlightPersists.get(candidate);
+      if (!bucket) continue;
+      removed = bucket.delete(job) || removed;
+      if (bucket.size === 0) this.inFlightPersists.delete(candidate);
+    }
+    if (removed) return;
+    for (const [key, bucket] of Array.from(this.inFlightPersists.entries())) {
+      if (!bucket.delete(job)) continue;
+      if (bucket.size === 0) this.inFlightPersists.delete(key);
+      break;
+    }
   }
 
   async onBeforeCompaction(event: any, ctx?: any): Promise<void> {
@@ -889,6 +903,7 @@ export class ChatTurnWriter {
       // N turns" no longer maps to the new pair indices. Leaving stale
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
+      this.clearSessionPromotionAliases(sessionId);
     }
     this.clearMessageHookDedupForSessions(ids);
     // External markers record daemon-success facts from direct-channel
@@ -1168,13 +1183,14 @@ export class ChatTurnWriter {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
             daemonPersisted = true;
+            const completionSessionId = this.resolvePromotedSessionId(sessionId);
             // Post-success: stamp the content-only `w4bOrigin` key on
             // the SHORT-TTL cross-path map (T5) so a later W4a
             // `agent_end` last-pair peek can see that W4b already
             // persisted THIS turn and skip + bumpWatermark, but a
             // repeated same-content turn arriving outside the 5s
             // cross-path window doesn't false-dedup against this stamp.
-            this.markCrossPathStamp(sessionId, this.w4bOriginKey(userText, assistantText));
+            this.markCrossPathStamp(completionSessionId, this.w4bOriginKey(userText, assistantText));
             // R18.2 — Track the W4b session count so a later `agent_end`
             // (typically after a `setup-runtime → full` upgrade) sees a
             // raised `savedUpTo` floor in `computeDelta` and doesn't
@@ -1191,8 +1207,8 @@ export class ChatTurnWriter {
             // that ran out of pending users on chunk 1.
             if (userText) {
               this.w4bSessionCounts.set(
-                sessionId,
-                (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
+                completionSessionId,
+                (this.w4bSessionCounts.get(completionSessionId) ?? 0) + 1,
               );
               // T17 — Persist the new count to disk via the
               // debounced flush so a process restart preserves
@@ -1202,8 +1218,8 @@ export class ChatTurnWriter {
               // backfill (count resets to 0, watermark file is
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
-              if (!this.commitWatermarkStateSync(sessionId)) {
-                this.scheduleWatermarkFlush(sessionId, { retryOnFailure: true, attempts: 3 });
+              if (!this.commitWatermarkStateSync(completionSessionId)) {
+                this.scheduleWatermarkFlush(completionSessionId, { retryOnFailure: true, attempts: 3 });
                 throw new Error("Failed to write W4b chat-turn watermark");
               }
             }
@@ -1228,18 +1244,21 @@ export class ChatTurnWriter {
             // next outbound will collapse the full queue (old items +
             // new) into one user-side, matching W4a's pairing.
             if (queuedItems.length > 0) {
-              const restored = this.pendingUserMessages.get(conversationKey) ?? [];
+              const restoreKey = this.resolvePromotedSessionId(conversationKey);
+              const restored = this.pendingUserMessages.get(restoreKey) ?? [];
               restored.unshift(...queuedItems);
-              this.pendingUserMessages.set(conversationKey, restored);
-              const restoredMeta = this.pendingUserMessageMeta.get(conversationKey) ?? [];
+              this.pendingUserMessages.set(restoreKey, restored);
+              const restoredMeta = this.pendingUserMessageMeta.get(restoreKey) ?? [];
               restoredMeta.unshift(...queuedMeta);
-              this.pendingUserMessageMeta.set(conversationKey, restoredMeta);
+              this.pendingUserMessageMeta.set(restoreKey, restoredMeta);
             }
             // Release the in-flight reservation so a retry can proceed.
             // No `w4bOrigin` release needed — we don't stamp it pre-persist
             // anymore; only stamping happens post-success above.
             if (outboundDedupKey) this.deleteMessageHookDedupKey(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
+            const failureSessionId = this.resolvePromotedSessionId(sessionId);
+            if (failureSessionId !== sessionId) this.releaseTurnIdReservation(failureSessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
             // T10 — Always release the cross-path in-flight reservation,
@@ -1248,6 +1267,8 @@ export class ChatTurnWriter {
             // 5s post-success window; on failure the reservation must
             // not leak to block legitimate later same-content turns.
             this.unmarkCrossPathInflight(sessionId, w4bOriginKey);
+            const finalSessionId = this.resolvePromotedSessionId(sessionId);
+            if (finalSessionId !== sessionId) this.unmarkCrossPathInflight(finalSessionId, w4bOriginKey);
           }
         }).catch(() => {});
       }
@@ -1444,8 +1465,12 @@ export class ChatTurnWriter {
   }
 
   private promoteSessionState(fromSessionId: string, strongSessionId: string): void {
+    this.recordSessionPromotion(fromSessionId, strongSessionId);
     let changed = false;
     let durableChanged = false;
+    if (this.promoteInFlightPersists(fromSessionId, strongSessionId)) {
+      changed = true;
+    }
     if (this.pendingUserMessages.has(fromSessionId) || this.pendingUserMessageMeta.has(fromSessionId)) {
       this.movePendingInboundQueue(fromSessionId, strongSessionId);
       changed = true;
@@ -1496,6 +1521,47 @@ export class ChatTurnWriter {
         fromSessionId,
         strongSessionId,
       });
+    }
+  }
+
+  private recordSessionPromotion(fromSessionId: string, strongSessionId: string): void {
+    const resolvedStrongSessionId = this.resolvePromotedSessionId(strongSessionId);
+    if (!fromSessionId || fromSessionId === resolvedStrongSessionId) return;
+    this.promotedSessionIds.set(fromSessionId, resolvedStrongSessionId);
+    for (const [alias, target] of Array.from(this.promotedSessionIds.entries())) {
+      if (target === fromSessionId) this.promotedSessionIds.set(alias, resolvedStrongSessionId);
+    }
+  }
+
+  private resolvePromotedSessionId(sessionId: string): string {
+    let current = sessionId;
+    const seen = new Set<string>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const next = this.promotedSessionIds.get(current);
+      if (!next || next === current) break;
+      current = next;
+    }
+    if (current && current !== sessionId) this.promotedSessionIds.set(sessionId, current);
+    return current || sessionId;
+  }
+
+  private promoteInFlightPersists(fromSessionId: string, strongSessionId: string): boolean {
+    const source = this.inFlightPersists.get(fromSessionId);
+    if (!source || source.size === 0) {
+      this.inFlightPersists.delete(fromSessionId);
+      return false;
+    }
+    const target = this.inFlightPersists.get(strongSessionId) ?? new Set<Promise<void>>();
+    for (const job of source) target.add(job);
+    this.inFlightPersists.set(strongSessionId, target);
+    this.inFlightPersists.delete(fromSessionId);
+    return true;
+  }
+
+  private clearSessionPromotionAliases(sessionId: string): void {
+    for (const [from, to] of Array.from(this.promotedSessionIds.entries())) {
+      if (from === sessionId || to === sessionId) this.promotedSessionIds.delete(from);
     }
   }
 

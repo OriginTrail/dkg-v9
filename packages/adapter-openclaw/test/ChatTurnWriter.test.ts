@@ -580,7 +580,7 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("older weak inbound\nlater strong inbound");
   });
 
-  it("T359 - in-flight conversationless W4b completion writes to promoted session state", async () => {
+  it("T359 - in-flight conversationless W4b completion avoids promoted durable counts", async () => {
     let releaseStore: (() => void) | null = null;
     let storeStarted = false;
     mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
@@ -619,8 +619,8 @@ describe("ChatTurnWriter", () => {
     releaseStore!();
     await writer.flush();
 
-    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
-    expect((writer as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
     expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
     expect((writer as any).crossPathInflight.size).toBe(0);
 
@@ -630,8 +630,7 @@ describe("ChatTurnWriter", () => {
       conversationId: "chat-late",
       sessionKey: "real-sk",
     });
-    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
-    expect((writer as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+    expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
   });
 
   it("T359 - conversationless promotion does not become a standing alias", async () => {
@@ -670,7 +669,8 @@ describe("ChatTurnWriter", () => {
 
     releaseStore!();
     await writer.flush();
-    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
 
     mockClient.storeChatTurn.mockClear();
     writer.onTypedMessageReceived(
@@ -685,8 +685,8 @@ describe("ChatTurnWriter", () => {
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(conversationlessSessionId);
-    expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
-    expect((writer as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+    expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(2);
+    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
   });
 
   it("T359 - typed endpoint-only events without session identity are dropped", async () => {
@@ -724,15 +724,16 @@ describe("ChatTurnWriter", () => {
     restarted.onAgentEnd({
       sessionId: "test",
       messages: [
-        { role: "user", content: "strong typed q" },
+        { role: "user", content: "strong typed q", metadata: { messageId: "strong-in-1" } },
         { role: "assistant", content: "strong typed a" },
       ],
     }, { channelId: "telegram", accountId: "bot", conversationId: "chat-real", sessionKey: "real-sk" });
     await flushMicrotasks();
 
     const strongSessionId = "openclaw:telegram:bot:chat-real:real-sk";
-    expect((restarted as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
-    expect((restarted as any).w4bSessionCounts.has(conversationlessSessionId)).toBe(false);
+    expect((restarted as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+    expect((restarted as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(1);
+    expect((restarted as any).cachedWatermarks.get(strongSessionId)).toBe(0);
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
   });
 
@@ -789,6 +790,36 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][3]?.turnId).not.toBe(
       mockClient.storeChatTurn.mock.calls[1][3]?.turnId,
     );
+  });
+
+  it("T359 - conversationless message-id dedupe is scoped by session key", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "session A q", metadata: { messageId: "local-in-1" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "sk-A" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-2", content: "session B q", metadata: { messageId: "local-in-1" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "sk-B" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "session A a", success: true },
+      { channelId: "telegram", accountId: "bot", sessionKey: "sk-A" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-2", content: "session B a", success: true },
+      { channelId: "telegram", accountId: "bot", sessionKey: "sk-B" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => call[0])).toEqual([
+      "openclaw:telegram:bot::sk-A",
+      "openclaw:telegram:bot::sk-B",
+    ]);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => call[1])).toEqual([
+      "session A q",
+      "session B q",
+    ]);
   });
 
   it("T359 - reset clears only the affected session's message-hook dedupe", async () => {

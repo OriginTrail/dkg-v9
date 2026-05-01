@@ -16,7 +16,7 @@ import { createHash } from "crypto";
  * when typed `agent_end` is silent. Those events are normalized into the W4b
  * envelope and deduped against internal `message:received/message:sent` by
  * channel/account/conversation/messageId, outside the Node-UI marker space.
- * Weak W4b replay markers are additionally bound to provider message IDs so
+ * Typed W4b replay markers are additionally bound to provider message IDs so
  * same-text repeats in one transcript do not suppress the wrong occurrence.
  */
 
@@ -514,7 +514,7 @@ export class ChatTurnWriter {
     if (!sessionId) return;
     const identity = this.identityFieldsFromPayload(ctx);
     const externalCursorKey = this.externalCursorKeyFromSessionKey(identity.sessionKey);
-    const weakConversationCursorKey = this.weakConversationCursorKey(identity);
+    const typedW4bCursorKeys = this.typedW4bMarkerCursorKeys(identity);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -534,7 +534,7 @@ export class ChatTurnWriter {
       .catch(() => undefined)
       .then(async () => {
         if (resetAtSchedule) await resetAtSchedule;
-        await this.runAgentEndPersist(event, sessionId, externalCursorKey, weakConversationCursorKey);
+        await this.runAgentEndPersist(event, sessionId, externalCursorKey, typedW4bCursorKeys);
       });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
@@ -553,7 +553,7 @@ export class ChatTurnWriter {
     event: AgentEndContext,
     sessionId: string,
     externalCursorKey?: string,
-    weakConversationCursorKey?: string,
+    typedW4bCursorKeys: string[] = [],
   ): Promise<void> {
     try {
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
@@ -598,20 +598,23 @@ export class ChatTurnWriter {
             }
             if (externalMarkerAction.skip) continue;
           }
-          const weakMarker = weakConversationCursorKey
-            ? this.weakW4bExternalMarkerIds(user, assistant, messageIds)
-              .find((marker) => this.hasExternalTurnMarker(weakConversationCursorKey, marker)) ?? ""
-            : "";
-          if (weakConversationCursorKey && weakMarker && this.hasExternalTurnMarker(weakConversationCursorKey, weakMarker)) {
-            const previousWeakMarkerCount =
-              this.externalTurnMarkers.get(weakConversationCursorKey)?.get(weakMarker) ?? 0;
+          const typedW4bMarkerHit = this.findTypedW4bExternalMarker(
+            typedW4bCursorKeys,
+            user,
+            assistant,
+            messageIds,
+          );
+          if (typedW4bMarkerHit) {
+            const { cursorKey, marker } = typedW4bMarkerHit;
+            const previousTypedMarkerCount =
+              this.externalTurnMarkers.get(cursorKey)?.get(marker) ?? 0;
             const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
-            this.consumeExternalTurnMarker(weakConversationCursorKey, weakMarker);
+            this.consumeExternalTurnMarker(cursorKey, marker);
             this.bumpWatermark(sessionId, pairIndex);
             if (!this.commitWatermarkStateSync(sessionId)) {
-              this.restoreExternalTurnMarkerCount(weakConversationCursorKey, weakMarker, previousWeakMarkerCount);
+              this.restoreExternalTurnMarkerCount(cursorKey, marker, previousTypedMarkerCount);
               this.restoreWatermarkState(sessionId, watermarkSnapshot);
-              throw new Error("Failed to write weak W4b chat-turn marker consumption");
+              throw new Error("Failed to write typed W4b chat-turn marker consumption");
             }
             continue;
           }
@@ -1224,10 +1227,10 @@ export class ChatTurnWriter {
             // repeated same-content turn arriving outside the 5s
             // cross-path window doesn't false-dedup against this stamp.
             this.markCrossPathStamp(completionSessionId, this.w4bOriginKey(userText, assistantText));
-            // R18.2 — Track the W4b session count so a later `agent_end`
-            // (typically after a `setup-runtime → full` upgrade) sees a
-            // raised `savedUpTo` floor in `computeDelta` and doesn't
-            // re-persist turns W4b already wrote.
+            // R18.2 — Track the W4b session count under the durable session
+            // we can prove. Conversationless typed turns keep their isolated
+            // conversationless count and add per-message markers; promotion
+            // must not copy that count into the first later concrete chat.
             // R20.2 — Only count when the persist consumed BOTH a user
             // message and assistant text — i.e. it represents a complete
             // logical turn pair as `computeDelta` would emit. Counting
@@ -1239,26 +1242,28 @@ export class ChatTurnWriter {
             // additional `userText` check here filters chunk-2+ deliveries
             // that ran out of pending users on chunk 1.
             if (userText) {
-              this.w4bSessionCounts.set(
-                completionSessionId,
-                (this.w4bSessionCounts.get(completionSessionId) ?? 0) + 1,
-              );
-              this.markWeakW4bTurnPersisted(
-                completionSessionId,
+              const durableSessionId = this.promotedDurableW4bSessionId(sessionId, completionSessionId);
+              const markerChanged = this.markTypedW4bTurnPersisted(
+                durableSessionId,
                 userText,
                 assistantText,
-                this.w4bWeakMarkerOccurrences(w4bDiscriminator, queuedMeta),
+                this.typedW4bMarkerOccurrences(w4bDiscriminator, queuedMeta),
               );
-              // T17 — Persist the new count to disk via the
-              // debounced flush so a process restart preserves
-              // the "skip these pairs in computeDelta" floor.
+              const countChanged = true;
+              this.w4bSessionCounts.set(
+                durableSessionId,
+                (this.w4bSessionCounts.get(durableSessionId) ?? 0) + 1,
+              );
+              // T17 — Persist the new count/marker to disk via the
+              // debounced flush so a process restart preserves the
+              // "skip these pairs in computeDelta" fact.
               // Without this, setup-runtime → restart → upgrade
               // to full would replay every W4b-persisted turn as
               // backfill (count resets to 0, watermark file is
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
-              if (!this.commitWatermarkStateSync(completionSessionId)) {
-                this.scheduleWatermarkFlush(completionSessionId, { retryOnFailure: true, attempts: 3 });
+              if ((markerChanged || countChanged) && !this.commitWatermarkStateSync(durableSessionId)) {
+                this.scheduleWatermarkFlush(durableSessionId, { retryOnFailure: true, attempts: 3 });
                 throw new Error("Failed to write W4b chat-turn watermark");
               }
             }
@@ -1362,16 +1367,19 @@ export class ChatTurnWriter {
     if (channelId === "dkg-ui") return "";
     const accountId = firstString(ctx.accountId) ?? "";
     const conversationId = firstString(ctx.conversationId) ?? "";
+    const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
     const messageId = this.messageEventId(ev);
     if (messageId) {
+      const identityParts = conversationId
+        ? [channelId, accountId, conversationId, messageId]
+        : [channelId, accountId, conversationId, sessionKey, messageId];
       return [
         "message-hook",
         direction,
         "msg",
-        this.identityHash([channelId, accountId, conversationId, messageId]),
+        this.identityHash(identityParts),
       ].join("::");
     }
-    const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
     if (direction === "outbound") {
       const inboundIds = pendingMeta
         .map((meta) => meta.messageId)
@@ -1513,30 +1521,6 @@ export class ChatTurnWriter {
       this.movePendingInboundQueue(fromSessionId, strongSessionId);
       changed = true;
     }
-    const weakWatermark = this.cachedWatermarks.get(fromSessionId);
-    if (weakWatermark !== undefined) {
-      this.cachedWatermarks.set(strongSessionId, Math.max(this.cachedWatermarks.get(strongSessionId) ?? -1, weakWatermark));
-      this.cachedWatermarks.delete(fromSessionId);
-      changed = true;
-      durableChanged = true;
-    }
-    const weakW4bCount = this.w4bSessionCounts.get(fromSessionId);
-    if (weakW4bCount !== undefined) {
-      this.w4bSessionCounts.set(strongSessionId, Math.max(this.w4bSessionCounts.get(strongSessionId) ?? 0, weakW4bCount));
-      this.w4bSessionCounts.delete(fromSessionId);
-      changed = true;
-      durableChanged = true;
-    }
-    const weakTimer = this.debounceTimers.get(fromSessionId);
-    if (weakTimer) {
-      clearTimeout(weakTimer.timer);
-      this.debounceTimers.delete(fromSessionId);
-      const existingStrongTimer = this.debounceTimers.get(strongSessionId);
-      const promotedIndex = Math.max(existingStrongTimer?.pendingIndex ?? -1, weakTimer.pendingIndex);
-      this.saveWatermark(strongSessionId, promotedIndex);
-      changed = true;
-      durableChanged = true;
-    }
     for (const [dedupKey, queueKey] of this.messageHookInboundQueueKeys.entries()) {
       if (queueKey === fromSessionId) {
         this.messageHookInboundQueueKeys.set(dedupKey, strongSessionId);
@@ -1564,6 +1548,16 @@ export class ChatTurnWriter {
 
   private resolvePromotedPersistJobSession(sessionId: string, job?: Promise<void>): string {
     return job ? this.promotedPersistJobs.get(job) ?? sessionId : sessionId;
+  }
+
+  private promotedDurableW4bSessionId(originalSessionId: string, completionSessionId: string): string {
+    if (originalSessionId === completionSessionId) return completionSessionId;
+    const original = this.parseComposedSessionId(originalSessionId);
+    const completion = this.parseComposedSessionId(completionSessionId);
+    if (original && completion && !original.conversationId && completion.conversationId) {
+      return originalSessionId;
+    }
+    return completionSessionId;
   }
 
   private promoteInFlightPersists(fromSessionId: string, strongSessionId: string): boolean {
@@ -2166,32 +2160,52 @@ export class ChatTurnWriter {
     return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
-  private weakW4bExternalMarkerId(user: string, assistant: string, occurrence: string): string {
+  private typedW4bExternalMarkerId(user: string, assistant: string, occurrence: string): string {
     if (!occurrence) return "";
     return `weak-w4b::${this.identityHash([occurrence])}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
   }
 
-  private weakW4bExternalMarkerIds(user: string, assistant: string, messageIds: string[]): string[] {
+  private typedW4bExternalMarkerIds(user: string, assistant: string, messageIds: string[]): string[] {
     const occurrence = this.w4bInboundMessageDiscriminator(messageIds);
-    const marker = this.weakW4bExternalMarkerId(user, assistant, occurrence);
+    const marker = this.typedW4bExternalMarkerId(user, assistant, occurrence);
     return marker ? [marker] : [];
   }
 
-  private markWeakW4bTurnPersisted(
+  private findTypedW4bExternalMarker(
+    cursorKeys: string[],
+    user: string,
+    assistant: string,
+    messageIds: string[],
+  ): { cursorKey: string; marker: string } | null {
+    const markers = this.typedW4bExternalMarkerIds(user, assistant, messageIds);
+    for (const cursorKey of cursorKeys) {
+      for (const marker of markers) {
+        if (this.hasExternalTurnMarker(cursorKey, marker)) return { cursorKey, marker };
+      }
+    }
+    return null;
+  }
+
+  private markTypedW4bTurnPersisted(
     sessionId: string,
     user: string,
     assistant: string,
     occurrences: string[],
-  ): void {
-    const cursor = this.weakConversationCursorKeyFromSessionId(sessionId);
-    if (!cursor) return;
-    const bucket = this.externalTurnMarkers.get(cursor) ?? new Map<string, number>();
-    for (const occurrence of occurrences) {
-      const marker = this.weakW4bExternalMarkerId(user, assistant, occurrence);
-      if (!marker) continue;
-      bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+  ): boolean {
+    const cursors = this.typedW4bMarkerCursorKeysFromSessionId(sessionId);
+    if (cursors.length === 0) return false;
+    let changed = false;
+    for (const cursor of cursors) {
+      const bucket = this.externalTurnMarkers.get(cursor) ?? new Map<string, number>();
+      for (const occurrence of occurrences) {
+        const marker = this.typedW4bExternalMarkerId(user, assistant, occurrence);
+        if (!marker) continue;
+        bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+        changed = true;
+      }
+      if (bucket.size > 0) this.externalTurnMarkers.set(cursor, bucket);
     }
-    if (bucket.size > 0) this.externalTurnMarkers.set(cursor, bucket);
+    return changed;
   }
 
   private consumeExternalTurnMarkersForPair(
@@ -2360,7 +2374,7 @@ export class ChatTurnWriter {
     return `in::${this.identityHash(ids)}`;
   }
 
-  private w4bWeakMarkerOccurrences(
+  private typedW4bMarkerOccurrences(
     discriminator: string,
     pendingMeta: PendingUserMessageMeta[],
   ): string[] {
@@ -2548,6 +2562,44 @@ export class ChatTurnWriter {
     const parsed = this.parseComposedSessionId(sessionId);
     if (!parsed || !this.isWeakSessionKey(parsed.sessionKey) || !parsed.conversationId) return "";
     return `openclaw:weak:${this.identityHash([parsed.channelId, parsed.accountId, parsed.conversationId])}`;
+  }
+
+  private conversationlessSessionCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    sessionKey?: string;
+  }): string {
+    if (!parts.channelId || !parts.sessionKey || this.isWeakSessionKey(parts.sessionKey)) return "";
+    return `openclaw:session:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.sessionKey)),
+    ])}`;
+  }
+
+  private conversationlessSessionCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || parsed.conversationId || this.isWeakSessionKey(parsed.sessionKey)) return "";
+    return `openclaw:session:${this.identityHash([parsed.channelId, parsed.accountId, parsed.sessionKey])}`;
+  }
+
+  private typedW4bMarkerCursorKeys(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string[] {
+    return Array.from(new Set([
+      this.weakConversationCursorKey(parts),
+      this.conversationlessSessionCursorKey(parts),
+    ].filter((key) => key.length > 0)));
+  }
+
+  private typedW4bMarkerCursorKeysFromSessionId(sessionId: string): string[] {
+    return Array.from(new Set([
+      this.weakConversationCursorKeyFromSessionId(sessionId),
+      this.conversationlessSessionCursorKeyFromSessionId(sessionId),
+    ].filter((key) => key.length > 0)));
   }
 
   private collectResetSessionIds(identity: {

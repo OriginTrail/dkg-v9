@@ -1251,7 +1251,7 @@ async function _performUpdateInner(
       log,
     });
     let usedFullBuildFallback = false;
-    let hasRuntimeBuildScript = false;
+    let runtimeBuildCommand = "pnpm build";
     try {
       const rootPkgRaw = await readFile(
         join(targetDir, "package.json"),
@@ -1260,17 +1260,20 @@ async function _performUpdateInner(
       const rootPkg = JSON.parse(rootPkgRaw) as {
         scripts?: Record<string, string>;
       };
-      hasRuntimeBuildScript =
-        typeof rootPkg.scripts?.["build:runtime"] === "string";
+      if (typeof rootPkg.scripts?.["build:runtime:packages"] === "string") {
+        runtimeBuildCommand = "pnpm build:runtime:packages";
+      } else if (typeof rootPkg.scripts?.["build:runtime"] === "string") {
+        runtimeBuildCommand = "pnpm build:runtime";
+      }
     } catch {
-      hasRuntimeBuildScript = false;
+      runtimeBuildCommand = "pnpm build";
     }
 
-    if (hasRuntimeBuildScript) {
-      await runBuildStep(execAsync, "pnpm build:runtime", {
+    if (runtimeBuildCommand !== "pnpm build") {
+      await runBuildStep(execAsync, runtimeBuildCommand, {
         cwd: targetDir,
         timeoutMs: timeouts.build,
-        label: "pnpm build:runtime",
+        label: runtimeBuildCommand,
         log,
       });
     } else {

@@ -128,7 +128,7 @@ dkg update 9.0.0-beta.2 --allow-prerelease --no-verify-tag
 
 ## 7) Post-update verification
 
-`build:runtime` builds runtime packages and the Node UI static bundle. Git-based blue-green updates also verify `packages/node-ui/dist-ui/index.html` before activation, so nodes updating from an older updater still prepare the UI through the target ref's build script.
+Git-based blue-green updates run runtime packages and the Node UI static bundle as separate timed build steps, then verify `packages/node-ui/dist-ui/index.html` before activation. `build:runtime` remains a UI-inclusive compatibility wrapper so nodes updating from an older updater still prepare the UI through the target ref's build script.
 
 After each update:
 

@@ -18,6 +18,8 @@ const MOCK_BUNDLER_SCRIPT = [
   "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
   "export const PYINSTALLER_VERSION = '6.19.0';",
 ].join('\n');
+const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
+const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
 const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
 const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
 let mockBundledCliPackageVersion = CLI_VERSION;
@@ -65,7 +67,7 @@ let openSyncCalls: any[][] = [];
 let closeSyncCalls: any[][] = [];
 let writeFileSyncCalls: any[][] = [];
 let unlinkSyncCalls: any[][] = [];
-let execCalls: { cmd: string; cwd: string }[] = [];
+let execCalls: { cmd: string; cwd: string; timeout?: number }[] = [];
 let execFileCalls: { file: string; args: string[]; cwd: string; env: any }[] = [];
 let swapSlotCalls: string[] = [];
 let fetchCalls: any[][] = [];
@@ -163,7 +165,7 @@ function installMocks() {
   _autoUpdateIo.writeFileSync = ((...args: any[]) => { writeFileSyncCalls.push(args); }) as any;
   _autoUpdateIo.unlinkSync = ((...args: any[]) => { unlinkSyncCalls.push(args); }) as any;
   _autoUpdateIo.exec = (async (cmd: any, opts?: any) => {
-    execCalls.push({ cmd: String(cmd), cwd: normalizePathString(opts?.cwd) });
+    execCalls.push({ cmd: String(cmd), cwd: normalizePathString(opts?.cwd), timeout: opts?.timeout });
     return execImpl(String(cmd), opts);
   }) as any;
   _autoUpdateIo.execFile = (async (file: any, args: any[], opts?: any) => {
@@ -219,6 +221,10 @@ function mockGitUpdateReadFile(
   currentCommit = 'aaa111',
   cliVersion = '9.0.0',
   nodeUiPackageName = '@origintrail-official/dkg-node-ui',
+  rootScripts: Record<string, string> = {
+    'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
+    'build:runtime': RUNTIME_BUILD_CMD,
+  },
 ) {
   readFileImpl = async (path: any) => {
     const p = normalizePathString(path);
@@ -229,7 +235,7 @@ function mockGitUpdateReadFile(
       });
     }
     if (p.endsWith('/package.json') && !p.endsWith('/packages/cli/package.json')) {
-      return JSON.stringify({ scripts: { 'build:runtime': 'pnpm build:runtime' } });
+      return JSON.stringify({ scripts: rootScripts });
     }
     if (p.endsWith('/packages/cli/package.json')) {
       return JSON.stringify({ version: cliVersion });
@@ -243,6 +249,7 @@ function getExecCalls() {
   return execCalls.map(c => ({
     cmd: c.cmd,
     cwd: c.cwd,
+    timeout: c.timeout,
   }));
 }
 
@@ -382,7 +389,7 @@ describe('blue-green checkForUpdate', () => {
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
   });
 
-  it('runs the Node UI static build after the runtime build before swapping', async () => {
+  it('runs the Node UI static build after the runtime package build before swapping', async () => {
     const current = 'aaa111';
     const latest = 'bbb224';
     mockGitUpdateReadFile(current);
@@ -402,11 +409,15 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(true);
 
     const targetDir = '/tmp/dkg-test/releases/b';
-    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
-    const runtimeIdx = allCmds.indexOf('pnpm build:runtime');
+    const targetCalls = getExecCalls().filter(c => c.cwd === targetDir);
+    const allCmds = targetCalls.map(c => c.cmd);
+    const runtimeIdx = allCmds.indexOf(RUNTIME_PACKAGES_BUILD_CMD);
     const uiIdx = allCmds.indexOf(NODE_UI_BUILD_CMD);
     expect(runtimeIdx).toBeGreaterThanOrEqual(0);
     expect(uiIdx).toBeGreaterThan(runtimeIdx);
+    expect(targetCalls.find(c => c.cmd === RUNTIME_PACKAGES_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(targetCalls.find(c => c.cmd === NODE_UI_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(allCmds).not.toContain(RUNTIME_BUILD_CMD);
     expect(swapSlotCalls).toContain('b');
     expect(rmCalls.some(([p]) =>
       normalizePathString(p).endsWith('/packages/node-ui/dist-ui'),
@@ -414,6 +425,23 @@ describe('blue-green checkForUpdate', () => {
     expect(existsSyncCalls.some(([p]) =>
       normalizePathString(p).endsWith('/packages/node-ui/dist-ui/index.html')
     )).toBe(true);
+  });
+
+  it('falls back to build:runtime when the target lacks the runtime-only package script', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb224-runtime-wrapper';
+    mockGitUpdateReadFile(current, '9.0.0', '@origintrail-official/dkg-node-ui', {
+      'build:runtime': RUNTIME_BUILD_CMD,
+    });
+    makeFetchOk(latest);
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
+    expect(allCmds).toContain(RUNTIME_BUILD_CMD);
+    expect(allCmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
   });
 
   it('uses the Node UI workspace package name from the target slot', async () => {

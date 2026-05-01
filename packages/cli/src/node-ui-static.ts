@@ -12,12 +12,37 @@ export const NODE_UI_STATIC_BUILD_COMMAND = nodeUiStaticBuildCommand();
 
 export const NODE_UI_STATIC_BUILD_LABEL = nodeUiStaticBuildLabel();
 
+export const RUNTIME_PACKAGES_BUILD_COMMAND = 'pnpm build:runtime:packages';
+export const RUNTIME_BUILD_COMMAND = 'pnpm build:runtime';
+export const FULL_BUILD_COMMAND = 'pnpm build';
+
+export function runtimeBuildCommandFromPackageJson(raw: string): string {
+  try {
+    const rootPkg = JSON.parse(raw) as {
+      scripts?: Record<string, string>;
+    };
+    if (typeof rootPkg.scripts?.['build:runtime:packages'] === 'string') {
+      return RUNTIME_PACKAGES_BUILD_COMMAND;
+    }
+    if (typeof rootPkg.scripts?.['build:runtime'] === 'string') {
+      return RUNTIME_BUILD_COMMAND;
+    }
+  } catch {
+    // Fall through to the broad build command when metadata is unreadable.
+  }
+  return FULL_BUILD_COMMAND;
+}
+
 export function nodeUiPackageJsonPath(slotDir: string): string {
   return join(slotDir, 'packages', 'node-ui', 'package.json');
 }
 
+export function nodeUiStaticDistPath(slotDir: string): string {
+  return join(slotDir, 'packages', 'node-ui', 'dist-ui');
+}
+
 export function nodeUiStaticIndexPath(slotDir: string): string {
-  return join(slotDir, 'packages', 'node-ui', 'dist-ui', 'index.html');
+  return join(nodeUiStaticDistPath(slotDir), 'index.html');
 }
 
 export function nodeUiStaticIndexPaths(slotDir: string): string[] {

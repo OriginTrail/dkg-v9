@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { nodeUiNpmStaticIndexPaths, nodeUiStaticIndexPaths } from '../src/node-ui-static.js';
+import {
+  runtimeBuildCommandFromPackageJson,
+  nodeUiNpmStaticIndexPaths,
+  nodeUiStaticIndexPaths,
+} from '../src/node-ui-static.js';
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/');
@@ -32,5 +36,26 @@ describe('nodeUiStaticIndexPaths', () => {
 
     expect(paths).toContain('/tmp/dkg-test/releases/b/node_modules/@origintrail-official/dkg-node-ui/dist-ui/index.html');
     expect(paths.some((path) => path.includes('/@dkg/node-ui/'))).toBe(false);
+  });
+});
+
+describe('runtimeBuildCommandFromPackageJson', () => {
+  it('prefers the runtime-only package build script when present', () => {
+    expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      scripts: {
+        'build:runtime:packages': '...',
+        'build:runtime': '...',
+      },
+    }))).toBe('pnpm build:runtime:packages');
+  });
+
+  it('falls back across build:runtime and pnpm build', () => {
+    expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      scripts: { 'build:runtime': '...' },
+    }))).toBe('pnpm build:runtime');
+    expect(runtimeBuildCommandFromPackageJson(JSON.stringify({
+      scripts: { build: 'turbo build' },
+    }))).toBe('pnpm build');
+    expect(runtimeBuildCommandFromPackageJson('not json')).toBe('pnpm build');
   });
 });

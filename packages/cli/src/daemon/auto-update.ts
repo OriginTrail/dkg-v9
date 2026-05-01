@@ -46,6 +46,7 @@ import {
   readCliPackageVersion,
 } from '../extraction/markitdown-bundle-metadata.js';
 import {
+  FULL_BUILD_COMMAND,
   NODE_UI_PACKAGE_NAME_FALLBACKS,
   nodeUiPackageJsonPath,
   nodeUiPackageNamesFromCliPackageJson,
@@ -54,6 +55,7 @@ import {
   nodeUiStaticBuildCommand,
   nodeUiStaticBuildLabel,
   nodeUiStaticIndexPath,
+  runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
 
 const execAsync = promisify(exec);
@@ -1251,25 +1253,18 @@ async function _performUpdateInner(
       log,
     });
     let usedFullBuildFallback = false;
-    let runtimeBuildCommand = "pnpm build";
+    let runtimeBuildCommand = FULL_BUILD_COMMAND;
     try {
       const rootPkgRaw = await readFile(
         join(targetDir, "package.json"),
         "utf-8",
       );
-      const rootPkg = JSON.parse(rootPkgRaw) as {
-        scripts?: Record<string, string>;
-      };
-      if (typeof rootPkg.scripts?.["build:runtime:packages"] === "string") {
-        runtimeBuildCommand = "pnpm build:runtime:packages";
-      } else if (typeof rootPkg.scripts?.["build:runtime"] === "string") {
-        runtimeBuildCommand = "pnpm build:runtime";
-      }
+      runtimeBuildCommand = runtimeBuildCommandFromPackageJson(rootPkgRaw);
     } catch {
-      runtimeBuildCommand = "pnpm build";
+      runtimeBuildCommand = FULL_BUILD_COMMAND;
     }
 
-    if (runtimeBuildCommand !== "pnpm build") {
+    if (runtimeBuildCommand !== FULL_BUILD_COMMAND) {
       await runBuildStep(execAsync, runtimeBuildCommand, {
         cwd: targetDir,
         timeoutMs: timeouts.build,
@@ -1280,10 +1275,10 @@ async function _performUpdateInner(
       log(
         "Auto-update: target repo has no build:runtime script; falling back to pnpm build.",
       );
-      await runBuildStep(execAsync, "pnpm build", {
+      await runBuildStep(execAsync, FULL_BUILD_COMMAND, {
         cwd: targetDir,
         timeoutMs: timeouts.build,
-        label: "pnpm build",
+        label: FULL_BUILD_COMMAND,
         log,
       });
       usedFullBuildFallback = true;

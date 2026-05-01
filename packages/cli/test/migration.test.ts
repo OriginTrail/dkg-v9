@@ -13,6 +13,7 @@ let execSyncCalls: { cmd: string; opts?: any }[] = [];
 let execFileSyncCalls: { binary: string; args: string[]; opts?: any }[] = [];
 const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
 const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
+const FULL_BUILD_CMD = 'pnpm build';
 const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
 const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
 
@@ -22,7 +23,7 @@ function installMocks() {
   _migrationIo.execSync = ((cmd: string, opts?: any) => {
     execSyncCalls.push({ cmd, opts });
     const cwd = opts?.cwd ? String(opts.cwd) : '';
-    if (cwd && (cmd === RUNTIME_PACKAGES_BUILD_CMD || cmd === RUNTIME_BUILD_CMD)) {
+    if (cwd && (cmd === RUNTIME_PACKAGES_BUILD_CMD || cmd === RUNTIME_BUILD_CMD || cmd === FULL_BUILD_CMD)) {
       mkdirSync(join(cwd, 'packages', 'cli', 'dist'), { recursive: true });
       writeFileSync(join(cwd, 'packages', 'cli', 'dist', 'cli.js'), '');
     }
@@ -316,6 +317,37 @@ describe('migrateToBlueGreen', () => {
       .map(c => c.cmd);
     expect(slotACmds).toContain(RUNTIME_BUILD_CMD);
     expect(slotACmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+  });
+
+  it('falls back to pnpm build during bootstrap when runtime build scripts are absent', async () => {
+    const rDir = join(dkgHome, 'releases');
+    _migrationIo.repoDir = () => repoDir();
+    _migrationIo.swapSlot = (async () => undefined) as any;
+    _migrationIo.execFileSync = ((binary: string, args: string[], opts?: any) => {
+      execFileSyncCalls.push({ binary, args: [...args], opts });
+      if (binary === 'git' && args.includes('clone')) {
+        const target = args[args.length - 1];
+        mkdirSync(join(target, '.git'), { recursive: true });
+        writeFileSync(
+          join(target, 'package.json'),
+          JSON.stringify({ scripts: { build: 'turbo build' } }),
+        );
+      }
+      if (binary === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
+        return 'https://github.com/test/repo.git';
+      }
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const slotACmds = execSyncCalls
+      .filter(c => String(c.opts?.cwd) === join(rDir, 'a'))
+      .map(c => c.cmd);
+    expect(slotACmds).toContain(FULL_BUILD_CMD);
+    expect(slotACmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+    expect(slotACmds).not.toContain(RUNTIME_BUILD_CMD);
   });
 
   it('repairs inactive ready slots that are missing the Node UI static bundle', async () => {

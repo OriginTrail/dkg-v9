@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -11,6 +11,7 @@ import {
   nodeUiNpmStaticIndexPaths,
   nodeUiStaticBuildCommand,
   nodeUiStaticBuildLabel,
+  nodeUiStaticDistPath,
   nodeUiStaticIndexPath,
 } from './node-ui-static.js';
 
@@ -19,6 +20,7 @@ const ROLLBACK_UI_BUILD_TIMEOUT_MS = 15 * 60_000;
 export interface RollbackNodeUiIo {
   existsSync: typeof existsSync;
   readFileSync: typeof readFileSync;
+  rmSync: typeof rmSync;
   execSync: typeof execSync;
   log: (message: string) => void;
   error: (message: string) => void;
@@ -27,6 +29,7 @@ export interface RollbackNodeUiIo {
 const defaultIo: RollbackNodeUiIo = {
   existsSync,
   readFileSync,
+  rmSync,
   execSync,
   log: console.log,
   error: console.error,
@@ -76,8 +79,21 @@ export function ensureRollbackNodeUiBundle(
     return false;
   }
 
-  if (io.existsSync(gitIndex)) return true;
-  io.log(`Slot ${target} has no Node UI static bundle; building UI assets before rollback...`);
+  const hadExistingGitBundle = io.existsSync(gitIndex);
+  io.log(
+    hadExistingGitBundle
+      ? `Slot ${target} has an existing Node UI static bundle; rebuilding UI assets before rollback...`
+      : `Slot ${target} has no Node UI static bundle; building UI assets before rollback...`,
+  );
+  try {
+    io.rmSync(nodeUiStaticDistPath(slotDir), { recursive: true, force: true });
+  } catch (err) {
+    io.error(
+      `Rollback aborted: failed to clear stale Node UI static bundle for slot ${target} ` +
+        `(${toErrorMessage(err)}).`,
+    );
+    return false;
+  }
   let lastError: unknown;
   const packageNames = nodeUiPackageNamesForRollback(slotDir, io);
   for (const packageName of packageNames) {

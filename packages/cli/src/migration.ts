@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotReady } from './config.js';
 import {
+  FULL_BUILD_COMMAND,
   isNodeUiGitLayoutSlot,
   NODE_UI_PACKAGE_NAME_FALLBACKS,
   nodeUiPackageJsonPath,
@@ -12,6 +13,7 @@ import {
   nodeUiNpmStaticIndexPaths,
   nodeUiStaticBuildCommand,
   nodeUiStaticIndexPath,
+  runtimeBuildCommandFromPackageJson,
 } from './node-ui-static.js';
 
 function npmCliPackageJsonPath(slotDir: string): string {
@@ -189,16 +191,12 @@ export async function migrateToBlueGreen(
 
   const runtimeBuildCommand = (slotDir: string): string => {
     try {
-      const rootPkg = JSON.parse(readFileSync(join(slotDir, 'package.json'), 'utf-8')) as {
-        scripts?: Record<string, string>;
-      };
-      if (typeof rootPkg.scripts?.['build:runtime:packages'] === 'string') {
-        return 'pnpm build:runtime:packages';
-      }
+      return runtimeBuildCommandFromPackageJson(
+        readFileSync(join(slotDir, 'package.json'), 'utf-8'),
+      );
     } catch {
-      // Older or partial slots fall back to the compatibility wrapper below.
+      return FULL_BUILD_COMMAND;
     }
-    return 'pnpm build:runtime';
   };
 
   const buildRuntimeAndNodeUi = (slotDir: string): void => {

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DkgNodePlugin,
   isObjectRecord,
+  isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
 } from './dist/index.js';
@@ -11,7 +12,7 @@ import {
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
 const lifecycleServiceApis = new WeakMap();
-const entryAssignedWorkspaceDirs = new WeakMap();
+const entryAssignedWorkspaceDirMarkers = new WeakMap();
 let lifecycleOwnerToken = null;
 
 export default function (api) {
@@ -25,11 +26,9 @@ export default function (api) {
   // resolver; writing it onto api.workspaceDir would make it look like a live
   // runtime workspace and could mask a later higher-priority runtime value.
   if (apiWorkspaceDir) {
-    api.workspaceDir = apiWorkspaceDir;
-    entryAssignedWorkspaceDirs.set(api, apiWorkspaceDir);
-  } else if (entryAssignedWorkspaceDirs.get(api) === api.workspaceDir) {
-    delete api.workspaceDir;
-    entryAssignedWorkspaceDirs.delete(api);
+    setEntryAssignedWorkspaceDir(api, apiWorkspaceDir);
+  } else {
+    clearEntryAssignedWorkspaceDir(api);
   }
 
   if (instance) {
@@ -119,6 +118,7 @@ function resolveEntryConfig(api, options = {}) {
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
   const configIsPartial =
     !hasConfigSource ||
+    (entryConfigs.length > 0 && entryConfigs.every(isStateMetadataOnlyAdapterConfig)) ||
     (entryConfigs.length === 0 && directConfigs.length > 0);
   const currentConfigSources = [
     ...currentEntryConfigs,
@@ -161,9 +161,32 @@ function resolveEntryConfig(api, options = {}) {
 
 function apiWorkspaceDirFrom(api) {
   if (typeof api?.workspaceDir !== 'string') return undefined;
-  return entryAssignedWorkspaceDirs.get(api) === api.workspaceDir
-    ? undefined
-    : api.workspaceDir;
+  return entryAssignedWorkspaceDirMarkers.has(api) ? undefined : api.workspaceDir;
+}
+
+function setEntryAssignedWorkspaceDir(api, workspaceDir) {
+  const marker = {};
+  let currentValue = workspaceDir;
+  entryAssignedWorkspaceDirMarkers.set(api, marker);
+  Object.defineProperty(api, 'workspaceDir', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return currentValue;
+    },
+    set(value) {
+      currentValue = value;
+      if (entryAssignedWorkspaceDirMarkers.get(api) === marker) {
+        entryAssignedWorkspaceDirMarkers.delete(api);
+      }
+    },
+  });
+}
+
+function clearEntryAssignedWorkspaceDir(api) {
+  if (!entryAssignedWorkspaceDirMarkers.has(api)) return;
+  entryAssignedWorkspaceDirMarkers.delete(api);
+  delete api.workspaceDir;
 }
 
 function directApiConfigFrom(config) {

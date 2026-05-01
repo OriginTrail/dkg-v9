@@ -890,7 +890,15 @@ describe('openclaw-entry', () => {
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((secondApi as any).workspaceDir).toBe('/cfg-workspace');
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: '/cfg-workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/cfg-workspace',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
     expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/cfg-workspace']);
   });
 
@@ -953,6 +961,37 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((api as any).workspaceDir).toBeUndefined();
     expect(instance.workspaceDirsAtRegister).toEqual(['/runtime-first', undefined]);
+  });
+
+  it('keeps a caller-provided workspaceDir even when it matches an earlier wrapper assignment', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      stateDir: '/first/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/first',
+    }, {
+      runtime: {
+        config: {
+          workspace: '/runtime-same',
+        },
+      },
+    });
+
+    entry(api);
+    expect((api as any).workspaceDir).toBe('/runtime-same');
+
+    (api as any).workspaceDir = '/runtime-same';
+    delete (api as any).runtime;
+    (api as any).pluginConfig = {
+      stateDir: '/second/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/second',
+    };
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe('/runtime-same');
+    expect(instance.workspaceDirsAtRegister).toEqual(['/runtime-same', '/runtime-same']);
   });
 
   it('syncs skills into installedWorkspace without stamping api.workspaceDir', async () => {

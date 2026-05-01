@@ -48,7 +48,8 @@ export interface RandomSamplingBindOptions {
   /**
    * File path for the prover WAL. When omitted, an in-memory WAL is
    * used (suitable for tests + dev; production SHOULD set this so
-   * crash recovery has somewhere to read from).
+   * prover transitions survive restarts for diagnostics and future
+   * recovery tooling).
    */
   walPath?: string;
   /**
@@ -119,6 +120,13 @@ export async function bindRandomSampling(
   );
   if (missing.length > 0) {
     opts.log?.warn('rs.bind.missing-methods', { missing });
+    return makeNoopHandle(opts.role, opts.identityId);
+  }
+  const readiness = (opts.chain as { isRandomSamplingReady?: () => boolean }).isRandomSamplingReady;
+  if (typeof readiness === 'function' && !readiness.call(opts.chain)) {
+    opts.log?.warn('rs.bind.not-deployed', {
+      reason: 'RandomSampling/RandomSamplingStorage not resolved on chain adapter',
+    });
     return makeNoopHandle(opts.role, opts.identityId);
   }
 

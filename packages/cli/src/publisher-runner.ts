@@ -345,6 +345,12 @@ function createV10ACKProviderForPublisher(
         `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
+    if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+      throw new Error(
+        `Async V10 publish requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+        'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
+      );
+    }
     const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
       ? await chain.getMinimumRequiredSignatures()
       : undefined;
@@ -370,7 +376,7 @@ function createV10ACKProviderForPublisher(
       tokenAmount,
       swmGraphId,
       subGraphName,
-      merkleLeafCount: merkleLeafCount ?? 1,
+      merkleLeafCount,
     });
     return result.acks;
   };

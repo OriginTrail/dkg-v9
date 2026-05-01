@@ -9,8 +9,8 @@
  *   build proof material → submitProof → record outcome
  *
  * The orchestrator is intentionally small: every step is a single
- * adapter call, the WAL records each transition, and crash recovery
- * replays from the WAL tail.
+ * adapter call, and the WAL records each transition for operator
+ * diagnostics plus future crash-recovery replay.
  */
 
 import {

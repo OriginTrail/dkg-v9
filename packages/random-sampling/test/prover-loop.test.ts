@@ -100,6 +100,9 @@ describe('startProverLoop', () => {
       expect.objectContaining({ err: expect.stringContaining('transient') }),
     );
     expect(prover.calls).toBeGreaterThan(1);
+    const status = loop.getStatus();
+    expect(status.totalTicks).toBeGreaterThan(1);
+    expect(status.lastTickAt).toBeTruthy();
     await loop.stop();
   });
 

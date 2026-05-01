@@ -1758,7 +1758,28 @@ export class EVMChainAdapter implements ChainAdapter {
   // Staking Conviction
   // =====================================================================
 
-  async stakeWithLock(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
+  private normalizeLegacyLockEpochs(lockEpochs: number): number {
+    if (!Number.isInteger(lockEpochs)) {
+      throw new Error(`stakeWithLock: lockEpochs must be an integer, got ${lockEpochs}`);
+    }
+    if (lockEpochs < 0) {
+      throw new Error(`stakeWithLock: lockEpochs must be non-negative, got ${lockEpochs}`);
+    }
+    // V10 tiers are bounded by the staking NFT contract. Legacy callers
+    // commonly passed longer lock durations to mean "max conviction";
+    // normalize those to the maximum V10 tier instead of surfacing a
+    // surprising contract revert from an unchanged public method.
+    return Math.min(lockEpochs, 12);
+  }
+
+  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    return this.stakeWithLockTier(identityId, amount, this.normalizeLegacyLockEpochs(lockEpochs));
+  }
+
+  async stakeWithLockTier(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
+    if (!Number.isInteger(lockTier) || lockTier < 0 || lockTier > 12) {
+      throw new Error(`stakeWithLockTier: lockTier must be an integer in [0, 12], got ${lockTier}`);
+    }
     await this.init();
 
     let nft: Contract;
@@ -1970,14 +1991,24 @@ export class EVMChainAdapter implements ChainAdapter {
     // would zero-gate every legitimate V10 ACK signer (this exactly mirrors
     // the on-chain `KnowledgeAssetsV10` ACK-signer gate, also rewired in
     // v4.0.0). Falls back to V8 if CSS is not registered (older deploys).
-    const cs = await this.resolveContract('ConvictionStakingStorage');
+    let cs: Contract | null = null;
+    try {
+      cs = await this.resolveContract('ConvictionStakingStorage');
+    } catch {
+      cs = null;
+    }
     if (cs) {
       const stake: bigint = await cs.getNodeStakeV10(claimedIdentityId);
       if (stake === 0n) return false;
       return true;
     }
 
-    const ss = await this.resolveContract('StakingStorage');
+    let ss: Contract | null = null;
+    try {
+      ss = await this.resolveContract('StakingStorage');
+    } catch {
+      ss = null;
+    }
     if (!ss) return false;
     const v8Stake: bigint = await ss.getNodeStake(claimedIdentityId);
     if (v8Stake === 0n) return false;
@@ -2013,6 +2044,10 @@ export class EVMChainAdapter implements ChainAdapter {
 
   isV10Ready(): boolean {
     return !!this.contracts.knowledgeAssetsV10;
+  }
+
+  isRandomSamplingReady(): boolean {
+    return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

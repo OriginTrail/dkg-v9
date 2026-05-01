@@ -30,6 +30,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   extractV10KCFromStore,
+  extractV10KCQuads,
   KCNotFoundError,
   KCRootEntitiesNotFoundError,
   KCDataMissingError,
@@ -175,6 +176,25 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
 
     const fixtureLeaves = fixture.publicTriples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
     expect(new V10MerkleTree(result.leaves).root).toEqual(new V10MerkleTree(fixtureLeaves).root);
+  });
+
+  it('returns quads in the resolved named context graph data URI', async () => {
+    const fixture: KCFixture = {
+      cgId: 42n,
+      cgName: 'devnet-test',
+      kcId: 8n,
+      ual: 'did:dkg:hardhat:31337/0xpub/8',
+      rootEntities: ['urn:e:named'],
+      publicTriples: [
+        { subject: 'urn:e:named', predicate: 'urn:p:name', object: '"named"' },
+      ],
+    };
+    await seedKC(store, fixture);
+
+    const quads = await extractV10KCQuads(store, fixture.cgId, fixture.kcId);
+
+    expect(quads).toHaveLength(1);
+    expect(quads[0].graph).toBe(contextGraphDataUri(fixture.cgName!, fixture.cgId.toString()));
   });
 
   it('round-trips through buildV10ProofMaterial (extractor leaves accept on-chain commitment)', async () => {

@@ -2,9 +2,9 @@
  * Random Sampling Write-Ahead Log.
  *
  * One append-only sequence of state transitions per `(epoch,
- * periodStartBlock)` tuple. The prover writes a transition before each
- * irrevocable side-effect (chain read, proof build, tx submit) so that
- * a crash-recovery startup can replay the tail and decide:
+ * periodStartBlock)` tuple. The prover writes transitions around the
+ * chain reads, proof build, and tx submit path so diagnostics and future
+ * crash-recovery startup code have enough history to decide:
  *
  *   - "I already submitted; the chain says solved=true → mark
  *     confirmed and skip"
@@ -14,8 +14,8 @@
  *     from extraction"
  *
  * The WAL is intentionally NOT a queue — it does not buffer pending
- * work. It records what HAS happened so a crash recovery can deduce
- * what to do next.
+ * work. It records what HAS happened so diagnostics and future crash
+ * recovery code can deduce what to do next.
  *
  * Format: JSONL, one transition per line, append-only, fsync after
  * each write. Backends: in-memory (tests) and file (prod).
@@ -99,7 +99,7 @@ export interface ProverWal {
    * differently per code path).
    */
   append(entry: ProverWalEntry): Promise<void>;
-  /** Return all entries, oldest-first. Used on startup recovery. */
+  /** Return all entries, oldest-first. Used by diagnostics and future startup recovery. */
   readAll(): Promise<ProverWalEntry[]>;
   /** Latest transition for a specific period, or undefined. */
   latestFor(key: PeriodKey): Promise<ProverWalEntry | undefined>;

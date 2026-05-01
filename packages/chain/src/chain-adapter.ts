@@ -469,15 +469,23 @@ export interface ChainAdapter {
 
   // Staking Conviction
   /**
-   * Mint a V10 NFT-backed conviction stake position on `identityId` with
-   * `amount` TRAC at `lockTier` (tier index, NOT epoch count — lock duration
-   * is fixed per tier on `ConvictionStakingStorage`). Each call mints a new
-   * position; there is no per-delegator-address position to "extend" under
-   * V10 (that V8 semantic is gone — `getDelegatorConvictionMultiplier`
-   * accordingly returns the address-keyed shim of 1x). Use the V10
-   * tokenId-keyed `getPosition` for per-position multipliers.
+   * Legacy staking helper that accepts a lock duration-style number.
+   *
+   * V10 stakes are NFT-backed positions keyed by `lockTier`; adapters
+   * normalize this legacy `lockEpochs` value to a V10 tier so existing
+   * consumers do not silently reinterpret a public `number` parameter.
+   *
+   * @deprecated Prefer `stakeWithLockTier` for new V10 callers.
    */
-  stakeWithLock?(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult>;
+  stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
+  /**
+   * Mint a V10 NFT-backed conviction stake position on `identityId` with
+   * `amount` TRAC at an explicit V10 `lockTier`. Each call mints a new
+   * position; there is no per-delegator-address position to "extend" under
+   * V10. Use the V10 tokenId-keyed `getPosition` for per-position
+   * multipliers.
+   */
+  stakeWithLockTier?(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult>;
   getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
 
   /**
@@ -540,6 +548,13 @@ export interface ChainAdapter {
    * breaking the defensive runtime optional-call style.
    */
   isV10Ready(): boolean;
+  /**
+   * Whether the adapter has resolved the V10 RandomSampling contracts
+   * needed by the off-chain prover. Optional for non-prover adapters;
+   * when present, bind layers should use it as the deployment-capability
+   * check rather than only testing method presence.
+   */
+  isRandomSamplingReady?(): boolean;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

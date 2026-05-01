@@ -25,6 +25,10 @@ export interface KCTriple {
 }
 
 export interface KCExtractionResult {
+  /** Local context graph name resolved from the on-chain numeric id. */
+  contextGraphName: string;
+  /** Data graph URI that contained the public triples. */
+  dataGraph: string;
   /** UAL of the KC discovered via `dkg:batchId == kcId`. */
   ual: string;
   /** Root entities for each KA, in stable (sorted) order. */
@@ -239,7 +243,7 @@ export async function extractV10KCFromStore(
   const leaves: Uint8Array[] = triples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
   for (const root of privateRoots) leaves.push(root);
 
-  return { ual, rootEntities, triples, privateRoots, leaves };
+  return { contextGraphName: cgName, dataGraph, ual, rootEntities, triples, privateRoots, leaves };
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
@@ -342,6 +346,5 @@ export async function extractV10KCQuads(
   kcId: bigint,
 ): Promise<Quad[]> {
   const result = await extractV10KCFromStore(store, cgId, kcId);
-  const dataGraph = contextGraphDataUri(cgId.toString());
-  return result.triples.map((t) => ({ ...t, graph: dataGraph }));
+  return result.triples.map((t) => ({ ...t, graph: result.dataGraph }));
 }

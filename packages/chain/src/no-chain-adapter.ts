@@ -48,4 +48,5 @@ export class NoChainAdapter implements ChainAdapter {
   async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
   isV10Ready(): boolean { return false; }
+  isRandomSamplingReady(): boolean { return false; }
 }

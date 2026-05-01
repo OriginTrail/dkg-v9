@@ -69,6 +69,11 @@ export interface ChainResetWipeResult {
   prevMarker: string | null;
   /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
   removedFiles: string[];
+  /**
+   * Files we attempted to wipe but could not remove. When non-empty, the
+   * marker is intentionally not persisted so the wipe retries on next boot.
+   */
+  failedFiles: Array<{ file: string; error: string }>;
 }
 
 export interface ChainResetWipeOptions {
@@ -119,8 +124,9 @@ function performWipe(
   dataDir: string,
   walPath: string | undefined,
   log: (msg: string) => void,
-): string[] {
+): { removedFiles: string[]; failedFiles: Array<{ file: string; error: string }> } {
   const removedFiles: string[] = [];
+  const failedFiles: Array<{ file: string; error: string }> = [];
 
   // wipeAbs: wipe an absolute path, log under a display label. We log the
   // display label (relative when inside dataDir, absolute when not) so
@@ -133,10 +139,9 @@ function performWipe(
         removedFiles.push(displayLabel);
       }
     } catch (err) {
-      // Per the runbook contract: log + continue. Crashing here would
-      // stop the daemon entirely, which is worse than booting on stale
-      // state (the operator can re-run with elevated perms / fix FS).
-      log(`  WARN: failed to wipe ${displayLabel}: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      failedFiles.push({ file: displayLabel, error: message });
+      log(`  WARN: failed to wipe ${displayLabel}: ${message}`);
     }
   };
 
@@ -162,16 +167,20 @@ function performWipe(
           rmSync(join(dataDir, f), { force: true });
           removedFiles.push(f);
         } catch (err) {
-          log(`  WARN: failed to wipe ${f}: ${(err as Error).message}`);
+          const message = (err as Error).message;
+          failedFiles.push({ file: f, error: message });
+          log(`  WARN: failed to wipe ${f}: ${message}`);
         }
       }
     }
-  } catch {
-    /* dataDir doesn't exist or is unreadable — not fatal */
+  } catch (err) {
+    const message = (err as Error).message;
+    failedFiles.push({ file: dataDir, error: message });
+    log(`  WARN: failed to list publish journals in ${dataDir}: ${message}`);
   }
 
   for (const f of removedFiles) log(`  removed: ${f}`);
-  return removedFiles;
+  return { removedFiles, failedFiles };
 }
 
 export function chainResetWipe(opts: ChainResetWipeOptions): ChainResetWipeResult {
@@ -181,14 +190,14 @@ export function chainResetWipe(opts: ChainResetWipeOptions): ChainResetWipeResul
   // touched so we don't accidentally turn on the protocol later just
   // because some leftover state file made the comparison non-trivial.
   if (opts.currentMarker === undefined) {
-    return { wiped: false, prevMarker: null, removedFiles: [] };
+    return { wiped: false, prevMarker: null, removedFiles: [], failedFiles: [] };
   }
 
   const prev = loadState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
-    return { wiped: false, prevMarker, removedFiles: [] };
+    return { wiped: false, prevMarker, removedFiles: [], failedFiles: [] };
   }
 
   // Mismatch (including "first boot with marker present"): wipe.
@@ -206,31 +215,44 @@ export function chainResetWipe(opts: ChainResetWipeOptions): ChainResetWipeResul
     );
   }
 
-  // Both performWipe and saveState are best-effort: per the runbook
-  // contract, wipe failures should be logged so the operator can act,
-  // but boot must continue. Crashing the daemon on a stale chain reset
-  // marker file would be worse than booting with stale state — the
-  // operator's instinct is "node won't come back up, must roll back",
-  // when the actual right answer is "fix FS perms, the wipe will retry
-  // next boot". performWipe already swallows per-file FS errors; this
-  // outer try is a defence-in-depth against unexpected exceptions
-  // (e.g. EACCES on readdirSync, JSON serialization throwing, etc).
+  // Wipe failures are logged but do not crash boot. Crucially, we only
+  // persist the marker after every targeted file was removed cleanly; a
+  // partial wipe must retry on next boot instead of being masked forever.
   let removedFiles: string[] = [];
+  let failedFiles: Array<{ file: string; error: string }> = [];
+  let markerPersisted = false;
   try {
-    removedFiles = performWipe(opts.dataDir, opts.randomSamplingWalPath, log);
+    ({ removedFiles, failedFiles } = performWipe(opts.dataDir, opts.randomSamplingWalPath, log));
   } catch (err) {
+    const message = (err as Error).message;
+    failedFiles.push({ file: '<chain-state-wipe>', error: message });
     log(
-      `WARN: chain-state wipe encountered unexpected error: ${(err as Error).message}. Continuing boot on stale state.`,
+      `WARN: chain-state wipe encountered unexpected error: ${message}. Continuing boot on stale state.`,
     );
   }
-  try {
-    saveState(opts.dataDir, opts.currentMarker);
-  } catch (err) {
-    log(
-      `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${(err as Error).message}. Wipe will retry on next boot.`,
-    );
-  }
-  log('Chain-state wipe complete. Continuing boot.');
 
-  return { wiped: true, prevMarker, removedFiles };
+  if (failedFiles.length === 0) {
+    try {
+      saveState(opts.dataDir, opts.currentMarker);
+      markerPersisted = true;
+    } catch (err) {
+      log(
+        `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${(err as Error).message}. Wipe will retry on next boot.`,
+      );
+    }
+  } else {
+    log(
+      `WARN: chain-state wipe incomplete (${failedFiles.length} failure${failedFiles.length === 1 ? '' : 's'}). ` +
+      'Chain reset marker was not persisted; wipe will retry on next boot.',
+    );
+  }
+  if (failedFiles.length === 0 && markerPersisted) {
+    log('Chain-state wipe complete. Continuing boot.');
+  } else if (failedFiles.length === 0) {
+    log('Chain-state wipe complete, but marker was not persisted. Continuing boot; wipe will retry on next boot.');
+  } else {
+    log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
+  }
+
+  return { wiped: true, prevMarker, removedFiles, failedFiles };
 }

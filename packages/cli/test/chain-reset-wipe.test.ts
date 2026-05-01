@@ -301,7 +301,6 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
   // than the original problem (stale state).
 
   it('logs and continues when saveState throws (e.g. read-only FS)', () => {
-    seedAllFiles(dataDir);
     // Make dataDir read-only so writeFileSync on the state file throws.
     // Skip on platforms where chmod 0o555 doesn't actually deny root or
     // where tests run as root (CI containers); the scenario we care
@@ -338,20 +337,40 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
     }
   });
 
-  it('logs and continues when an individual file wipe throws', () => {
-    // We can't easily synthesise a per-file rmSync error portably, so
-    // we exercise the public interface and verify that a missing /
-    // unlinkable target does not crash. The per-file try/catch is the
-    // structural guarantee — this test asserts the contract.
+  it('does not save the marker when an individual file wipe throws', () => {
     writeFileSync(
       join(dataDir, STATE_FILE),
       JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
     );
-    // No chain-state files exist — rmSync of nonexistent paths must not
-    // throw. (existsSync gate already handles this; the test pins it.)
+    writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
+    writeFileSync(join(dataDir, '.probe'), 'x');
 
-    expect(() => {
-      chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
-    }).not.toThrow();
+    const originalMode = statSync(dataDir).mode;
+    const logsCaptured: string[] = [];
+    try {
+      chmodSync(dataDir, 0o555);
+      try {
+        rmSync(join(dataDir, '.probe'), { force: true });
+        return;
+      } catch {
+        // Good: removing from this directory is denied for this process.
+      }
+
+      expect(() => {
+        const result = chainResetWipe({
+          dataDir,
+          currentMarker: NEW_MARKER,
+          log: (msg) => logsCaptured.push(msg),
+        });
+        expect(result.failedFiles.some((f) => f.file === 'store.nq')).toBe(true);
+      }).not.toThrow();
+    } finally {
+      chmodSync(dataDir, originalMode);
+      rmSync(join(dataDir, '.probe'), { force: true });
+    }
+
+    const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
+    expect(persisted.chainResetMarker).toBe(OLD_MARKER);
+    expect(logsCaptured.some((l) => l.includes('marker was not persisted'))).toBe(true);
   });
 });

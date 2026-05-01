@@ -162,6 +162,9 @@ const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
  * (each of which fires its own connection:open).
  */
 const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
+const RANDOM_SAMPLING_BIND_RETRY_MS = 30_000;
+
+type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
 
 interface SyncRequestEnvelope {
   contextGraphId: string;
@@ -401,6 +404,8 @@ export class DKGAgent {
   private chainPoller: ChainEventPoller | null = null;
   private swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private randomSamplingHandle: RandomSamplingHandle | null = null;
+  private randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
+  private randomSamplingBindRetryInFlight = false;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -1064,26 +1069,58 @@ export class DKGAgent {
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
     }
 
-    // Wire V10 Random Sampling prover. The bind layer is a no-op for
-    // edge nodes (and for core nodes that haven't yet provisioned an
-    // on-chain identity — those will be retried on the next start).
-    // Failures during bind are logged and swallowed so a missing
-    // RandomSampling deployment never blocks agent startup.
+    // Wire V10 Random Sampling prover. Edge nodes no-op. Core nodes with
+    // transient identity/RPC startup failures retry in the background so
+    // one flaky `getIdentityId()` call does not disable proving until the
+    // next process restart.
+    const rsStart = await this.tryStartRandomSamplingProver(ctx, true);
+    if (rsStart === 'retryable') {
+      this.scheduleRandomSamplingBindRetry(ctx);
+    }
+  }
+
+  private randomSamplingLogger(ctx: OperationContext) {
+    return {
+      info: (event: string, fields: Record<string, unknown>) =>
+        this.log.info(ctx, `[${event}] ${JSON.stringify(fields)}`),
+      warn: (event: string, fields: Record<string, unknown>) =>
+        this.log.warn(ctx, `[${event}] ${JSON.stringify(fields)}`),
+      error: (event: string, fields: Record<string, unknown>) =>
+        this.log.error(ctx, `[${event}] ${JSON.stringify(fields)}`),
+    };
+  }
+
+  private async tryStartRandomSamplingProver(
+    ctx: OperationContext,
+    logDisabled: boolean,
+  ): Promise<RandomSamplingStartResult> {
+    if (!this.started) return 'disabled';
+    const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
+    if (rsRole !== 'core' || this.chain.chainId === 'none') return 'disabled';
+
+    let rsIdentityId = 0n;
     try {
-      const rsRole: 'core' | 'edge' = effectiveRole === 'core' ? 'core' : 'edge';
-      let rsIdentityId = 0n;
-      if (this.chain.chainId !== 'none' && rsRole === 'core') {
-        try { rsIdentityId = await this.chain.getIdentityId(); } catch { /* ignore */ }
+      rsIdentityId = await this.chain.getIdentityId();
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `V10 Random Sampling identity lookup failed; prover bind will retry: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return 'retryable';
+    }
+
+    if (rsIdentityId === 0n) {
+      if (logDisabled) {
+        this.log.info(ctx, `V10 Random Sampling prover not started (identity=0, chain=${this.chain.chainId}); will retry`);
       }
-      const rsLog = {
-        info: (event: string, fields: Record<string, unknown>) =>
-          this.log.info(ctx, `[${event}] ${JSON.stringify(fields)}`),
-        warn: (event: string, fields: Record<string, unknown>) =>
-          this.log.warn(ctx, `[${event}] ${JSON.stringify(fields)}`),
-        error: (event: string, fields: Record<string, unknown>) =>
-          this.log.error(ctx, `[${event}] ${JSON.stringify(fields)}`),
-      };
-      this.randomSamplingHandle = await bindRandomSampling({
+      return 'retryable';
+    }
+    if (!this.started) return 'disabled';
+
+    try {
+      const handle = await bindRandomSampling({
         role: rsRole,
         chain: this.chain,
         store: this.store,
@@ -1091,17 +1128,58 @@ export class DKGAgent {
         walPath: this.config.randomSamplingWalPath,
         useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
         tickIntervalMs: this.config.randomSamplingTickIntervalMs,
-        log: rsLog,
+        log: this.randomSamplingLogger(ctx),
       });
-      if (this.randomSamplingHandle.enabled) {
-        this.randomSamplingHandle.start();
+      if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
+        try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }
+      }
+      this.randomSamplingHandle = handle;
+      if (handle.enabled) {
+        if (!this.started) {
+          try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
+          return 'disabled';
+        }
+        handle.start();
+        this.clearRandomSamplingBindRetry();
         this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
-      } else if (rsRole === 'core') {
+        return 'started';
+      }
+      if (logDisabled) {
         this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
       }
+      return 'disabled';
     } catch (err) {
       this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
+      return 'retryable';
     }
+  }
+
+  private scheduleRandomSamplingBindRetry(ctx: OperationContext): void {
+    if (this.randomSamplingBindRetryTimer) return;
+    this.log.warn(ctx, `V10 Random Sampling prover bind will retry every ${RANDOM_SAMPLING_BIND_RETRY_MS}ms`);
+    this.randomSamplingBindRetryTimer = setInterval(() => {
+      if (!this.started || this.randomSamplingBindRetryInFlight || this.randomSamplingHandle?.enabled) return;
+      this.randomSamplingBindRetryInFlight = true;
+      this.tryStartRandomSamplingProver(ctx, false)
+        .then((result) => {
+          if (result === 'started' || result === 'disabled') {
+            this.clearRandomSamplingBindRetry();
+          }
+        })
+        .catch((err: unknown) => {
+          this.log.warn(ctx, `V10 Random Sampling prover retry failed: ${err instanceof Error ? err.message : String(err)}`);
+        })
+        .finally(() => {
+          this.randomSamplingBindRetryInFlight = false;
+        });
+    }, RANDOM_SAMPLING_BIND_RETRY_MS);
+    if (this.randomSamplingBindRetryTimer.unref) this.randomSamplingBindRetryTimer.unref();
+  }
+
+  private clearRandomSamplingBindRetry(): void {
+    if (!this.randomSamplingBindRetryTimer) return;
+    clearInterval(this.randomSamplingBindRetryTimer);
+    this.randomSamplingBindRetryTimer = null;
   }
 
   /**
@@ -7156,6 +7234,7 @@ export class DKGAgent {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
     }
+    this.clearRandomSamplingBindRetry();
     if (this.randomSamplingHandle) {
       try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
       this.randomSamplingHandle = null;
@@ -7264,12 +7343,12 @@ export class DKGAgent {
       kaCount: number,
       rootEntities: string[],
       publicByteSize: bigint,
-      stagingQuads?: Uint8Array,
-      epochs?: number,
-      tokenAmount?: bigint,
-      swmGraphId?: string,
-      subGraphName?: string,
-      merkleLeafCount?: number,
+      stagingQuads: Uint8Array | undefined,
+      epochs: number | undefined,
+      tokenAmount: bigint | undefined,
+      swmGraphId: string | undefined,
+      subGraphName: string | undefined,
+      merkleLeafCount: number,
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
@@ -7295,6 +7374,12 @@ export class DKGAgent {
         throw new Error(
           `V10 ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        );
+      }
+      if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+        throw new Error(
+          `V10 ACK collection requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+          'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
         );
       }
 
@@ -7326,7 +7411,7 @@ export class DKGAgent {
         tokenAmount,
         swmGraphId,
         subGraphName,
-        merkleLeafCount: merkleLeafCount ?? 1,
+        merkleLeafCount,
       });
       return result.acks;
     };

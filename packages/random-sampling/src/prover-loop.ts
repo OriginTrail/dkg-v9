@@ -77,10 +77,10 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   const runOnce = async (): Promise<void> => {
     if (inflight || stopping) return;
     inflight = true;
+    totalTicks += 1;
+    lastTickAt = new Date().toISOString();
     try {
       const outcome = await opts.prover.tick();
-      totalTicks += 1;
-      lastTickAt = new Date().toISOString();
       lastOutcome = outcome;
       if (outcome.kind === 'submitted') {
         submittedCount += 1;
@@ -95,13 +95,22 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         });
       }
     } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      lastOutcome = { kind: 'error', error };
       // The orchestrator already maps known errors to TickOutcome
       // variants. An exception here means an unmapped path
       // (typically a transient adapter / RPC issue). Log and keep
       // the timer alive so the next tick has a chance.
       opts.log?.error('rs.loop.tick-threw', {
-        err: err instanceof Error ? err.message : String(err),
+        err: error.message,
       });
+      try {
+        opts.onTick?.(lastOutcome);
+      } catch (hookErr) {
+        opts.log?.warn('rs.loop.onTick-threw', {
+          err: hookErr instanceof Error ? hookErr.message : String(hookErr),
+        });
+      }
     } finally {
       inflight = false;
     }

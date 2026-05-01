@@ -551,7 +551,21 @@ export class MockChainAdapter implements ChainAdapter {
 
   private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
 
-  async stakeWithLock(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
+  private normalizeLegacyLockEpochs(lockEpochs: number): number {
+    if (!Number.isInteger(lockEpochs) || lockEpochs < 0) {
+      throw new Error(`Mock: invalid lockEpochs ${lockEpochs}`);
+    }
+    return Math.min(lockEpochs, 12);
+  }
+
+  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    return this.stakeWithLockTier(identityId, amount, this.normalizeLegacyLockEpochs(lockEpochs));
+  }
+
+  async stakeWithLockTier(identityId: bigint, _amount: bigint, lockTier: number): Promise<TxResult> {
+    if (!Number.isInteger(lockTier) || lockTier < 0 || lockTier > 12) {
+      throw new Error(`Mock: invalid lockTier ${lockTier}`);
+    }
     const key = `${identityId}-${this.signerAddress}`;
     const existing = this.delegatorLocks.get(key);
     if (!existing || lockTier > existing.lockTier) {
@@ -715,6 +729,10 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   isV10Ready(): boolean {
+    return true;
+  }
+
+  isRandomSamplingReady(): boolean {
     return true;
   }
 

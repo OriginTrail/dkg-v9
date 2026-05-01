@@ -310,7 +310,8 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
-    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-1:chat-1");
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-1");
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(`openclaw:telegram:bot:chat-1:${weakSessionKey}`);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("typed hello");
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed response");
   });
@@ -411,10 +412,72 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    const weakSessionA = (writer as any).weakSessionKey("telegram", "bot", "chat-A");
+    const weakSessionB = (writer as any).weakSessionKey("telegram", "bot", "chat-B");
     expect(mockClient.storeChatTurn.mock.calls.map((call) => call[0])).toEqual([
-      "openclaw:telegram:bot:chat-A:chat-A",
-      "openclaw:telegram:bot:chat-B:chat-B",
+      `openclaw:telegram:bot:chat-A:${weakSessionA}`,
+      `openclaw:telegram:bot:chat-B:${weakSessionB}`,
     ]);
+  });
+
+  it("T359 - weak typed session state promotes to real session before W4a backfill", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak typed q", metadata: { messageId: "weak-in-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak typed a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak" },
+    );
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-weak");
+    const weakSessionId = `openclaw:telegram:bot:chat-weak:${weakSessionKey}`;
+    expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+
+    const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "weak typed q" },
+        { role: "assistant", content: "weak typed a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    const strongSessionId = "openclaw:telegram:bot:chat-weak:real-sk";
+    expect((restarted as any).w4bSessionCounts.get(strongSessionId)).toBe(1);
+    expect((restarted as any).w4bSessionCounts.has(weakSessionId)).toBe(false);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    restarted.flushSync();
+  });
+
+  it("T359 - repeated same-text typed replies without outbound messageIds do not dedupe distinct turns", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "repeat q1", metadata: { messageId: "repeat-in-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "same answer", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "repeat q2", metadata: { messageId: "repeat-in-2" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "same answer", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-repeat" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("repeat q1");
+    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("repeat q2");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("same answer");
+    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("same answer");
   });
 
   it("flushSync clears debounce timers", () => {

@@ -850,21 +850,25 @@ export class DkgNodePlugin {
               this.observedTypedOptions('agent_end'),
             );
           }
-          if (typedNeedsRetry('message_received')) {
-            this.hookSurface.install(
-              'typed',
-              'message_received',
-              this.observedTypedHandler('message_received', this.makeTypedMessageReceivedHandler()),
-              this.observedTypedOptions('message_received'),
-            );
+          for (const event of ['message_received', 'message.received']) {
+            if (typedNeedsRetry(event)) {
+              this.hookSurface.install(
+                'typed',
+                event,
+                this.observedTypedHandler(event, this.makeTypedMessageReceivedHandler()),
+                this.observedTypedOptions(event),
+              );
+            }
           }
-          if (typedNeedsRetry('message_sent')) {
-            this.hookSurface.install(
-              'typed',
-              'message_sent',
-              this.observedTypedHandler('message_sent', this.makeTypedMessageSentHandler()),
-              this.observedTypedOptions('message_sent'),
-            );
+          for (const event of ['message_sent', 'message.sent']) {
+            if (typedNeedsRetry(event)) {
+              this.hookSurface.install(
+                'typed',
+                event,
+                this.observedTypedHandler(event, this.makeTypedMessageSentHandler()),
+                this.observedTypedOptions(event),
+              );
+            }
           }
           if (typedNeedsRetry('before_compaction')) {
             this.hookSurface.install(
@@ -978,18 +982,22 @@ export class DkgNodePlugin {
     // W4b typed message hooks - OpenClaw 2026.4.15 emits these for
     // Telegram delivery even when typed `agent_end` remains silent. W4a
     // stays installed above as canonical backfill for gateways that emit it.
-    this.hookSurface.install(
-      'typed',
-      'message_received',
-      this.observedTypedHandler('message_received', this.makeTypedMessageReceivedHandler()),
-      this.observedTypedOptions('message_received'),
-    );
-    this.hookSurface.install(
-      'typed',
-      'message_sent',
-      this.observedTypedHandler('message_sent', this.makeTypedMessageSentHandler()),
-      this.observedTypedOptions('message_sent'),
-    );
+    for (const event of ['message_received', 'message.received']) {
+      this.hookSurface.install(
+        'typed',
+        event,
+        this.observedTypedHandler(event, this.makeTypedMessageReceivedHandler()),
+        this.observedTypedOptions(event),
+      );
+    }
+    for (const event of ['message_sent', 'message.sent']) {
+      this.hookSurface.install(
+        'typed',
+        event,
+        this.observedTypedHandler(event, this.makeTypedMessageSentHandler()),
+        this.observedTypedOptions(event),
+      );
+    }
 
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism).
     // Internal hooks fire across both `full` and `setup-runtime` modes, so

@@ -230,6 +230,7 @@ export class ChatTurnWriter {
   private messageHookDedup: Map<string, number> = new Map();
   private messageHookInboundQueueKeys: Map<string, string> = new Map();
   private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
+  private static readonly WEAK_SESSION_PREFIX = "weak-";
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -943,7 +944,7 @@ export class ChatTurnWriter {
       metadata.threadId,
       endpoint,
     );
-    const sessionKey = firstString(
+    const strongSessionKey = firstString(
       ctx.sessionKey,
       event.sessionKey,
       eventContext.sessionKey,
@@ -952,9 +953,8 @@ export class ChatTurnWriter {
       event.sessionId,
       eventContext.sessionId,
       metadata.sessionId,
-      conversationId,
-      endpoint,
     );
+    const sessionKey = strongSessionKey ?? this.weakSessionKey(channelId, accountId, conversationId, endpoint);
     if (!channelId || !sessionKey) {
       this.logger.debug?.("[ChatTurnWriter] Dropping typed message hook without channel/session identity");
       return null;
@@ -1093,7 +1093,7 @@ export class ChatTurnWriter {
       const queuedItems = [...queue];
       const queuedMeta = [...(this.pendingUserMessageMeta.get(conversationKey) ?? [])];
       const userText = queuedItems.join("\n");
-      const outboundDedupKey = this.messageHookDedupKey("outbound", ev, assistantText);
+      const outboundDedupKey = this.messageHookDedupKey("outbound", ev, assistantText, queuedMeta, userText);
       if (this.markMessageHookDuplicate(outboundDedupKey)) {
         this.pendingUserMessages.delete(conversationKey);
         this.pendingUserMessageMeta.delete(conversationKey);
@@ -1284,6 +1284,8 @@ export class ChatTurnWriter {
     direction: "inbound" | "outbound",
     ev: InternalMessageEvent,
     text: string,
+    pendingMeta: PendingUserMessageMeta[] = [],
+    userText = "",
   ): string {
     const ctx = (ev as any)?.context ?? {};
     const channelId = firstString(ctx.channelId, (ev as any)?.channelId) ?? "unknown";
@@ -1300,6 +1302,25 @@ export class ChatTurnWriter {
       ].join("::");
     }
     const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
+    if (direction === "outbound") {
+      const inboundIds = pendingMeta
+        .map((meta) => meta.messageId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      if (inboundIds.length > 0) {
+        return [
+          "message-hook",
+          direction,
+          "inbound-msg",
+          this.identityHash([channelId, accountId, conversationId, sessionKey, ...inboundIds, text]),
+        ].join("::");
+      }
+      return [
+        "message-hook",
+        direction,
+        "turn-text",
+        this.identityHash([channelId, accountId, conversationId, sessionKey, userText, text]),
+      ].join("::");
+    }
     return [
       "message-hook",
       direction,
@@ -1348,6 +1369,81 @@ export class ChatTurnWriter {
       this.pendingUserMessageMeta.set(toKey, target);
       this.pendingUserMessageMeta.delete(fromKey);
     }
+  }
+
+  private promoteWeakSessionState(identity: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): void {
+    if (!identity.channelId || !identity.sessionKey || this.isWeakSessionKey(identity.sessionKey)) return;
+    const weakSessionKey = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+    if (!weakSessionKey) return;
+    const weakSessionId = this.composeSessionId({ ...identity, sessionKey: weakSessionKey });
+    const strongSessionId = this.composeSessionId(identity);
+    if (weakSessionId === strongSessionId) return;
+
+    let changed = false;
+    let durableChanged = false;
+    if (this.pendingUserMessages.has(weakSessionId) || this.pendingUserMessageMeta.has(weakSessionId)) {
+      this.movePendingInboundQueue(weakSessionId, strongSessionId);
+      changed = true;
+    }
+    const weakWatermark = this.cachedWatermarks.get(weakSessionId);
+    if (weakWatermark !== undefined) {
+      this.cachedWatermarks.set(strongSessionId, Math.max(this.cachedWatermarks.get(strongSessionId) ?? -1, weakWatermark));
+      this.cachedWatermarks.delete(weakSessionId);
+      changed = true;
+      durableChanged = true;
+    }
+    const weakW4bCount = this.w4bSessionCounts.get(weakSessionId);
+    if (weakW4bCount !== undefined) {
+      this.w4bSessionCounts.set(strongSessionId, Math.max(this.w4bSessionCounts.get(strongSessionId) ?? 0, weakW4bCount));
+      this.w4bSessionCounts.delete(weakSessionId);
+      changed = true;
+      durableChanged = true;
+    }
+    const weakTimer = this.debounceTimers.get(weakSessionId);
+    if (weakTimer) {
+      clearTimeout(weakTimer.timer);
+      this.debounceTimers.delete(weakSessionId);
+      const existingStrongTimer = this.debounceTimers.get(strongSessionId);
+      const promotedIndex = Math.max(existingStrongTimer?.pendingIndex ?? -1, weakTimer.pendingIndex);
+      this.saveWatermark(strongSessionId, promotedIndex);
+      changed = true;
+      durableChanged = true;
+    }
+    for (const [dedupKey, queueKey] of this.messageHookInboundQueueKeys.entries()) {
+      if (queueKey === weakSessionId) {
+        this.messageHookInboundQueueKeys.set(dedupKey, strongSessionId);
+        changed = true;
+      }
+    }
+    durableChanged = this.promoteCompositeSessionKeys(this.recentTurnIds, weakSessionId, strongSessionId) || durableChanged;
+    durableChanged = this.promoteCompositeSessionKeys(this.crossPathStamps, weakSessionId, strongSessionId) || durableChanged;
+    durableChanged = this.promoteCompositeSessionKeys(this.crossPathInflight, weakSessionId, strongSessionId) || durableChanged;
+    if (durableChanged) {
+      this.writeWatermarkFile();
+    } else if (changed) {
+      this.logger.debug?.("[ChatTurnWriter] Promoted weak typed-message session identity", {
+        weakSessionId,
+        strongSessionId,
+      });
+    }
+  }
+
+  private promoteCompositeSessionKeys(map: Map<string, number>, weakSessionId: string, strongSessionId: string): boolean {
+    let changed = false;
+    const prefix = `${weakSessionId}::`;
+    for (const [key, value] of Array.from(map.entries())) {
+      if (!key.startsWith(prefix)) continue;
+      const promotedKey = `${strongSessionId}${key.slice(weakSessionId.length)}`;
+      map.set(promotedKey, Math.max(map.get(promotedKey) ?? 0, value));
+      map.delete(key);
+      changed = true;
+    }
+    return changed;
   }
 
   /**
@@ -1870,6 +1966,25 @@ export class ChatTurnWriter {
       .slice(0, 16);
   }
 
+  private weakSessionKey(
+    channelId?: string,
+    accountId?: string,
+    conversationId?: string,
+    endpoint?: string,
+  ): string {
+    const weakIdentity = firstString(conversationId, endpoint);
+    if (!channelId || !weakIdentity) return "";
+    return `${ChatTurnWriter.WEAK_SESSION_PREFIX}${this.identityHash([
+      channelId,
+      accountId ?? "",
+      weakIdentity,
+    ])}`;
+  }
+
+  private isWeakSessionKey(sessionKey?: unknown): boolean {
+    return typeof sessionKey === "string" && sessionKey.startsWith(ChatTurnWriter.WEAK_SESSION_PREFIX);
+  }
+
   private externalTurnMarkerId(turnId?: unknown, user?: string, assistant?: string): string {
     if (typeof turnId !== "string" || turnId.trim().length === 0) return "";
     const idHash = createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16);
@@ -2088,6 +2203,7 @@ export class ChatTurnWriter {
   private deriveSessionId(ctx?: any): string {
     const identity = this.identityFieldsFromPayload(ctx);
     if (!identity.channelId || !identity.sessionKey) return "";
+    this.promoteWeakSessionState(identity);
     return this.composeSessionId(identity);
   }
 
@@ -2154,12 +2270,14 @@ export class ChatTurnWriter {
    */
   private deriveSessionIdFromEvent(ev: InternalMessageEvent): string {
     const ctx = (ev as any)?.context ?? {};
-    return this.composeSessionId({
+    const identity = {
       channelId: ctx.channelId ?? (ev as any)?.channelId,
       accountId: ctx.accountId,
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
-    });
+    };
+    this.promoteWeakSessionState(identity);
+    return this.composeSessionId(identity);
   }
 
   /**
@@ -2289,12 +2407,14 @@ export class ChatTurnWriter {
       return "";
     }
     const ctx = (ev as any)?.context ?? {};
-    return this.composeSessionId({
+    const identity = {
       channelId: ctx.channelId ?? (ev as any)?.channelId,
       accountId: ctx.accountId,
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
-    });
+    };
+    this.promoteWeakSessionState(identity);
+    return this.composeSessionId(identity);
   }
 
   private extractText(content: string | Array<{ type: string; text?: string }>): string {

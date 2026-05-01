@@ -3427,6 +3427,8 @@ describe('DkgNodePlugin', () => {
       expect(typedHandlers.has('agent_end')).toBe(true);
       expect(typedHandlers.has('message_received')).toBe(true);
       expect(typedHandlers.has('message_sent')).toBe(true);
+      expect(typedHandlers.has('message.received')).toBe(true);
+      expect(typedHandlers.has('message.sent')).toBe(true);
 
       typedHandlers.get('agent_end')!(
         { messages: [{ role: 'user', content: 'healthy q' }, { role: 'assistant', content: 'healthy a' }] },
@@ -3435,11 +3437,11 @@ describe('DkgNodePlugin', () => {
       await (plugin as any).chatTurnWriter.flush();
       expect(client.storeChatTurn).toHaveBeenCalledTimes(1);
 
-      typedHandlers.get('message_received')!(
+      typedHandlers.get('message.received')!(
         { from: 'user-1', content: 'typed q', metadata: { messageId: 'typed-in-1' } },
         { channelId: 'telegram', accountId: 'bot', conversationId: 'chat-1' },
       );
-      await typedHandlers.get('message_sent')!(
+      await typedHandlers.get('message.sent')!(
         { to: 'user-1', content: 'typed a', success: true },
         { channelId: 'telegram', accountId: 'bot', conversationId: 'chat-1' },
       );

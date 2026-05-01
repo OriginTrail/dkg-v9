@@ -32,7 +32,7 @@ import type {
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import type { ChatTurnWriter } from './ChatTurnWriter.js';
-import { resolveOpenClawMergedConfig } from './openclaw-config.js';
+import { isObjectRecord, looksLikeAdapterPluginConfig, resolveOpenClawMergedConfig } from './openclaw-config.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -503,7 +503,7 @@ export class DkgChannelPlugin {
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg = resolveOpenClawMergedConfig(api);
+    this.cfg = resolveOpenClawMergedConfig(api) ?? resolveDirectAdapterConfigFallback(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {
@@ -2470,4 +2470,17 @@ function getErrorMessage(err: unknown): string {
     return err.message;
   }
   return String(err);
+}
+
+function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  return [
+    anyApi?.cfg,
+    anyApi?.config,
+    anyApi?.pluginConfig,
+    runtime?.cfg,
+    runtime?.config,
+    runtime?.pluginConfig,
+  ].find((candidate) => isObjectRecord(candidate) && looksLikeAdapterPluginConfig(candidate));
 }

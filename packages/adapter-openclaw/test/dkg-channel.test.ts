@@ -152,6 +152,93 @@ describe('DkgChannelPlugin', () => {
     expect((plugin as any).cfg).toBe(fullConfig);
   });
 
+  it('uses direct plugin config as dispatch cfg fallback when no merged config exists', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct config reply' });
+      },
+    });
+    const directConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+    };
+    const fallbackRoute = trackAsyncFn(async () => ({
+      text: 'fallback',
+      correlationId: 'corr-direct-config',
+    }));
+    const api = makeApi({
+      config: directConfig,
+      runtime,
+      routeInboundMessage: fallbackRoute,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-config', 'owner');
+
+    expect(reply.text).toBe('Direct config reply');
+    expect(fallbackRoute.calls).toHaveLength(0);
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(directConfig);
+  });
+
+  it('keeps direct api.cfg ahead of stale api.pluginConfig for dispatch cfg fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct cfg reply' });
+      },
+    });
+    const liveConfig = {
+      daemonUrl: 'http://localhost:9300',
+      channel: { enabled: true, port: 0 },
+    };
+    const stalePluginConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      cfg: liveConfig,
+      pluginConfig: stalePluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-cfg', 'owner');
+
+    expect(reply.text).toBe('Direct cfg reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(liveConfig);
+  });
+
+  it('keeps current api.pluginConfig ahead of runtime direct config fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Plugin config reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9400',
+      channel: { enabled: true, port: 0 },
+    };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      pluginConfig: currentPluginConfig,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Plugin config reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
+  });
+
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
     const reassertSpy = vi.fn();
     plugin.setPreDispatchReAssert(reassertSpy);

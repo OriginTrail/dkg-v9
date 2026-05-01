@@ -282,10 +282,11 @@ describe('openclaw-entry', () => {
 
   it('deep-merges direct plugin memory and channel config over entry config', async () => {
     const entry = await loadEntryWithFakeRuntime();
-    const api = makeDirectPluginConfigApi({
-      memory: { enabled: false },
-      channel: { enabled: true },
-    }, {
+    const api = makeDirectPluginConfigApi({}, {
+      config: {
+        memory: { enabled: false },
+        channel: { enabled: true },
+      },
       cfg: {
         plugins: {
           entries: {
@@ -443,6 +444,93 @@ describe('openclaw-entry', () => {
       stateDir: '/fresh-direct/.dkg-adapter',
       memory: { enabled: false },
     });
+  });
+
+  it('keeps refreshed api.config ahead of stale api.pluginConfig', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9610',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    }, {
+      config: {
+        daemonUrl: 'http://127.0.0.1:9715',
+        memory: { enabled: false },
+        channel: { enabled: true, port: 9716 },
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9715',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9716 },
+    });
+  });
+
+  it('keeps refreshed api.cfg ahead of stale api.pluginConfig', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9615',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    }, {
+      cfg: {
+        daemonUrl: 'http://127.0.0.1:9725',
+        memory: { enabled: false },
+        channel: { enabled: true, port: 9726 },
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9725',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9726 },
+    });
+  });
+
+  it('keeps current entry config ahead of stale api.pluginConfig', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9620',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    }, {
+      cfg: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9735',
+                memory: { enabled: false },
+                channel: { enabled: true, port: 9736 },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9735',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9736 },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
   it('prefers live api.cfg over stale api.config for full OpenClaw config', async () => {

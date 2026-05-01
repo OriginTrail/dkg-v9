@@ -1032,14 +1032,7 @@ export class ChatTurnWriter {
     );
     if (channelId === "dkg-ui") return null;
     const accountId = firstString(ctx.accountId, event.accountId, eventContext.accountId, metadata.accountId, metadata.botId);
-    const conversationId = firstString(
-      ctx.conversationId,
-      event.conversationId,
-      eventContext.conversationId,
-      metadata.conversationId,
-      metadata.chatId,
-      metadata.threadId,
-    );
+    const conversationId = this.typedHookConversationId(event, eventContext, metadata, ctx);
     const strongSessionKey = firstString(
       ctx.sessionKey,
       event.sessionKey,
@@ -1116,6 +1109,25 @@ export class ChatTurnWriter {
       metadata.MessageId,
       metadata.message_id,
     );
+  }
+
+  private typedHookConversationId(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string | undefined {
+    const explicit = firstString(
+      ctx.conversationId,
+      event.conversationId,
+      eventContext.conversationId,
+      metadata.conversationId,
+    );
+    if (explicit) return explicit;
+    const chatId = firstString(ctx.chatId, event.chatId, eventContext.chatId, metadata.chatId);
+    const threadId = firstString(ctx.threadId, event.threadId, eventContext.threadId, metadata.threadId);
+    if (chatId && threadId) return `${chatId}:${threadId}`;
+    return threadId ?? chatId;
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {

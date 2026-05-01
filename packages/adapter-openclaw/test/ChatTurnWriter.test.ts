@@ -334,6 +334,34 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("numeric id response");
   });
 
+  it("T359 - Telegram topic fallback conversation includes chat and thread ids", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "topic one q", metadata: { chatId: 12345, threadId: 111, messageId: "topic-1-in" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-2", content: "topic two q", metadata: { chatId: 12345, threadId: 222, messageId: "topic-2-in" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "topic one a", success: true, metadata: { chatId: 12345, threadId: 111, messageId: "topic-1-out" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-2", content: "topic two a", success: true, metadata: { chatId: 12345, threadId: 222, messageId: "topic-2-out" } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+      ["topic one q", "topic one a"],
+      ["topic two q", "topic two a"],
+    ]);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toContain("12345%3A111");
+    expect(mockClient.storeChatTurn.mock.calls[1][0]).toContain("12345%3A222");
+  });
+
   it("T359 - typed message normalization accepts structured and ctx text content", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: [{ type: "text", text: "typed array hello" }] },

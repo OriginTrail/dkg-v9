@@ -1,7 +1,12 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DkgNodePlugin } from './dist/index.js';
+import {
+  DkgNodePlugin,
+  isObjectRecord,
+  looksLikeAdapterPluginConfig,
+  mergeAdapterPluginConfigs,
+} from './dist/index.js';
 
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
@@ -10,7 +15,7 @@ let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
-  const { config, workspaceDir, apiWorkspaceDir } = resolveEntryConfig(api);
+  const { config, workspaceDir, apiWorkspaceDir, configIsPartial } = resolveEntryConfig(api);
 
   // Pass only runtime/cfg workspace evidence to the API for auto-detection.
   // `installedWorkspace` remains setup metadata consumed by DkgNodePlugin's
@@ -22,7 +27,7 @@ export default function (api) {
 
   if (instance) {
     log.info?.('[dkg-entry] Re-registering plugin surfaces (channel, memory, tools) into new registry (gateway multi-phase init)');
-    instance.updateConfig?.(config);
+    instance.updateConfig?.(config, { partial: configIsPartial });
     instance.register(api);
     registerLifecycleService(api, log);
     syncSkillToWorkspace(workspaceDir, log);
@@ -53,30 +58,37 @@ export default function (api) {
 function resolveEntryConfig(api) {
   const anyApi = api;
   const runtime = anyApi?.runtime;
-  const fullConfigCandidates = [
+  const fullConfigCandidatesMostToLeast = [
+    anyApi?.config,
     anyApi?.cfg,
     runtime?.cfg,
     runtime?.config,
+  ].filter(isObjectRecord);
+  const fullConfigCandidatesLeastToMost = [
+    runtime?.config,
+    runtime?.cfg,
+    anyApi?.cfg,
     anyApi?.config,
-  ].filter(isObject);
+  ].filter(isObjectRecord);
   const mergedConfig =
-    fullConfigCandidates.find((candidate) => isObject(candidate.plugins) || isObject(candidate.agents)) ??
+    fullConfigCandidatesMostToLeast.find((candidate) => isObjectRecord(candidate.plugins) || isObjectRecord(candidate.agents)) ??
     {};
   const workspaceConfig =
-    fullConfigCandidates.find((candidate) =>
+    fullConfigCandidatesMostToLeast.find((candidate) =>
       typeof candidate?.agents?.defaults?.workspace === 'string' ||
       typeof candidate?.workspace === 'string'
     ) ??
     {};
-  const entryConfigs = fullConfigCandidates
+  const entryConfigs = fullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
-    .filter(isObject);
+    .filter(isObjectRecord);
   const directConfigs = [
-    anyApi?.pluginConfig,
-    looksLikePluginConfig(anyApi?.config) ? anyApi.config : undefined,
     runtime?.pluginConfig,
-  ].filter(isObject);
-  const config = mergePluginConfigs(...entryConfigs, ...directConfigs);
+    looksLikeAdapterPluginConfig(anyApi?.config) ? anyApi.config : undefined,
+    anyApi?.pluginConfig,
+  ].filter(isObjectRecord);
+  const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
+  const configIsPartial = entryConfigs.length === 0;
 
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -91,53 +103,7 @@ function resolveEntryConfig(api) {
   const syncWorkspaceDir =
     workspaceDir ??
     config.installedWorkspace;
-  return { config, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir };
-}
-
-function isObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function looksLikePluginConfig(value) {
-  if (!isObject(value)) return false;
-  if (isObject(value.plugins) || isObject(value.agents) || typeof value.workspace === 'string') {
-    return false;
-  }
-  return [
-    'daemonUrl',
-    'dkgHome',
-    'stateDir',
-    'stateDirSource',
-    'installedWorkspace',
-    'memory',
-    'channel',
-  ].some((key) => Object.prototype.hasOwnProperty.call(value, key));
-}
-
-function mergePluginConfigs(...configs) {
-  const merged = {};
-  for (const config of configs) {
-    const priorMemory = isObject(merged.memory) ? merged.memory : undefined;
-    const priorChannel = isObject(merged.channel) ? merged.channel : undefined;
-    const nextMemory = isObject(config.memory) ? config.memory : undefined;
-    const nextChannel = isObject(config.channel) ? config.channel : undefined;
-    Object.assign(merged, config);
-    if (priorMemory || nextMemory) {
-      if (nextMemory) {
-        merged.memory = { ...(priorMemory ?? {}), ...nextMemory };
-      } else if (!Object.prototype.hasOwnProperty.call(config, 'memory')) {
-        merged.memory = priorMemory;
-      }
-    }
-    if (priorChannel || nextChannel) {
-      if (nextChannel) {
-        merged.channel = { ...(priorChannel ?? {}), ...nextChannel };
-      } else if (!Object.prototype.hasOwnProperty.call(config, 'channel')) {
-        merged.channel = priorChannel;
-      }
-    }
-  }
-  return merged;
+  return { config, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

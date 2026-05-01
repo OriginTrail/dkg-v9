@@ -51,6 +51,7 @@ import {
   workspaceDirForDefaultStateDir,
   type ChatTurnWriterStateLayout,
 } from './state-dir-path.js';
+import { mergeAdapterPluginConfigs } from './openclaw-config.js';
 
 // Same eth-address shape accepted by `toEip55Checksum`. Kept local so the
 // dkg_query explicit `agent_address` normalization can avoid throwing for
@@ -396,10 +397,15 @@ export class DkgNodePlugin {
     this.config = { ...config };
   }
 
-  updateConfig(config?: DkgOpenClawConfig): void {
+  updateConfig(config?: DkgOpenClawConfig, options: { partial?: boolean } = {}): void {
     if (!config || typeof config !== 'object') return;
     const previousConfig = this.config;
-    this.config = { ...config };
+    this.config = options.partial
+      ? mergeAdapterPluginConfigs(
+        this.config as unknown as Record<string, unknown>,
+        config as unknown as Record<string, unknown>,
+      ) as unknown as DkgOpenClawConfig
+      : { ...config };
     this.refreshDaemonClientForConfigUpdate(previousConfig);
   }
 
@@ -1319,10 +1325,13 @@ export class DkgNodePlugin {
     const memoryConfig = this.config.memory;
     if (!memoryConfig?.enabled && this.memoryPlugin) {
       this.channelPlugin?.setPreDispatchReAssert(null);
-      this.memoryPlugin.invalidateRegistration();
+      const disabledCapabilityRegistered = this.memoryPlugin.disable(api);
       void this.memoryPlugin.close();
       this.memoryPlugin = null;
       this.memoryResolverApi = null;
+      if (disabledCapabilityRegistered) {
+        api.logger.info?.('[dkg] Memory module disabled — registered inactive memory capability to clear the previous DKG runtime');
+      }
     }
     if (memoryConfig?.enabled) {
       if (!this.memoryPlugin) {

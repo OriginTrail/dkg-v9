@@ -36,6 +36,12 @@ export {
   CHAT_TURNS_ASSERTION,
   PROJECT_MEMORY_ASSERTION,
 } from './DkgMemoryPlugin.js';
+export {
+  isObjectRecord,
+  looksLikeAdapterPluginConfig,
+  mergeAdapterPluginConfigs,
+  resolveOpenClawMergedConfig,
+} from './openclaw-config.js';
 export type {
   DkgMemorySession,
   DkgMemorySessionResolver,

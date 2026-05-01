@@ -12,6 +12,7 @@ type CapturedService = {
 
 type FakePluginInstance = {
   config: any;
+  updateConfigCalls: Array<{ config: any; options: any }>;
   registerCalls: any[];
   workspaceDirsAtRegister: Array<unknown>;
   stopCalls: number;
@@ -41,17 +42,56 @@ describe('openclaw-entry', () => {
     writeFileSync(
       join(root, 'dist', 'index.js'),
       [
+        'const ADAPTER_PLUGIN_CONFIG_KEYS = [',
+        "  'daemonUrl',",
+        "  'dkgHome',",
+        "  'stateDir',",
+        "  'stateDirSource',",
+        "  'installedWorkspace',",
+        "  'memory',",
+        "  'channel',",
+        '];',
+        'export function isObjectRecord(value) {',
+        "  return !!value && typeof value === 'object' && !Array.isArray(value);",
+        '}',
+        'export function looksLikeAdapterPluginConfig(value) {',
+        '  if (!isObjectRecord(value)) return false;',
+        "  if (isObjectRecord(value.plugins) || isObjectRecord(value.agents) || typeof value.workspace === 'string') return false;",
+        '  return ADAPTER_PLUGIN_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(value, key));',
+        '}',
+        'export function mergeAdapterPluginConfigs(...configs) {',
+        '  const merged = {};',
+        '  for (const config of configs) {',
+        '    if (!isObjectRecord(config)) continue;',
+        '    const priorMemory = isObjectRecord(merged.memory) ? merged.memory : undefined;',
+        '    const priorChannel = isObjectRecord(merged.channel) ? merged.channel : undefined;',
+        '    const nextMemory = isObjectRecord(config.memory) ? config.memory : undefined;',
+        '    const nextChannel = isObjectRecord(config.channel) ? config.channel : undefined;',
+        '    Object.assign(merged, config);',
+        '    if (priorMemory || nextMemory) {',
+        '      if (nextMemory) merged.memory = { ...(priorMemory ?? {}), ...nextMemory };',
+        "      else if (!Object.prototype.hasOwnProperty.call(config, 'memory')) merged.memory = priorMemory;",
+        '    }',
+        '    if (priorChannel || nextChannel) {',
+        '      if (nextChannel) merged.channel = { ...(priorChannel ?? {}), ...nextChannel };',
+        "      else if (!Object.prototype.hasOwnProperty.call(config, 'channel')) merged.channel = priorChannel;",
+        '    }',
+        '  }',
+        '  return merged;',
+        '}',
         'export class DkgNodePlugin {',
         '  constructor(config) {',
         '    this.config = config;',
+        '    this.updateConfigCalls = [];',
         '    this.registerCalls = [];',
         '    this.workspaceDirsAtRegister = [];',
         '    this.stopCalls = 0;',
         '    globalThis.__openclawEntryTestInstances ??= [];',
         '    globalThis.__openclawEntryTestInstances.push(this);',
         '  }',
-        '  updateConfig(config) {',
-        '    this.config = { ...config };',
+        '  updateConfig(config, options = {}) {',
+        '    this.updateConfigCalls.push({ config, options });',
+        '    this.config = options.partial ? mergeAdapterPluginConfigs(this.config, config) : { ...config };',
         '  }',
         '  register(api) { this.registerCalls.push(api); this.workspaceDirsAtRegister.push(api.workspaceDir); }',
         '  async stop() { this.stopCalls += 1; }',
@@ -237,6 +277,140 @@ describe('openclaw-entry', () => {
     });
   });
 
+  it('keeps current api plugin config ahead of stale runtime plugin config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9660',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9661 },
+    }, {
+      runtime: {
+        pluginConfig: {
+          daemonUrl: 'http://127.0.0.1:9550',
+          memory: { enabled: true },
+          channel: { enabled: false, port: 9551 },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9660',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9661 },
+    });
+  });
+
+  it('keeps current api config entry ahead of stale runtime config entry', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      cfg: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9665',
+                memory: { enabled: false },
+              },
+            },
+          },
+        },
+      },
+      runtime: {
+        config: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9555',
+                  memory: { enabled: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9665',
+      memory: { enabled: false },
+    });
+  });
+
+  it('keeps current full api.config workspace and entry ahead of stale runtime config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      config: {
+        agents: { defaults: { workspace: '/fresh-workspace' } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9670',
+                stateDir: '/fresh-workspace/.dkg-adapter',
+              },
+            },
+          },
+        },
+      },
+      runtime: {
+        config: {
+          agents: { defaults: { workspace: '/stale-workspace' } },
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9560',
+                  stateDir: '/stale-workspace/.dkg-adapter',
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe('/fresh-workspace');
+    expect(instance.workspaceDirsAtRegister).toEqual(['/fresh-workspace']);
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9670',
+      stateDir: '/fresh-workspace/.dkg-adapter',
+    });
+  });
+
+  it('keeps plugin-shaped api.config ahead of stale runtime plugin config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      config: {
+        stateDir: '/fresh-direct/.dkg-adapter',
+        memory: { enabled: false },
+      },
+      runtime: {
+        pluginConfig: {
+          stateDir: '/stale-direct/.dkg-adapter',
+          memory: { enabled: true },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      stateDir: '/fresh-direct/.dkg-adapter',
+      memory: { enabled: false },
+    });
+  });
+
   it('refreshes singleton config before multi-phase re-registration', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
@@ -256,8 +430,35 @@ describe('openclaw-entry', () => {
       stateDir: '/second/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/second',
+      memory: { enabled: true },
+      channel: { enabled: false },
     });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
     expect(instance.registerCalls).toEqual([firstApi, secondApi]);
+  });
+
+  it('merges direct-only partial re-registration without dropping existing modules', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      stateDir: '/partial/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial',
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: '/partial/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
   it('resolves workspace from runtime.config even when it only carries workspace metadata', async () => {
@@ -306,6 +507,7 @@ describe('openclaw-entry', () => {
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((secondApi as any).workspaceDir).toBe('/cfg-workspace');
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
     expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/cfg-workspace']);
   });
 

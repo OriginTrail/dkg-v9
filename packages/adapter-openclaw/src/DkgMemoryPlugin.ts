@@ -612,6 +612,27 @@ export class DkgMemoryPlugin {
     }
   }
 
+  disable(api?: OpenClawPluginApi): boolean {
+    const hadRegisteredCapability = this.registeredCapability !== null;
+    const targetApi = typeof api?.registerMemoryCapability === 'function'
+      ? api
+      : this.registeredApi;
+
+    try {
+      if (
+        hadRegisteredCapability &&
+        targetApi &&
+        typeof targetApi.registerMemoryCapability === 'function'
+      ) {
+        targetApi.registerMemoryCapability(buildDisabledMemoryCapability());
+        return true;
+      }
+      return false;
+    } finally {
+      this.invalidateRegistration();
+    }
+  }
+
   register(api: OpenClawPluginApi): boolean {
     return this.registerCapability(api);
   }
@@ -719,6 +740,26 @@ export class DkgMemoryPlugin {
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
   }
+}
+
+function buildDisabledMemoryCapability(): MemoryPluginCapability {
+  return {
+    promptBuilder: () => [],
+    runtime: {
+      async getMemorySearchManager(): Promise<MemoryRuntimeResult> {
+        return {
+          manager: null,
+          error: 'DKG memory capability disabled by adapter config',
+        };
+      },
+      resolveMemoryBackendConfig() {
+        return { kind: 'disabled', provider: 'dkg' };
+      },
+      async closeAllMemorySearchManagers() {
+        // Disabled capability has no managers to drain.
+      },
+    },
+  };
 }
 
 /**

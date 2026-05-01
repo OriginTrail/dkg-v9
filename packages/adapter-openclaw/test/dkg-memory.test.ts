@@ -122,6 +122,23 @@ describe('DkgMemoryPlugin.register', () => {
     expect(((result.manager as DkgMemorySearchManager) as any).deps.client.baseUrl).toBe('http://localhost:9300');
   });
 
+  it('registers an inactive capability when disabled after owning the slot', async () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+  });
+
   it('registers a prompt builder that teaches WM identity selection', () => {
     const api = makeApi();
     plugin.register(api);

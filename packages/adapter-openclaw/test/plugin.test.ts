@@ -24,6 +24,49 @@ describe('DkgNodePlugin', () => {
     expect(plugin).toBeDefined();
   });
 
+  it('merges partial config refreshes without dropping existing module config', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true, memoryDir: '/memory' },
+      channel: { enabled: true, port: 9201 },
+    });
+
+    plugin.updateConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    }, { partial: true });
+
+    expect((plugin as any).config).toMatchObject({
+      daemonUrl: 'http://localhost:9200',
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+      memory: { enabled: true, memoryDir: '/memory' },
+      channel: { enabled: true, port: 9201 },
+    });
+  });
+
+  it('replaces config snapshots when the refresh is fully materialized', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9201 },
+    });
+
+    plugin.updateConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    });
+
+    expect((plugin as any).config).toEqual({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    });
+  });
+
   it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
     // Pre-fix: when memory slot was owned by a different plugin, the
     // resolver bootstrap (`memoryResolverApi = api` + `refreshMemoryResolverState`)
@@ -181,6 +224,56 @@ describe('DkgNodePlugin', () => {
       registerSpy.mockRestore();
       stopSpy.mockRestore();
     }
+  });
+
+  it('clears a registered memory capability when refreshed config disables memory', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const activeCapability = registerMemoryCapability.mock.calls[0][0];
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = registerMemoryCapability.mock.calls[1][0];
+    expect(disabledCapability).not.toBe(activeCapability);
+    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    const result = await disabledCapability.runtime.getMemorySearchManager({});
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+
+    oldMemoryPlugin.reAssertCapability();
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
   it('registers session_end hook and all exported tools via register()', () => {

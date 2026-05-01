@@ -609,7 +609,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('treats sparse direct re-registration config as partial', async () => {
+  it('treats sparse direct re-registration config as a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -623,10 +623,10 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9800',
-      memory: { enabled: true },
-      channel: { enabled: false, port: 9801 },
+      channel: { port: 9801 },
     });
-    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+    expect(instance.config).not.toHaveProperty('memory');
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
   it('does not backfill stale runtime config when current direct config is state-only partial', async () => {
@@ -765,6 +765,7 @@ describe('openclaw-entry', () => {
                 'adapter-openclaw': {
                   config: {
                     daemonUrl: 'http://127.0.0.1:9500',
+                    dkgHome: '/old-daemon-home',
                     memory: { enabled: true },
                     channel: { enabled: false },
                   },
@@ -781,6 +782,7 @@ describe('openclaw-entry', () => {
       expect(instance.config).toMatchObject({
         daemonUrl: 'http://127.0.0.1:9730',
         stateDir: '/bootstrap-env/.dkg-adapter',
+        dkgHome: undefined,
         memory: { enabled: true },
         channel: { enabled: false },
       });

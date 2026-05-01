@@ -184,6 +184,9 @@ describe('DkgNodePlugin', () => {
       });
       (plugin as any).client = {};
       (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+      const syncLocalAgentSpy = vi
+        .spyOn(plugin as any, 'syncLocalAgentIntegrationState')
+        .mockResolvedValue(undefined);
       (plugin as any).chatTurnWriter = {} as any;
       const registerMemoryCapability = vi.fn();
       const mockApi = {
@@ -201,7 +204,7 @@ describe('DkgNodePlugin', () => {
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       } as unknown as OpenClawPluginApi;
 
-      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true, registrationMode: 'full' });
       const firstChannelPlugin = (plugin as any).channelPlugin;
       const chatTurnWriter = (plugin as any).chatTurnWriter;
 
@@ -210,7 +213,10 @@ describe('DkgNodePlugin', () => {
         channel: { enabled: true, port: 9202 },
         memory: { enabled: true },
       });
-      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true, registrationMode: 'full' });
+      (plugin as any).scheduleLocalAgentIntegrationRetry(mockApi, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+      (plugin as any).registerLocalAgentIntegration(mockApi, 'full');
 
       expect(firstChannelPlugin).toBeDefined();
       expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
@@ -218,6 +224,8 @@ describe('DkgNodePlugin', () => {
       expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
       expect(registerSpy).toHaveBeenCalledTimes(1);
       expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+      expect(syncLocalAgentSpy).not.toHaveBeenCalled();
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
 
       const stopInFlight = (plugin as any).channelPluginStopInFlight;
       resolveStop();
@@ -229,6 +237,7 @@ describe('DkgNodePlugin', () => {
       expect((secondChannelPlugin as any).chatTurnWriter).toBe(chatTurnWriter);
       expect((secondChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
       expect(registerSpy).toHaveBeenCalledTimes(2);
+      expect(syncLocalAgentSpy).toHaveBeenCalledTimes(1);
     } finally {
       registerSpy.mockRestore();
       stopSpy.mockRestore();

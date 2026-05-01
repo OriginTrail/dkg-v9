@@ -1507,6 +1507,9 @@ export class DkgNodePlugin {
     }
 
     this.clearLocalAgentIntegrationRetry();
+    if (this.channelPluginStopInFlight) {
+      return;
+    }
     void this.syncLocalAgentIntegrationState(api, registrationMode, this.daemonClientGeneration);
   }
 

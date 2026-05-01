@@ -120,18 +120,31 @@ function resolveEntryConfig(api, options = {}) {
       : fallbackDirectConfigs;
   const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
-  const hasSparseDirectConfig =
-    entryConfigs.length === 0 &&
-    directConfigs.some(isSparseDirectAdapterConfig);
   const configIsPartial =
     !hasConfigSource ||
-    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig)) ||
-    hasSparseDirectConfig;
+    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
+  const currentConfigSources = [
+    ...currentEntryConfigs,
+    ...currentDirectConfigs,
+  ];
+  const daemonUrlFromCurrentConfig = currentConfigSources.some((candidate) =>
+    Object.prototype.hasOwnProperty.call(candidate, 'daemonUrl')
+  );
+  const dkgHomeFromCurrentConfig = currentConfigSources.some((candidate) =>
+    Object.prototype.hasOwnProperty.call(candidate, 'dkgHome')
+  );
 
+  const daemonUrlFromEnv = !!process.env.DKG_DAEMON_URL;
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
   }
   const fallbackConfig = mergeAdapterPluginConfigs(...fallbackEntryConfigs, ...fallbackDirectConfigs);
+  if (configIsPartial && (daemonUrlFromEnv || daemonUrlFromCurrentConfig) && !dkgHomeFromCurrentConfig) {
+    delete fallbackConfig.dkgHome;
+    if (!Object.prototype.hasOwnProperty.call(config, 'dkgHome')) {
+      config.dkgHome = undefined;
+    }
+  }
   const bootstrapConfig = configIsPartial
     ? mergeAdapterPluginConfigs(fallbackConfig, config)
     : config;
@@ -177,16 +190,6 @@ function directPluginConfigFrom(config, options = {}) {
     return config;
   }
   return undefined;
-}
-
-function isSparseDirectAdapterConfig(config) {
-  if (!isObjectRecord(config) || !looksLikeAdapterPluginConfig(config)) return false;
-  const keys = Object.keys(config);
-  if (keys.length === 0) return false;
-  return !(
-    Object.prototype.hasOwnProperty.call(config, 'memory') &&
-    Object.prototype.hasOwnProperty.call(config, 'channel')
-  );
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

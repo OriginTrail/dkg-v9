@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computePublishACKDigest,
 } from '@origintrail-official/dkg-core';
@@ -30,6 +33,7 @@ describe('StorageACKHandler', () => {
     makeQuad('urn:entity:2', 'urn:p', 'urn:o3'),
   ];
   const merkleRoot = computeFlatKCRoot(swmQuads, []);
+  const swmMerkleLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
 
   const coreWallet = ethers.Wallet.createRandom();
   const coreIdentityId = 42n;
@@ -70,6 +74,7 @@ describe('StorageACKHandler', () => {
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
       epochs: 1,
       tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
     });
 
     const response = await handler.handler(intent, fakePeerId);
@@ -90,6 +95,7 @@ describe('StorageACKHandler', () => {
       300n,
       1n,
       1000n,
+      BigInt(swmMerkleLeafCount),
     );
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {

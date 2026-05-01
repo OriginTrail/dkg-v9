@@ -65,5 +65,12 @@ export {
   type PeerHealth,
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
+export {
+  bindRandomSampling,
+  type RandomSamplingBindOptions,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+  type AgentRole,
+} from './random-sampling-bind.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';

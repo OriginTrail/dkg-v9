@@ -320,6 +320,7 @@ function createV10ACKProviderForPublisher(
     tokenAmount,
     swmGraphId,
     subGraphName,
+    merkleLeafCount,
   ) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
@@ -342,6 +343,12 @@ function createV10ACKProviderForPublisher(
       throw new Error(
         `Async V10 publish requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
         `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+      throw new Error(
+        `Async V10 publish requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+        'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
       );
     }
     const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
@@ -369,6 +376,7 @@ function createV10ACKProviderForPublisher(
       tokenAmount,
       swmGraphId,
       subGraphName,
+      merkleLeafCount,
     });
     return result.acks;
   };

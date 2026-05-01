@@ -60,6 +60,30 @@ log() {
   echo "[devnet] $*"
 }
 
+# Check whether Docker is responsive within `timeout_s` seconds. We use
+# a background-process pattern instead of relying on `timeout(1)` since
+# macOS doesn't ship it without coreutils. A wedged Docker daemon would
+# otherwise hang the whole devnet start at `docker info` indefinitely
+# (observed on this machine — `start_blazegraph` waited >5min before we
+# noticed). 0 → Docker reachable; non-zero → not reachable / wedged.
+docker_responsive() {
+  local timeout_s=${1:-3}
+  ( docker info >/dev/null 2>&1 ) &
+  local probe_pid=$!
+  local waited=0
+  while kill -0 "$probe_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout_s" ]; then
+      kill -9 "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$probe_pid" 2>/dev/null
+  return $?
+}
+
 fund_wallet() {
   local address=$1
   local amount="0x56BC75E2D63100000"  # 100 ETH in hex wei
@@ -177,8 +201,8 @@ deploy_contracts() {
 BLAZEGRAPH_AVAILABLE=false
 
 start_blazegraph() {
-  if ! docker info > /dev/null 2>&1; then
-    log "Docker not available — nodes 3-4 will use Oxigraph instead of Blazegraph"
+  if ! docker_responsive 3; then
+    log "Docker not responsive within 3s — nodes 3-4 will use Oxigraph instead of Blazegraph"
     return 0
   fi
 
@@ -233,8 +257,8 @@ start_oxigraph_servers() {
   if [ "$NUM_NODES" -lt 5 ]; then
     return 0
   fi
-  if ! docker info > /dev/null 2>&1; then
-    log "Docker not available — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+  if ! docker_responsive 3; then
+    log "Docker not responsive within 3s — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
     return 0
   fi
   if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
@@ -280,6 +304,7 @@ start_oxigraph_servers() {
 }
 
 stop_oxigraph_servers() {
+  if ! docker_responsive 3; then return 0; fi
   for name in $OXIGRAPH_CONTAINER_5 $OXIGRAPH_CONTAINER_6; do
     if docker inspect "$name" > /dev/null 2>&1; then
       docker rm -f "$name" > /dev/null 2>&1 || true
@@ -289,6 +314,7 @@ stop_oxigraph_servers() {
 }
 
 stop_blazegraph() {
+  if ! docker_responsive 3; then return 0; fi
   if docker inspect "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1; then
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
     log "Stopped Blazegraph container"
@@ -343,7 +369,17 @@ create_node_config() {
     devnet_auth_block='"auth": { "enabled": false },'
   fi
 
-  # Create config
+  # Random Sampling prover (core-only). For devnet we want a
+  # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
+  # trail) and a fast tick (5s) so the e2e test sees a submitted
+  # proof within a few seconds of publishing instead of the 30s
+  # production default. Edge nodes ignore this block — bindRandomSampling
+  # short-circuits on role !== 'core' before reading any of these.
+  local rs_block=""
+  if [ "$node_role" = "core" ]; then
+    rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
+  fi
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -354,6 +390,7 @@ create_node_config() {
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
   ${devnet_auth_block}
+  ${rs_block}
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
@@ -657,10 +694,20 @@ cmd_start() {
 
       const token    = new ethers.Contract(c('Token'),          ['function mint(address,uint256)', 'function approve(address,uint256)'], provider);
       const identity = new ethers.Contract(c('IdentityStorage'), ['function getIdentityId(address) view returns (uint72)'], provider);
-      const staking  = new ethers.Contract(c('Staking'),         ['function stake(uint72,uint96)'], provider);
+      // v4.0.0 — V10 staking consolidation: stake via DKGStakingConvictionNFT.createConviction,
+      // which mints a V10 NFT position, writes nodeStakeV10 in ConvictionStakingStorage, and
+      // routes TRAC to the V10 vault (CSS). The legacy V8 Staking.stake path updates only
+      // StakingStorage and leaves nodeStakeV10 = 0, so RandomSampling.calculateNodeScore
+      // (which reads getNodeStakeV10) would compute zero and node scores would never grow.
+      const stakingNFT = new ethers.Contract(
+        c('DKGStakingConvictionNFT'),
+        // lockTier is uint40 in V10 (L3 — widened from uint8 to support tier ids > 255).
+        ['function createConviction(uint72,uint96,uint40)'],
+        provider
+      );
+      const stakingV10Addr = c('StakingV10');
       const profile  = new ethers.Contract(c('Profile'),         ['function updateAsk(uint72,uint96)'], provider);
 
-      const stakingAddr = c('Staking');
       const signers = await provider.listAccounts();
       const n = Math.min(signers.length, $NUM_NODES);
 
@@ -688,11 +735,17 @@ cmd_start() {
 
         const stakeAmount = ethers.parseEther('50000');
         const askAmount = ethers.parseEther('1');
+        // Lock tier 1 (1-month). Cheapest tier with non-zero multiplier; sufficient
+        // for devnet random-sampling soak tests where we need nodeStakeV10 > 0.
+        const lockTier = 1;
         try {
           const deployer = await provider.getSigner(0);
           await (await token.connect(deployer).mint(signer.address, stakeAmount)).wait();
-          await (await token.connect(signer).approve(stakingAddr, stakeAmount)).wait();
-          await (await staking.connect(signer).stake(idId, stakeAmount)).wait();
+          // StakingV10.stake pulls TRAC via transferFrom(staker, address(CSS), amount)
+          // gated by allowance to StakingV10. Approve StakingV10 here, NOT the NFT —
+          // the NFT is only the entry point and never custodies TRAC.
+          await (await token.connect(signer).approve(stakingV10Addr, stakeAmount)).wait();
+          await (await stakingNFT.connect(signer).createConviction(idId, stakeAmount, lockTier)).wait();
           staked++;
         } catch (e) { console.log('Stake failed for node ' + (i+1) + ': ' + e.message); }
 

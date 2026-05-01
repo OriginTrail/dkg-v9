@@ -91,6 +91,19 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getBlockTimestamp',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
+  // Random Sampling (Slice 1) — TS-private helpers that survive into
+  // the runtime prototype. The five public methods (createChallenge,
+  // submitProof, getActiveProofPeriodStatus, getNodeChallenge,
+  // getNodeEpochProofPeriodScore) ARE mirrored on MockChainAdapter; only
+  // these internal helpers stay EVM-only.
+  'requireRandomSampling',
+  'translateRandomSamplingError',
+  'toNodeChallenge',
+  // KC views (Phase 1) — TS-private helpers; the four public methods
+  // (getLatestMerkleRoot, getMerkleLeafCount, getLatestMerkleRootPublisher,
+  // getKCContextGraphId) ARE mirrored on MockChainAdapter.
+  'requireKCStorage',
+  'requireContextGraphStorage',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

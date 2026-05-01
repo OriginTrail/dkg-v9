@@ -27,6 +27,15 @@ import type {
   V10UpdateKCParams,
   ConvictionAccountInfo,
   PermanentPublishParams,
+  NodeChallenge,
+  ProofPeriodStatus,
+  CreateChallengeResult,
+} from './chain-adapter.js';
+import {
+  NoEligibleContextGraphError,
+  NoEligibleKnowledgeCollectionError,
+  MerkleRootMismatchError,
+  ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -45,9 +54,13 @@ const ERROR_ABI_CONTRACTS = [
   'KnowledgeAssets', 'KnowledgeAssetsV10', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
   'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
   'ContextGraphNameRegistry', 'Profile', 'Identity', 'IdentityStorage',
-  'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
+  'Staking', 'StakingStorage', 'StakingV10', 'StakingKPI',
+  'ConvictionStakingStorage',
+  'DKGStakingConvictionNFT', 'DKGPublishingConvictionNFT',
+  'Hub', 'Token', 'Ask', 'AskStorage',
   'Paymaster', 'ShardingTable', 'ParametersStorage',
   'PublishingConvictionAccount',
+  'RandomSampling', 'RandomSamplingStorage',
 ];
 
 let _errorInterface: Interface | null = null;
@@ -91,7 +104,19 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
  */
 export function enrichEvmError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
-  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
+  // Match the revert-data hex across the RPC-shape variants we see in the
+  // wild. CH-10:
+  //   - Hardhat:        ... data="0x..."             (key="value", quoted)
+  //   - Geth:           ... data: "0x..."            (key: value, JS-object)
+  //   - Geth no-quote:  ... data=0x...               (key=value, unquoted)
+  //   - Infura/Alchemy: ... errorData="0x..."        (errorData= prefix)
+  //   - JSON body:      ... "data":"0x..."           (JSON-encoded provider error)
+  // Leading non-letter (or string start) ensures `errorData` doesn't match
+  // as `data`. Separator class accepts any combination of `=`, `:`, `"`,
+  // `'`, whitespace.
+  const match = err.message.match(
+    /(?:^|[^a-zA-Z])(?:errorData|data)["':=\s]+(0x[0-9a-fA-F]+)/,
+  );
   if (!match) return null;
   const decoded = decodeEvmError(match[1]);
   if (!decoded) return null;
@@ -128,6 +153,8 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
+  randomSampling?: Contract;
+  randomSamplingStorage?: Contract;
 }
 
 /**
@@ -269,6 +296,13 @@ export class EVMChainAdapter implements ChainAdapter {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
     }
 
+    try {
+      this.contracts.randomSampling = await this.resolveContract('RandomSampling');
+      this.contracts.randomSamplingStorage = await this.resolveContract('RandomSamplingStorage');
+    } catch {
+      // RandomSampling not deployed — proof submission unavailable
+    }
+
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
     if (tokenAddress !== ethers.ZeroAddress) {
       this.contracts.token = new Contract(
@@ -310,7 +344,7 @@ export class EVMChainAdapter implements ChainAdapter {
     return id;
   }
 
-  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     await this.init();
 
     let identityId = await this.getIdentityId();
@@ -348,21 +382,40 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    // Step 2: Stake if token is available (separate try/catch so profile isn't lost)
+    // Step 2: Stake via V10 path (separate try/catch so profile isn't lost).
+    //
+    // V10 consolidation (v4.0.0): stake routes through
+    // `DKGStakingConvictionNFT.createConviction(identityId, amount, lockTier)`,
+    // which mints a V10 NFT position, writes `nodeStakeV10` in
+    // `ConvictionStakingStorage`, and pulls TRAC into the V10 vault (CSS) via
+    // `StakingV10`. The legacy V8 `Staking.stake` path updates only V8
+    // `StakingStorage` and leaves `nodeStakeV10 = 0`, so
+    // `RandomSampling.calculateNodeScore` (which reads `getNodeStakeV10`
+    // exclusively) computes zero and node scores never grow — exactly the
+    // bug we just chased on devnet. This path mirrors `scripts/devnet.sh`.
+    //
+    // TRAC allowance must go to `StakingV10` (the actual `transferFrom`
+    // caller), NOT to the NFT — the NFT is only the entry point and never
+    // custodies TRAC.
     const stakeAmount = options?.stakeAmount ?? ethers.parseEther('50000');
+    const lockTier = options?.lockTier ?? 1; // tier 1 = 1-month, cheapest non-zero multiplier
     if (stakeAmount > 0n && this.contracts.token) {
       try {
-        const stakingAddr = await this.contracts.staking!.getAddress();
-        const approveTx = await this.contracts.token.approve(stakingAddr, stakeAmount);
+        const stakingNFT = await this.resolveContract('DKGStakingConvictionNFT');
+        const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+        if (stakingV10Addr === ethers.ZeroAddress) {
+          throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+        }
+        const approveTx = await this.contracts.token.approve(stakingV10Addr, stakeAmount);
         await approveTx.wait();
         // Wait an extra block for state propagation on public RPCs
         await new Promise(r => setTimeout(r, 2000));
 
-        const stakeTx = await this.contracts.staking!.stake(identityId, stakeAmount);
+        const stakeTx = await stakingNFT.createConviction(identityId, stakeAmount, lockTier);
         await stakeTx.wait();
       } catch (err) {
         console.warn(
-          `[ensureProfile] Staking failed for identity ${identityId} (profile exists, stake manually): ` +
+          `[ensureProfile] V10 staking failed for identity ${identityId} (profile exists, stake manually via DKGStakingConvictionNFT.createConviction): ` +
           (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -1159,6 +1212,23 @@ export class EVMChainAdapter implements ChainAdapter {
       i === arr.findIndex((a) => a.identityId === s.identityId),
     );
 
+    // V9→V10 mirror: RandomSampling reads `merkleLeafCount` from on-chain
+    // storage to pick `chunkId`. Silently writing 1 here would brick every
+    // bridged KC whose flat-KC tree has more than one leaf (the prover
+    // would request a chunk past the tree's leaf range). Refuse to mirror
+    // if the caller didn't supply the real count.
+    if (
+      typeof params.merkleLeafCount !== 'number'
+      || !Number.isInteger(params.merkleLeafCount)
+      || params.merkleLeafCount < 1
+    ) {
+      throw new Error(
+        'publishToContextGraph: missing/invalid merkleLeafCount. '
+        + 'V10 mirror requires the caller to supply the V10MerkleTree leaf count '
+        + '(integer ≥ 1). Hard-coding would corrupt RandomSampling chunk selection.',
+      );
+    }
+
     return this.createKnowledgeAssetsV10({
       publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
       contextGraphId: params.contextGraphId,
@@ -1167,6 +1237,7 @@ export class EVMChainAdapter implements ChainAdapter {
       byteSize: params.publicByteSize,
       epochs: params.epochs,
       tokenAmount: params.tokenAmount,
+      merkleLeafCount: params.merkleLeafCount,
       isImmutable: false,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       publisherSignature: params.publisherSignature,
@@ -1281,6 +1352,7 @@ export class EVMChainAdapter implements ChainAdapter {
       epochs: params.epochs,
       tokenAmount: params.tokenAmount,
       isImmutable: params.isImmutable,
+      merkleLeafCount: params.merkleLeafCount,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       publisherNodeR: ethers.hexlify(params.publisherSignature.r),
       publisherNodeVS: ethers.hexlify(params.publisherSignature.vs),
@@ -1603,11 +1675,12 @@ export class EVMChainAdapter implements ChainAdapter {
           ? ethers.solidityPacked(burnIds.map(() => 'uint256'), burnIds)
           : new Uint8Array(0),
       );
+      const newMerkleLeafCount = BigInt(params.newMerkleLeafCount ?? 0);
       const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-        ['uint256', 'address', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'bytes32'],
+        ['uint256', 'address', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256'],
         [evmChainId, kav10Address, contextGraphId, params.kcId, preUpdateMerkleRootCount,
          ethers.hexlify(params.newMerkleRoot), params.newByteSize, newTokenAmount,
-         BigInt(params.mintAmount ?? 0), burnPackedHash],
+         BigInt(params.mintAmount ?? 0), burnPackedHash, newMerkleLeafCount],
       ));
       const raw = ethers.Signature.from(await signer.signMessage(ackDigest));
       ackSigs = [{ identityId, r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) }];
@@ -1619,6 +1692,7 @@ export class EVMChainAdapter implements ChainAdapter {
       newMerkleRoot: ethers.hexlify(params.newMerkleRoot),
       newByteSize: params.newByteSize,
       newTokenAmount,
+      newMerkleLeafCount: params.newMerkleLeafCount,
       mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
       knowledgeAssetsToBurn: burnIds,
       publisherNodeIdentityId: identityId,
@@ -1684,7 +1758,44 @@ export class EVMChainAdapter implements ChainAdapter {
   // Staking Conviction
   // =====================================================================
 
+  // V10 baseline tier ladder seeded by `ConvictionStakingStorage._seedBaselineTiers()`
+  // (rest, 30d, 90d, 180d, 366d). Passing a tier outside this set reverts on-chain with
+  // `InvalidLockTier()` from `DKGStakingConvictionNFT._convictionMultiplier`. Validating
+  // off-chain saves a round-trip and surfaces a clearer error to the caller.
+  private static readonly V10_BASELINE_LOCK_TIERS = [0, 1, 3, 6, 12] as const;
+
+  private snapToBaselineLockTier(lockEpochs: number): number {
+    // Snap DOWN to the largest baseline tier ≤ lockEpochs. Conservative: never lock
+    // the user up for longer than the legacy `lockEpochs` they asked for. Examples:
+    //   lockEpochs=2 → 1, lockEpochs=4 → 3, lockEpochs=11 → 6, lockEpochs=30 → 12.
+    let snapped = 0;
+    for (const tier of EVMChainAdapter.V10_BASELINE_LOCK_TIERS) {
+      if (tier <= lockEpochs) snapped = tier;
+      else break;
+    }
+    return snapped;
+  }
+
+  private normalizeLegacyLockEpochs(lockEpochs: number): number {
+    if (!Number.isInteger(lockEpochs)) {
+      throw new Error(`stakeWithLock: lockEpochs must be an integer, got ${lockEpochs}`);
+    }
+    if (lockEpochs < 0) {
+      throw new Error(`stakeWithLock: lockEpochs must be non-negative, got ${lockEpochs}`);
+    }
+    return this.snapToBaselineLockTier(lockEpochs);
+  }
+
   async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    return this.stakeWithLockTier(identityId, amount, this.normalizeLegacyLockEpochs(lockEpochs));
+  }
+
+  async stakeWithLockTier(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult> {
+    if (!Number.isInteger(lockTier) || !(EVMChainAdapter.V10_BASELINE_LOCK_TIERS as readonly number[]).includes(lockTier)) {
+      throw new Error(
+        `stakeWithLockTier: lockTier must be one of {${EVMChainAdapter.V10_BASELINE_LOCK_TIERS.join(', ')}} (V10 baseline tier ladder), got ${lockTier}`,
+      );
+    }
     await this.init();
 
     let nft: Contract;
@@ -1693,16 +1804,24 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       throw new Error('DKGStakingConvictionNFT contract not deployed.');
     }
-    const nftAddr = await nft.getAddress();
 
+    // V10 consolidation (v4.0.0): TRAC is pulled by `StakingV10`, not by
+    // the NFT — the NFT is only the entry point and never custodies TRAC.
+    // Approving the NFT here would still leave the inner `stakingV10.stake`
+    // call short on allowance and revert. Mirror the pattern used in
+    // `ensureProfile` / `scripts/devnet.sh`.
     if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddr);
+      const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+      if (stakingV10Addr === ethers.ZeroAddress) {
+        throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+      }
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
       if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(nftAddr, ethers.MaxUint256)).wait();
+        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
       }
     }
 
-    const tx = await nft.stake(identityId, amount, lockEpochs);
+    const tx = await nft.createConviction(identityId, amount, lockTier);
     const receipt = await tx.wait();
 
     return {
@@ -1881,11 +2000,34 @@ export class EVMChainAdapter implements ChainAdapter {
     const hasPurpose: boolean = await identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
     if (!hasPurpose) return false;
 
-    // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked")
-    const stakingStorage = await this.resolveContract('StakingStorage');
-    if (!stakingStorage) return false;
-    const stake: bigint = await stakingStorage.getNodeStake(claimedIdentityId);
-    if (stake === 0n) return false;
+    // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked").
+    // v4.0.0 — read V10 canonical stake (`ConvictionStakingStorage.getNodeStakeV10`)
+    // instead of the V8 `StakingStorage.getNodeStake` archive: under mandatory
+    // migration the V8 `nodeStake` field is unmaintained for V10 nodes and
+    // would zero-gate every legitimate V10 ACK signer (this exactly mirrors
+    // the on-chain `KnowledgeAssetsV10` ACK-signer gate, also rewired in
+    // v4.0.0). Falls back to V8 if CSS is not registered (older deploys).
+    let cs: Contract | null = null;
+    try {
+      cs = await this.resolveContract('ConvictionStakingStorage');
+    } catch {
+      cs = null;
+    }
+    if (cs) {
+      const stake: bigint = await cs.getNodeStakeV10(claimedIdentityId);
+      if (stake === 0n) return false;
+      return true;
+    }
+
+    let ss: Contract | null = null;
+    try {
+      ss = await this.resolveContract('StakingStorage');
+    } catch {
+      ss = null;
+    }
+    if (!ss) return false;
+    const v8Stake: bigint = await ss.getNodeStake(claimedIdentityId);
+    if (v8Stake === 0n) return false;
 
     return true;
   }
@@ -1918,6 +2060,10 @@ export class EVMChainAdapter implements ChainAdapter {
 
   isV10Ready(): boolean {
     return !!this.contracts.knowledgeAssetsV10;
+  }
+
+  isRandomSamplingReady(): boolean {
+    return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
@@ -2011,5 +2157,235 @@ export class EVMChainAdapter implements ChainAdapter {
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
     };
+  }
+
+  // =====================================================================
+  // Random Sampling (V10 RandomSampling.sol)
+  // =====================================================================
+
+  private requireRandomSampling(): { rs: Contract; rss: Contract } {
+    const rs = this.contracts.randomSampling;
+    const rss = this.contracts.randomSamplingStorage;
+    if (!rs || !rss) {
+      throw new Error(
+        'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
+        'The deployer is responsible for shipping these alongside V10 publish.',
+      );
+    }
+    return { rs, rss };
+  }
+
+  /**
+   * Map a caught chain error onto a typed prover error when the revert
+   * matches one of the documented retry-next-period / non-retryable
+   * conditions; otherwise rethrow the original. Centralised so the
+   * three call sites stay in sync with the on-chain revert wording.
+   *
+   * Note: `createChallenge` reverts via custom errors (decoded by the
+   * `getErrorInterface()` helper above), `submitProof` uses
+   * `revert("...")` strings for the period/proof-mismatch cases plus a
+   * `MerkleRootMismatchError` custom error.
+   */
+  private translateRandomSamplingError(err: unknown): never {
+    if (!(err instanceof Error)) throw err;
+    enrichEvmError(err);
+    const msg = err.message;
+    if (msg.includes('NoEligibleContextGraph')) throw new NoEligibleContextGraphError();
+    if (msg.includes('NoEligibleKnowledgeCollection')) throw new NoEligibleKnowledgeCollectionError();
+    if (msg.includes('This challenge is no longer active')) throw new ChallengeNoLongerActiveError();
+    const merkleMatch = msg.match(/MerkleRootMismatchError\((0x[0-9a-fA-F]+),\s*(0x[0-9a-fA-F]+)\)/);
+    if (merkleMatch) {
+      throw new MerkleRootMismatchError(merkleMatch[1], merkleMatch[2]);
+    }
+    throw err;
+  }
+
+  /**
+   * Convert the on-chain `Challenge` tuple (or struct) into our wire
+   * type. The contract returns an all-zero struct when no challenge
+   * exists for an identity, which we surface as `null` so callers
+   * don't have to dispatch on `kcId === 0n`.
+   */
+  private toNodeChallenge(raw: any): NodeChallenge | null {
+    const kcId = BigInt(raw.knowledgeCollectionId ?? raw[0]);
+    const startBlock = BigInt(raw.activeProofPeriodStartBlock ?? raw[4]);
+    if (kcId === 0n && startBlock === 0n) return null;
+    return {
+      knowledgeCollectionId: kcId,
+      chunkId: BigInt(raw.chunkId ?? raw[1]),
+      knowledgeCollectionStorageContract: String(raw.knowledgeCollectionStorageContract ?? raw[2]),
+      epoch: BigInt(raw.epoch ?? raw[3]),
+      activeProofPeriodStartBlock: startBlock,
+      proofingPeriodDurationInBlocks: BigInt(raw.proofingPeriodDurationInBlocks ?? raw[5]),
+      solved: Boolean(raw.solved ?? raw[6]),
+    };
+  }
+
+  async createChallenge(): Promise<CreateChallengeResult> {
+    await this.init();
+    const { rs, rss } = this.requireRandomSampling();
+
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    const identityId: bigint = await identityStorage.getIdentityId(this.signer.address);
+
+    let receipt: ethers.TransactionReceipt;
+    try {
+      const tx = await rs.createChallenge();
+      receipt = await tx.wait();
+    } catch (err) {
+      this.translateRandomSamplingError(err);
+    }
+
+    // Decode `ChallengeGenerated(identityId, contextGraphId, kcId, chunkId, epoch, startBlock)`
+    // from the receipt. cgId is indexed (topic[2]); the rest are in data
+    // but we only need cgId here — the proof builder reads kcId/chunkId
+    // off the Challenge struct fetched below, so everything stays
+    // consistent if the storage layout shifts.
+    let contextGraphId = 0n;
+    const rsIface = rs.interface;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'ChallengeGenerated') {
+          contextGraphId = BigInt(parsed.args.contextGraphId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+    if (contextGraphId === 0n) {
+      // The picker only emits the event when it actually lands on a CG,
+      // so a missing event is a bug — fail loud rather than fall back
+      // to "lookup by KC" which V10 doesn't support natively.
+      throw new Error(
+        'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
+        'cannot route proof builder without contextGraphId.',
+      );
+    }
+
+    const challengeRaw = await rss.getNodeChallenge(identityId);
+    const challenge = this.toNodeChallenge(challengeRaw);
+    if (!challenge) {
+      throw new Error(
+        `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
+        'returned an empty struct. This indicates a state inconsistency between ' +
+        'RandomSampling and RandomSamplingStorage.',
+      );
+    }
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: true,
+      challenge,
+      contextGraphId,
+    };
+  }
+
+  async submitProof(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
+    await this.init();
+    const { rs } = this.requireRandomSampling();
+
+    const leafHex = typeof leaf === 'string' ? leaf : ethers.hexlify(leaf);
+    if (!ethers.isHexString(leafHex, 32)) {
+      throw new Error('submitProof: leaf must be a 32-byte value (bytes32)');
+    }
+    const proofHex = merkleProof.map((p) => ethers.hexlify(p));
+
+    let receipt: ethers.TransactionReceipt;
+    try {
+      const tx = await rs.submitProof(leafHex, proofHex);
+      receipt = await tx.wait();
+    } catch (err) {
+      this.translateRandomSamplingError(err);
+    }
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: true,
+    };
+  }
+
+  async getActiveProofPeriodStatus(): Promise<ProofPeriodStatus> {
+    await this.init();
+    const { rs } = this.requireRandomSampling();
+
+    const raw = await rs.getActiveProofPeriodStatus();
+    return {
+      activeProofPeriodStartBlock: BigInt(raw.activeProofPeriodStartBlock ?? raw[0]),
+      isValid: Boolean(raw.isValid ?? raw[1]),
+    };
+  }
+
+  async getNodeChallenge(identityId: bigint): Promise<NodeChallenge | null> {
+    await this.init();
+    const { rss } = this.requireRandomSampling();
+    const raw = await rss.getNodeChallenge(identityId);
+    return this.toNodeChallenge(raw);
+  }
+
+  async getNodeEpochProofPeriodScore(
+    identityId: bigint,
+    epoch: bigint,
+    periodStartBlock: bigint,
+  ): Promise<bigint> {
+    await this.init();
+    const { rss } = this.requireRandomSampling();
+    const score: bigint = await rss.getNodeEpochProofPeriodScore(identityId, epoch, periodStartBlock);
+    return BigInt(score);
+  }
+
+  // =====================================================================
+  // KC views (V10 KnowledgeCollectionStorage + ContextGraphStorage)
+  // =====================================================================
+
+  private requireKCStorage(): Contract {
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (!kcs) {
+      throw new Error(
+        'KnowledgeCollectionStorage not deployed in this Hub. ' +
+        'V10 KC views require a Hub with KnowledgeCollectionStorage registered.',
+      );
+    }
+    return kcs;
+  }
+
+  private requireContextGraphStorage(): Contract {
+    const cgs = this.contracts.contextGraphStorage;
+    if (!cgs) {
+      throw new Error(
+        'ContextGraphStorage not deployed in this Hub. ' +
+        'getKCContextGraphId requires a Hub with ContextGraphStorage registered.',
+      );
+    }
+    return cgs;
+  }
+
+  async getLatestMerkleRoot(kcId: bigint): Promise<Uint8Array> {
+    await this.init();
+    const kcs = this.requireKCStorage();
+    const rootHex: string = await kcs.getLatestMerkleRoot(kcId);
+    return ethers.getBytes(rootHex);
+  }
+
+  async getMerkleLeafCount(kcId: bigint): Promise<number> {
+    await this.init();
+    const kcs = this.requireKCStorage();
+    const count: bigint = BigInt(await kcs.getMerkleLeafCount(kcId));
+    return Number(count);
+  }
+
+  async getLatestMerkleRootPublisher(kcId: bigint): Promise<string> {
+    await this.init();
+    const kcs = this.requireKCStorage();
+    const publisher: string = await kcs.getLatestMerkleRootPublisher(kcId);
+    return publisher;
+  }
+
+  async getKCContextGraphId(kcId: bigint): Promise<bigint> {
+    await this.init();
+    const cgs = this.requireContextGraphStorage();
+    const cgId: bigint = await cgs.kcToContextGraph(kcId);
+    return BigInt(cgId);
   }
 }

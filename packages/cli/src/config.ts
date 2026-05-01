@@ -91,6 +91,23 @@ export interface NetworkConfig {
     url: string;
     mode: string;
   };
+  /**
+   * Maintainer-controlled marker bumped on every chain reset (e.g. testnet
+   * V10 staking consolidation, fresh contract redeploy with state wipe).
+   * The daemon's chain-reset-wipe hook compares this against the last value
+   * persisted in `<dataDir>/.network-state.json`; on mismatch it auto-wipes
+   * `store.nq` + `publish-journal.*` + `random-sampling.wal` so the node
+   * boots clean against the new chain. Operators do nothing.
+   *
+   * Distinct from `networkId` which is a SHA256 of the bundled genesis
+   * TriG and only changes when the genesis itself does — chain redeploys
+   * happen far more often than that, so they need a separate marker.
+   *
+   * Free-form string, suggested format: `<purpose>-<yyyy-mm-dd>` (e.g.
+   * `v10-rs-staking-consolidation-2026-04-30`). Maintainer bumps in the
+   * same commit that captures the post-deploy state.
+   */
+  chainResetMarker?: string;
 }
 
 export interface ChainConfig {
@@ -233,6 +250,35 @@ export interface DkgConfig {
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
+  /**
+   * V10 Random Sampling prover (core-only). When the node is `core`
+   * AND has an on-chain identity, the agent automatically schedules
+   * `RandomSamplingProver.tick()` on `tickIntervalMs`. Edge nodes
+   * ignore this block. See `dkg-random-sampling` for the prover
+   * itself; the bind layer is in `dkg-agent/random-sampling-bind.ts`.
+   */
+  randomSampling?: {
+    /**
+     * Persistent WAL path. When set, prover state transitions are
+     * appended to this file (JSONL, fsync per write) for crash
+     * recovery + `dkg rs wal-tail`. When unset, the prover uses an
+     * in-memory WAL (test/dev only — production SHOULD set this).
+     */
+    walPath?: string;
+    /**
+     * Tick cadence in ms. Default 30_000. Set lower (e.g. 5_000) for
+     * devnet smoke tests where you want the prover to react quickly
+     * after a publish lands. The orchestrator is idempotent under
+     * fast double-ticks (already-solved short-circuit).
+     */
+    tickIntervalMs?: number;
+    /**
+     * Default true on core. When false, the V10 Merkle build runs on
+     * the agent's main thread. Useful in tests where spawning a
+     * worker is undesirable.
+     */
+    useWorkerThread?: boolean;
+  };
 }
 
 /**

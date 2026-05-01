@@ -26,7 +26,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -209,16 +209,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @dev Submits proof for an active challenge to earn score used for later reward calculation
-     * Validates the submitted chunk and merkle proof against the expected Merkle root
-     * On successful proof: marks challenge as solved, increments valid proofs count,
-     * calculates and adds node score, and updates epoch scoring data
-     * @param chunk The data chunk being proven (must match challenge requirements)
-     * @param merkleProof Array of hashes for Merkle proof verification
+     * Verifies a V10 flat-KC Merkle inclusion proof (dkg-core V10MerkleTree / spec §9.0.2):
+     * `leaf` is a `hashTripleV10` public leaf or a private sub-root leaf; `challenge.chunkId`
+     * stores the challenged **leaf index** in the sorted+deduped bottom layer; `merkleProof`
+     * is the sibling path produced by `V10MerkleTree.proof(leafIndex)`.
      */
-    function submitProof(
-        string memory chunk,
-        bytes32[] calldata merkleProof
-    )
+    function submitProof(bytes32 leaf, bytes32[] calldata merkleProof)
         external
         profileExists(identityStorage.getIdentityId(msg.sender))
         nodeExistsInShardingTable(identityStorage.getIdentityId(msg.sender))
@@ -240,16 +236,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             revert("This challenge is no longer active");
         }
 
-        // Construct the merkle root from chunk and merkleProof
-        bytes32 computedMerkleRoot = _computeMerkleRootFromProof(chunk, challenge.chunkId, merkleProof);
-
         // Get the expected merkle root for this challenge
         bytes32 expectedMerkleRoot = knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
 
-        // L12 — early-revert style: bail out on mismatch first so the
-        //       happy path isn't nested inside an `if`.
-        if (computedMerkleRoot != expectedMerkleRoot) {
-            revert MerkleRootMismatchError(computedMerkleRoot, expectedMerkleRoot);
+        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(challenge.knowledgeCollectionId);
+        if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
+            revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
+        }
+
+        if (!_verifyV10MerkleProof(expectedMerkleRoot, leaf, challenge.chunkId, merkleProof)) {
+            revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
         }
 
         // Mark as correct submission and add points to the node.
@@ -291,35 +287,30 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Internal function to compute Merkle root from a chunk and its proof
-     * Reconstructs the Merkle tree root by hashing the chunk with its ID and
-     * traversing up the tree using the provided proof hashes
-     * Uses standard Merkle tree construction where smaller hash goes left
-     * @param chunk The data chunk to verify
-     * @param chunkId Unique identifier for the chunk position
-     * @param merkleProof Array of sibling hashes for tree traversal
-     * @return computedRoot The computed Merkle root hash
+     * @dev V10 Merkle verify — matches `V10MerkleTree.verify` in TypeScript (pair order
+     *      by tree position: even index → `keccak256(abi.encodePacked(hash, sibling))`).
      */
-    function _computeMerkleRootFromProof(
-        string memory chunk,
-        uint256 chunkId,
-        bytes32[] calldata merkleProof
-    ) internal pure returns (bytes32) {
-        bytes32 computedHash = keccak256(abi.encodePacked(chunk, chunkId));
-
-        for (uint256 i = 0; i < merkleProof.length; ) {
-            if (computedHash < merkleProof[i]) {
-                computedHash = keccak256(abi.encodePacked(computedHash, merkleProof[i]));
+    function _verifyV10MerkleProof(
+        bytes32 root,
+        bytes32 leaf,
+        uint256 leafIndex,
+        bytes32[] calldata proof
+    ) internal pure returns (bool) {
+        bytes32 h = leaf;
+        uint256 idx = leafIndex;
+        for (uint256 i = 0; i < proof.length; ) {
+            bytes32 sib = proof[i];
+            if (idx % 2 == 0) {
+                h = keccak256(abi.encodePacked(h, sib));
             } else {
-                computedHash = keccak256(abi.encodePacked(merkleProof[i], computedHash));
+                h = keccak256(abi.encodePacked(sib, h));
             }
-
             unchecked {
-                i++;
+                idx = idx / 2;
+                ++i;
             }
         }
-
-        return computedHash;
+        return h == root;
     }
 
     /**
@@ -415,7 +406,8 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *                   for the live picker semantics.
      * @return cgId      Selected Context Graph id.
      * @return kcId      Selected Knowledge Collection id within that CG.
-     * @return chunkId   Selected chunk index within the KC.
+     * @return chunkId   Selected **V10 Merkle leaf index** within the KC (same field
+     *                   name as V8 byte-chunk index for struct compatibility).
      */
     function previewChallengeForSeed(
         bytes32 seed,
@@ -444,8 +436,9 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      has expired (`endEpoch < currentEpoch`). Uses a fresh seed each
      *      attempt via `keccak256(seed, attempt)`.
      *
-     *      Step 3 — Compute the chunk index as in V8: `seed % (byteSize /
-     *      chunkByteSize)`, or 0 if the KC is smaller than one chunk.
+     *      Step 3 — Pick a V10 Merkle leaf index: `uint256(kcSeed) % merkleLeafCount`
+     *      (see `KnowledgeCollectionStorage.getMerkleLeafCount`). Reverts
+     *      `NoEligibleKnowledgeCollection` if the KC has zero leaves recorded.
      *
      *      Reverts:
      *      - {NoEligibleContextGraph}        adjustedTotal == 0 (no public,
@@ -515,19 +508,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         }
         kcId = pickedKcId;
 
-        // ---- Step 3: compute the chunk index identically to V8. ----
-        uint88 kcByteSize = knowledgeCollectionStorage.getByteSize(kcId);
-        if (kcByteSize == 0) {
-            // V8 used a verbose string here; surfacing as a custom error
-            // would change the ABI; keep the string for parity.
-            revert("Knowledge collection byte size is 0");
+        // ---- Step 3: V10 flat-KC Merkle leaf index (stored in `Challenge.chunkId`). ----
+        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(kcId);
+        if (leafCount == 0) {
+            revert NoEligibleKnowledgeCollection();
         }
-        uint256 chunkByteSize = randomSamplingStorage.CHUNK_BYTE_SIZE();
-        if (kcByteSize > chunkByteSize) {
-            // Use the rotated kcSeed so chunk picks within a CG don't degenerate
-            // when many KCs share the same byte size.
-            chunkId = uint256(kcSeed) % (uint256(kcByteSize) / chunkByteSize);
-        }
+        chunkId = uint256(kcSeed) % uint256(leafCount);
     }
 
     /**

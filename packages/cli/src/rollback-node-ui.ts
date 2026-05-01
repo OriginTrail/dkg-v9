@@ -103,14 +103,7 @@ export function ensureRollbackNodeUiBundle(
         stdio: 'pipe',
         timeout: ROLLBACK_UI_BUILD_TIMEOUT_MS,
       });
-      if (io.existsSync(gitIndex)) {
-        try {
-          io.rmSync(backupDist, { recursive: true, force: true });
-        } catch {
-          // Best-effort cleanup only; the rebuilt UI bundle is ready.
-        }
-        return true;
-      }
+      if (io.existsSync(gitIndex)) return true;
       lastError = new Error(`Node UI static bundle missing (${gitIndex})`);
     } catch (err) {
       lastError = err;

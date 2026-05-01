@@ -4445,4 +4445,33 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u3"); // NOT "u2", not "u2\nu3"
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("ok");
   });
+
+  it("T359 - failed outbound clears inbound messageId dedupe for redelivery", async () => {
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "retry after failed send", messageId: "in-redeliver" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "not delivered", success: false, messageId: "out-failed" },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "retry after failed send", messageId: "in-redeliver" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "delivered on retry", success: true, messageId: "out-redeliver" },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("retry after failed send");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("delivered on retry");
+  });
 });

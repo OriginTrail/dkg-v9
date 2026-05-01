@@ -1202,8 +1202,10 @@ export class ChatTurnWriter {
       // makes them get mis-paired with the next unrelated reply. Delete
       // the whole queue here to match the success consumption.
       if (success === false) {
+        const droppedInboundDedupKeys = this.messageHookInboundDedupKeysForQueue(conversationKey);
         this.pendingUserMessages.delete(conversationKey);
         this.pendingUserMessageMeta.delete(conversationKey);
+        this.deleteMessageHookInboundDedupKeys(droppedInboundDedupKeys);
         return;
       }
       // Strip injected `<recalled-memory>` from assistant text — the model may
@@ -1626,6 +1628,12 @@ export class ChatTurnWriter {
       if (this.isNoIdInboundBatchKey(key)) {
         this.deleteMessageHookDedupKey(key);
       }
+    }
+  }
+
+  private deleteMessageHookInboundDedupKeys(keys: string[]): void {
+    for (const key of keys) {
+      this.deleteMessageHookDedupKey(key);
     }
   }
 

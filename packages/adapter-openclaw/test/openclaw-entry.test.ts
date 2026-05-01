@@ -456,6 +456,30 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
+  it('does not let empty api.config hide runtime pluginConfig fallback', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi(undefined as any, {
+      config: {},
+      runtime: {
+        pluginConfig: {
+          daemonUrl: 'http://127.0.0.1:9700',
+          memory: { enabled: true },
+          channel: { enabled: false },
+        },
+      },
+    });
+    delete (api as any).pluginConfig;
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9700',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+  });
+
   it('treats a re-registration with no config source as partial', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');

@@ -125,7 +125,7 @@ function directApiConfigFrom(config) {
   ) {
     return undefined;
   }
-  if (looksLikeAdapterPluginConfig(config) || Object.keys(config).length === 0) {
+  if (looksLikeAdapterPluginConfig(config)) {
     return config;
   }
   return undefined;

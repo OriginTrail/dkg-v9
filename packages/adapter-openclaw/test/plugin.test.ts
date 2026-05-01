@@ -4316,7 +4316,53 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - custom config.stateDir ending .dkg-adapter is not treated as a workspace default without workspace metadata', async () => {
+  it('T75 - OPENCLAW_STATE_DIR ending .dkg-adapter without workspace metadata uses direct layout without sibling migration', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-env-no-workspace-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::env-untrusted': { w: 9, b: 4 },
+      }));
+      process.env.OPENCLAW_STATE_DIR = stateDir;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      if (fs.existsSync(watermarkPath)) {
+        const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+        expect(persisted['openclaw:tg:::env-untrusted']).toBeUndefined();
+      }
+      const legacyState = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+      expect(legacyState['openclaw:tg:::env-untrusted']).toEqual({ w: 9, b: 4 });
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - explicit config.stateDir ending .dkg-adapter uses direct layout without sibling legacy migration', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-custom-dkg-adapter-${Date.now()}`);
@@ -4346,9 +4392,13 @@ describe('DkgNodePlugin', () => {
 
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toBe(
-        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
-      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      if (fs.existsSync(watermarkPath)) {
+        const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+        expect(persisted['openclaw:tg:::unrelated']).toBeUndefined();
+      }
       const legacyState = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
       expect(legacyState['openclaw:tg:::unrelated']).toEqual({ w: 4, b: 1 });
       await plugin.stop();

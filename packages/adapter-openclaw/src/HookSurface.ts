@@ -41,8 +41,9 @@
  *
  * I4 — deterministic commit timing. After first observed fire OR a 30s
  * grace period (whichever first), each event's `commitState` flips to
- * `committed-by-fire` or `committed-by-timeout`. Callers can surface a
- * warn if a typed-hook event never fires within the grace period.
+ * `committed-by-fire`, `committed-by-peer-fire`, or
+ * `committed-by-timeout`. Callers can surface a warn if a typed-hook
+ * event never fires within the grace period.
  *
  * C5 — double-registration guard. The same `(kind, event, handler)` triple
  * is a no-op on repeat install; we return the existing unsubscribe.
@@ -68,13 +69,25 @@ export const INTERNAL_HOOK_SYMBOL = Symbol.for('openclaw.internalHookHandlers');
 export type InstalledVia = 'on' | 'registerHook' | 'globalThis' | 'none';
 
 /** Commit state per I4 — frozen after first fire or 30s grace. */
-export type CommitState = 'pending' | 'committed-by-fire' | 'committed-by-timeout';
+export type CommitState = 'pending' | 'committed-by-fire' | 'committed-by-peer-fire' | 'committed-by-timeout';
 
 export interface DispatchStats {
   installedVia: InstalledVia;
   fireCount: number;
   commitState: CommitState;
   installError?: string;
+}
+
+export interface HookInstallOptions {
+  rareFireExpected?: boolean;
+  /**
+   * Multi-surface typed-hook installs can race: OpenClaw may dispatch a
+   * typed event through one retained API registry while sibling registries
+   * stay idle. When a sibling has observed the same event since this install
+   * began, this install is proven live enough for the process and should not
+   * emit a duplicate timeout warning.
+   */
+  observedFireSinceInstall?: () => boolean;
 }
 
 /** Minimum logger shape used by HookSurface. */
@@ -157,7 +170,7 @@ export class HookSurface {
     kind: HookKind,
     event: string,
     handler: HookHandler,
-    opts: { rareFireExpected?: boolean } = {},
+    opts: HookInstallOptions = {},
   ): Unsubscribe | null {
     const key = `${kind}:${event}`;
     if (opts.rareFireExpected) this.rareFireKeys.add(key);
@@ -211,17 +224,25 @@ export class HookSurface {
     const timer = setTimeout(() => {
       const s = this.stats.get(key);
       if (s && s.commitState === 'pending') {
-        this.stats.set(key, { ...s, commitState: 'committed-by-timeout' });
-        const msg =
-          `[hook-surface] commit-by-timeout: ${key} never fired within ${this.commitGraceMs}ms. ` +
-          `installedVia=${s.installedVia}, fireCount=0.`;
-        // Rare-fire hooks (e.g. before_compaction, before_reset) don't
-        // fire in routine traffic; surface at debug so real install
-        // failures on frequent hooks aren't drowned out by startup noise.
-        if (this.rareFireKeys.has(key)) {
-          this.logger.debug?.(msg);
+        if (kind === 'typed' && opts.observedFireSinceInstall?.()) {
+          this.stats.set(key, { ...s, commitState: 'committed-by-peer-fire' });
+          this.logger.debug?.(
+            `[hook-surface] commit-by-peer-fire: ${key} observed on another retained surface; ` +
+              `suppressing duplicate timeout warn.`,
+          );
         } else {
-          this.logger.warn?.(msg);
+          this.stats.set(key, { ...s, commitState: 'committed-by-timeout' });
+          const msg =
+            `[hook-surface] commit-by-timeout: ${key} never fired within ${this.commitGraceMs}ms. ` +
+            `installedVia=${s.installedVia}, fireCount=0.`;
+          // Rare-fire hooks (e.g. before_compaction, before_reset) don't
+          // fire in routine traffic; surface at debug so real install
+          // failures on frequent hooks aren't drowned out by startup noise.
+          if (this.rareFireKeys.has(key)) {
+            this.logger.debug?.(msg);
+          } else {
+            this.logger.warn?.(msg);
+          }
         }
       }
       this.commitTimers.delete(key);
@@ -443,7 +464,9 @@ export class HookSurface {
     if (!prev) return;
     const fireCount = prev.fireCount + 1;
     const nextState: CommitState =
-      prev.commitState === 'pending' ? 'committed-by-fire' : prev.commitState;
+      prev.commitState === 'pending' || prev.commitState === 'committed-by-peer-fire'
+        ? 'committed-by-fire'
+        : prev.commitState;
     this.stats.set(key, { ...prev, fireCount, commitState: nextState });
 
     if (fireCount === 1) {

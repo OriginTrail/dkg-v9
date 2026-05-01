@@ -169,6 +169,8 @@ export class DkgNodePlugin {
    * reachability rules.
    */
   private hookSurfaceInstalledAt: WeakMap<HookSurface, number> = new WeakMap();
+  private typedHookFireSeq = 0;
+  private typedHookFireGeneration: Map<string, number> = new Map();
   /**
    * Grace window before a never-fired surface becomes evictable. Long
    * enough that a slow gateway dispatch path doesn't trigger spurious
@@ -830,16 +832,36 @@ export class DkgNodePlugin {
           // `installedVia: 'none'`. The `installedVia: 'none'` precondition
           // guarantees we're not double-binding a live handler.
           if (typedNeedsRetry('before_prompt_build')) {
-            this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+            this.hookSurface.install(
+              'typed',
+              'before_prompt_build',
+              this.observedTypedHandler('before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx)),
+              this.observedTypedOptions('before_prompt_build'),
+            );
           }
           if (typedNeedsRetry('agent_end')) {
-            this.hookSurface.install('typed', 'agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
+            this.hookSurface.install(
+              'typed',
+              'agent_end',
+              this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+              this.observedTypedOptions('agent_end'),
+            );
           }
           if (typedNeedsRetry('before_compaction')) {
-            this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
+            this.hookSurface.install(
+              'typed',
+              'before_compaction',
+              this.observedTypedHandler('before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx)),
+              this.observedTypedOptions('before_compaction', { rareFireExpected: true }),
+            );
           }
           if (typedNeedsRetry('before_reset')) {
-            this.hookSurface.install('typed', 'before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+            this.hookSurface.install(
+              'typed',
+              'before_reset',
+              this.observedTypedHandler('before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx)),
+              this.observedTypedOptions('before_reset', { rareFireExpected: true }),
+            );
           }
         }
         // T7 — Legacy `session_end` retry. Same logic: only retry if the
@@ -905,15 +927,35 @@ export class DkgNodePlugin {
     if (!runtimeHooks) return;
 
     // W3 — auto-recall every turn via before_prompt_build typed hook
-    this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+    this.hookSurface.install(
+      'typed',
+      'before_prompt_build',
+      this.observedTypedHandler('before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx)),
+      this.observedTypedOptions('before_prompt_build'),
+    );
 
     // W4a — LLM-driven turn capture via typed hooks. `before_compaction`
     // and `before_reset` are rare on healthy gateways; tag them so the
     // HookSurface commit-by-timeout warn downgrades to debug (otherwise
     // they false-positive within 30s of startup every time).
-    this.hookSurface.install('typed', 'agent_end',        (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
-    this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
-    this.hookSurface.install('typed', 'before_reset',      (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+    this.hookSurface.install(
+      'typed',
+      'agent_end',
+      this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+      this.observedTypedOptions('agent_end'),
+    );
+    this.hookSurface.install(
+      'typed',
+      'before_compaction',
+      this.observedTypedHandler('before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx)),
+      this.observedTypedOptions('before_compaction', { rareFireExpected: true }),
+    );
+    this.hookSurface.install(
+      'typed',
+      'before_reset',
+      this.observedTypedHandler('before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx)),
+      this.observedTypedOptions('before_reset', { rareFireExpected: true }),
+    );
 
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism).
     // Internal hooks fire across both `full` and `setup-runtime` modes, so
@@ -1027,6 +1069,36 @@ export class DkgNodePlugin {
       if (stats['internal:message:sent']?.installedVia === 'globalThis') return true;
     }
     return false;
+  }
+
+  private recordTypedHookFire(event: string): void {
+    this.typedHookFireSeq += 1;
+    this.typedHookFireGeneration.set(event, this.typedHookFireSeq);
+  }
+
+  private observedTypedHookSinceInstall(event: string): () => boolean {
+    const generationAtInstall = this.typedHookFireGeneration.get(event) ?? 0;
+    return () => (this.typedHookFireGeneration.get(event) ?? 0) > generationAtInstall;
+  }
+
+  private observedTypedOptions(
+    event: string,
+    opts: { rareFireExpected?: boolean } = {},
+  ): { rareFireExpected?: boolean; observedFireSinceInstall: () => boolean } {
+    return {
+      ...opts,
+      observedFireSinceInstall: this.observedTypedHookSinceInstall(event),
+    };
+  }
+
+  private observedTypedHandler(
+    event: string,
+    handler: (...args: any[]) => unknown,
+  ): (...args: any[]) => unknown {
+    return (...args: any[]) => {
+      this.recordTypedHookFire(event);
+      return handler(...args);
+    };
   }
 
   /**

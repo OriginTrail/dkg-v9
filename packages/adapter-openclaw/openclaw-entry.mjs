@@ -12,6 +12,7 @@ import {
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
 const lifecycleServiceApis = new WeakMap();
+const entryAssignedWorkspaceDirs = new WeakMap();
 let lifecycleOwnerToken = null;
 
 export default function (api) {
@@ -26,6 +27,10 @@ export default function (api) {
   // runtime workspace and could mask a later higher-priority runtime value.
   if (apiWorkspaceDir) {
     api.workspaceDir = apiWorkspaceDir;
+    entryAssignedWorkspaceDirs.set(api, apiWorkspaceDir);
+  } else if (entryAssignedWorkspaceDirs.get(api) === api.workspaceDir) {
+    delete api.workspaceDir;
+    entryAssignedWorkspaceDirs.delete(api);
   }
 
   if (instance) {
@@ -115,9 +120,13 @@ function resolveEntryConfig(api, options = {}) {
       : fallbackDirectConfigs;
   const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
+  const hasSparseDirectConfig =
+    entryConfigs.length === 0 &&
+    directConfigs.some(isSparseDirectAdapterConfig);
   const configIsPartial =
     !hasConfigSource ||
-    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
+    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig)) ||
+    hasSparseDirectConfig;
 
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -132,11 +141,18 @@ function resolveEntryConfig(api, options = {}) {
     workspaceConfig?.workspace ??
     mergedConfig?.agents?.defaults?.workspace ??
     mergedConfig?.workspace ??
-    anyApi?.workspaceDir;
+    apiWorkspaceDirFrom(anyApi);
   const syncWorkspaceDir =
     workspaceDir ??
     config.installedWorkspace;
   return { config, bootstrapConfig, workspaceDir: syncWorkspaceDir, apiWorkspaceDir: workspaceDir, configIsPartial };
+}
+
+function apiWorkspaceDirFrom(api) {
+  if (typeof api?.workspaceDir !== 'string') return undefined;
+  return entryAssignedWorkspaceDirs.get(api) === api.workspaceDir
+    ? undefined
+    : api.workspaceDir;
 }
 
 function directApiConfigFrom(config) {
@@ -164,6 +180,16 @@ function directPluginConfigFrom(config, options = {}) {
     return config;
   }
   return undefined;
+}
+
+function isSparseDirectAdapterConfig(config) {
+  if (!isObjectRecord(config) || !looksLikeAdapterPluginConfig(config)) return false;
+  const keys = Object.keys(config);
+  if (keys.length === 0) return false;
+  return !(
+    Object.prototype.hasOwnProperty.call(config, 'memory') &&
+    Object.prototype.hasOwnProperty.call(config, 'channel')
+  );
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

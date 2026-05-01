@@ -1325,16 +1325,25 @@ export class DkgNodePlugin {
   ): void {
     const channelPlugin = this.channelPlugin;
     if (!channelPlugin) return;
+    if (this.channelPluginStopInFlight) return;
     channelPlugin.setPreDispatchReAssert(null);
-    this.channelPlugin = null;
-    this.channelPluginConfigFingerprint = null;
     const stopWork = Promise.resolve(channelPlugin.stop({
       updateGatewayStatus: options.updateGatewayStatus,
     }))
       .then(
-        () => true,
+        () => {
+          if (this.channelPlugin === channelPlugin) {
+            this.channelPlugin = null;
+            this.channelPluginConfigFingerprint = null;
+          }
+          return true;
+        },
         (err: any) => {
           api.logger.warn?.(`[dkg] Channel module reconfiguration stop failed: ${err?.message ?? err}`);
+          const memoryPlugin = this.memoryPlugin;
+          if (this.channelPlugin === channelPlugin && memoryPlugin?.isRegistered()) {
+            channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
+          }
           return false;
         },
       )
@@ -1461,7 +1470,7 @@ export class DkgNodePlugin {
       // never reach the W3 (`before_prompt_build`) or `memory_search`
       // anchors, so a different plugin reclaiming the slot mid-session
       // gets bounced back before our recall/persist runs.
-      if (memoryPlugin && this.channelPlugin) {
+      if (memoryPlugin && this.channelPlugin && !this.channelPluginStopInFlight) {
         this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
       }
     }

@@ -213,7 +213,7 @@ describe('DkgNodePlugin', () => {
       (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
 
       expect(firstChannelPlugin).toBeDefined();
-      expect((plugin as any).channelPlugin).toBeNull();
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
       expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
       expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
       expect(registerSpy).toHaveBeenCalledTimes(1);
@@ -229,6 +229,58 @@ describe('DkgNodePlugin', () => {
       expect((secondChannelPlugin as any).chatTurnWriter).toBe(chatTurnWriter);
       expect((secondChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
       expect(registerSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
+  it('keeps the existing channel bridge when reconfiguration stop fails', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockRejectedValue(new Error('port still busy'));
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: true },
+      });
+      (plugin as any).client = {};
+      (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+      (plugin as any).chatTurnWriter = {} as any;
+      const registerMemoryCapability = vi.fn();
+      const mockApi = {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability,
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      expect((firstChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: true },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+      expect(stopInFlight).toBeDefined();
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
+      await stopInFlight;
+
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((plugin as any).channelPluginConfigFingerprint).not.toBeNull();
+      expect((firstChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+      expect(mockApi.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Channel module reconfiguration stop failed'),
+      );
     } finally {
       registerSpy.mockRestore();
       stopSpy.mockRestore();
@@ -263,6 +315,7 @@ describe('DkgNodePlugin', () => {
       (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
 
       expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: true });
+      await (plugin as any).channelPluginStopInFlight;
       expect((plugin as any).channelPlugin).toBeNull();
       expect(registerSpy).toHaveBeenCalledTimes(1);
     } finally {

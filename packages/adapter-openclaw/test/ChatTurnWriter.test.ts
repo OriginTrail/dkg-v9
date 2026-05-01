@@ -316,6 +316,24 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed response");
   });
 
+  it("T359 - typed message hooks normalize numeric chat and thread ids", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "numeric id hello", metadata: { chatId: 12345 } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "numeric id response", success: true, metadata: { threadId: 12345 } },
+      { channelId: "telegram", accountId: "bot" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "12345");
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(`openclaw:telegram:bot:12345:${weakSessionKey}`);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("numeric id hello");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("numeric id response");
+  });
+
   it("T359 - typed message normalization accepts structured and ctx text content", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: [{ type: "text", text: "typed array hello" }] },
@@ -1396,6 +1414,25 @@ describe("ChatTurnWriter", () => {
     });
     expect((restarted as any).w4bSessionCounts.has(sessionId)).toBe(false);
 
+    mockClient.storeChatTurn.mockClear();
+    restarted.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "concrete marker q", metadata: { messageId: "concrete-marker-in" } },
+        { role: "assistant", content: "concrete marker a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-marker", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
+    expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(0);
+
+    await restarted.onBeforeCompaction({}, {
+      channelId: "telegram",
+      accountId: "bot",
+      conversationId: "chat-concrete-marker",
+      sessionKey: "sk",
+    });
     mockClient.storeChatTurn.mockClear();
     restarted.onAgentEnd({
       sessionId: "test",

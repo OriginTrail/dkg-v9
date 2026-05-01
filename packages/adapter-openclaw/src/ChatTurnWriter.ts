@@ -7,17 +7,17 @@ import { createHash } from "crypto";
  * `markExternalTurnPersistedDurable` creates content-bound markers only after
  * channel-side daemon `storeChatTurn` succeeds; marker keys include `turnId`
  * plus canonical user/assistant text to avoid false dedupe for reused IDs or
- * content. W4a consumes them in `consumeExternalTurnMarkersForPair` during
+ * content. W4a matches them in `consumeExternalTurnMarkersForPair` during
  * `runAgentEndPersist`, advancing pair watermarks only after durable commit.
- * Create/consume failures roll back marker snapshots when
- * `commitWatermarkStateSync` fails; `setStateDir` migrates per-session `m`
+ * Create failures roll back marker snapshots when `commitWatermarkStateSync`
+ * fails; `setStateDir` migrates per-session `m`
  * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
  * Telegram persistence can arrive through typed `message_received/message_sent`
  * when typed `agent_end` is silent. Those events are normalized into the W4b
  * envelope and deduped against internal `message:received/message:sent` by
  * channel/account/conversation/messageId, outside the Node-UI marker space.
- * Typed W4b replay markers are additionally bound to provider message IDs so
- * same-text repeats in one transcript do not suppress the wrong occurrence.
+ * Typed W4b replay markers are retained and bound to provider message IDs so
+ * repeated reset/compaction replays skip same-text occurrences safely.
  */
 
 interface Logger {
@@ -115,6 +115,7 @@ function readEventText(ev: InternalMessageEvent): string {
 function firstString(...values: unknown[]): string | undefined {
   for (const value of values) {
     if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
   }
   return undefined;
 }
@@ -616,16 +617,14 @@ export class ChatTurnWriter {
             assistantMessageIds,
           );
           if (typedW4bMarkerHit) {
-            const { cursorKey, marker } = typedW4bMarkerHit;
-            const previousTypedMarkerCount =
-              this.externalTurnMarkers.get(cursorKey)?.get(marker) ?? 0;
             const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
-            this.consumeExternalTurnMarker(cursorKey, marker);
+            // Typed W4b markers are durable daemon-success facts, not
+            // one-shot tickets. Keep them so later reset/compaction replays
+            // can skip the same provider-message occurrence again.
             this.bumpWatermark(sessionId, pairIndex);
             if (!this.commitWatermarkStateSync(sessionId)) {
-              this.restoreExternalTurnMarkerCount(cursorKey, marker, previousTypedMarkerCount);
               this.restoreWatermarkState(sessionId, watermarkSnapshot);
-              throw new Error("Failed to write typed W4b chat-turn marker consumption");
+              throw new Error("Failed to write typed W4b chat-turn marker watermark");
             }
             continue;
           }

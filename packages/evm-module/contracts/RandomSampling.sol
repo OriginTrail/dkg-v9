@@ -254,7 +254,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
         uint256 epoch = chronos.getCurrentEpoch();
         randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
-        uint256 score18 = calculateNodeScore(identityId);
+
+        // D4+D15+D26 — post-migration the only source of staked TRAC is
+        // the V10 conviction layer. The node score and score-per-stake
+        // denominator must use the same timestamp-accurate effective stake
+        // snapshot: raw TRAC multiplied by active conviction boosts, with
+        // expired boosts drained at this proof's block timestamp.
+        uint40 tsNow = uint40(block.timestamp);
+        convictionStakingStorage.settleNodeTo(identityId, tsNow);
+        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
+        uint256 score18 = _calculateNodeScore(identityId, effectiveNodeStake);
         randomSamplingStorage.addToNodeEpochProofPeriodScore(
             epoch,
             activeProofPeriodStartBlock,
@@ -264,16 +273,6 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
         randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-        // D4+D15+D26 — post-migration the only source of staked TRAC is
-        // the V10 conviction layer. The denominator is the V10 effective
-        // stake at *this instant*. Under D26 timestamp-accurate accounting
-        // we first settle the node forward to `block.timestamp` (draining
-        // any boost-expiry drops that fell inside the interval since the
-        // last proof) and then read the post-settle running effective
-        // stake.
-        uint40 tsNow = uint40(block.timestamp);
-        convictionStakingStorage.settleNodeTo(identityId, tsNow);
-        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
         if (effectiveNodeStake > 0) {
             uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
             uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
@@ -540,7 +539,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * Formula: nodeScore(t) = S(t) * (c + 0.86 * P(t) + 0.60 * A(t) * P(t))
      *
      * Where:
-     * - S(t) = sqrt(nodeStake / STAKE_CAP) - sublinear stake scaling
+     * - S(t) = sqrt(nodeEffectiveStake / STAKE_CAP) - sublinear conviction stake scaling
      * - P(t) = K_n / K_total - publishing share over 4 epochs (t-3, t-2, t-1, t)
      * - A(t) = 1 - |nodeAsk - networkPrice| / networkPrice - ask alignment factor
      * - c = 0.002 (STAKE_BASELINE_COEFFICIENT) - small baseline for staked non-publishers
@@ -555,22 +554,23 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * @return score18 The calculated node score scaled by 18-decimal for precision
      */
     function calculateNodeScore(uint72 identityId) public view returns (uint256) {
+        return _calculateNodeScore(identityId, convictionStakingStorage.getNodeEffectiveStake(identityId));
+    }
+
+    function _calculateNodeScore(uint72 identityId, uint256 nodeEffectiveStake) internal view returns (uint256) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
-        // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
+        // 1. Stake factor S(t) = sqrt(nodeEffectiveStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
         //
-        // D15 — post-migration the node's canonical raw TRAC stake is
-        // `ConvictionStakingStorage.nodeStakeV10`. StakingStorage.nodes[id].stake
-        // is V8 legacy and not maintained after V10 cutover; reading it here
-        // would zero-out the stake factor for any V10 node and lock it out
-        // of scoring. Migration is mandatory (user directive) — there are
-        // no V8-only nodes — so the V10 aggregate IS the node stake.
+        // D15/D26 — post-migration the node's scoring stake is V10 effective
+        // stake: raw TRAC multiplied by active conviction multipliers and
+        // timestamp-adjusted for expired boosts. Migration is mandatory (user
+        // directive), so V8 `StakingStorage.nodes[id].stake` is legacy-only.
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = convictionStakingStorage.getNodeStakeV10(identityId);
-        nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
-        // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
-        uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;
+        nodeEffectiveStake = nodeEffectiveStake > stakeCap ? stakeCap : nodeEffectiveStake;
+        // S18 = sqrt((nodeEffectiveStake / stakeCap) * SCALE18) * sqrt(SCALE18)
+        uint256 stakeRatio18 = (nodeEffectiveStake * SCALE18) / stakeCap;
         uint256 stakeFactor18 = Math.sqrt(stakeRatio18 * SCALE18);
 
         // 2. Publishing factor P(t) = K_n / K_total over 4 epochs (RFC-26 Section 4.2)

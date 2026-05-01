@@ -30,11 +30,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     for both deposits (TRAC `transferFrom` to CSS) and withdrawals
  *     (`StakingV10` calls `cs.transferStake`).
  *   - Migration to V10 is MANDATORY: every V8 delegator becomes a V10 NFT
- *     position. `RandomSampling.calculateNodeScore` and the Phase 11
- *     `scorePerStake` denominator therefore read `nodeStakeV10` here, NOT
- *     `StakingStorage.nodes[id].stake`. V8 `StakingStorage` is deployed-but-
- *     unused dead code post-consolidation; only `StakingV10._convertToNFT`
- *     reads it (V8→V10 drain at cutover).
+ *     position. `RandomSampling.calculateNodeScore` therefore reads the
+ *     timestamp-accurate effective stake here (raw TRAC × active conviction
+ *     multipliers), while raw stake gates still read `nodeStakeV10`. V8
+ *     `StakingStorage` is deployed-but-unused dead code post-consolidation;
+ *     only `StakingV10._convertToNFT` reads it (V8→V10 drain at cutover).
  *
  * Rewards model (D19 — compound-into-raw):
  *   - The previous split-bucket model (separate `rewards` sidecar that

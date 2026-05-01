@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -613,6 +613,27 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
+  it('treats daemon-only direct re-registration config as partial', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9810',
+      dkgHome: '/next-daemon-home',
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9810',
+      dkgHome: '/next-daemon-home',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+  });
+
   it('treats sparse direct re-registration config as a full snapshot', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
@@ -912,7 +933,7 @@ describe('openclaw-entry', () => {
     expect(instance.workspaceDirsAtRegister).toEqual(['/runtime-first', undefined]);
   });
 
-  it('does not sync skills into installedWorkspace without live workspace evidence', async () => {
+  it('syncs skills into installedWorkspace without stamping api.workspaceDir', async () => {
     const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-installed-workspace-'));
     tempRoots.push(installedWorkspace);
     const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh skill' });
@@ -925,7 +946,9 @@ describe('openclaw-entry', () => {
     entry(api);
 
     expect((api as any).workspaceDir).toBeUndefined();
-    expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    const skillPath = join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md');
+    expect(existsSync(skillPath)).toBe(true);
+    expect(readFileSync(skillPath, 'utf8')).toBe('fresh skill');
   });
 
   it('preserves a caller-provided api.workspaceDir value', async () => {

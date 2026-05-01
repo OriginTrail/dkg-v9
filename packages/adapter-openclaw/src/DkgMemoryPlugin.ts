@@ -47,7 +47,11 @@ import type {
   MemorySource,
   OpenClawPluginApi,
 } from './types.js';
-import { resolveOpenClawMergedConfig } from './openclaw-config.js';
+import {
+  isObjectRecord,
+  looksLikeAdapterPluginConfig,
+  resolveOpenClawMergedConfig,
+} from './openclaw-config.js';
 
 // ---------------------------------------------------------------------------
 // Conventions — addresses, assertion names, RDF vocabulary
@@ -592,6 +596,7 @@ export function buildDkgMemoryRuntime(
 export class DkgMemoryPlugin {
   private registeredCapability: MemoryPluginCapability | null = null;
   private registeredApi: OpenClawPluginApi | null = null;
+  private registeredOwnershipSource: MemorySlotOwnershipSource | null = null;
 
   constructor(
     private client: DkgDaemonClient,
@@ -611,7 +616,8 @@ export class DkgMemoryPlugin {
       this.registeredCapability &&
       typeof targetApi.registerMemoryCapability === 'function'
     ) {
-      if (!isMemorySlotOwnedByThisAdapter(targetApi)) {
+      const ownership = memorySlotOwnershipForApi(targetApi);
+      if (ownership?.owned !== true) {
         this.invalidateRegistration();
         return;
       }
@@ -619,6 +625,7 @@ export class DkgMemoryPlugin {
       targetApi.registerMemoryCapability(capability);
       this.registeredCapability = capability;
       this.registeredApi = targetApi;
+      this.registeredOwnershipSource = ownership.source;
     }
   }
 
@@ -630,14 +637,20 @@ export class DkgMemoryPlugin {
     const currentOwnership = currentApi ? memorySlotOwnershipForApi(currentApi) : undefined;
     const registeredOwnership = this.registeredApi ? memorySlotOwnershipForApi(this.registeredApi) : undefined;
     const targetApi =
-      currentOwnership === true
+      currentOwnership?.owned === true
         ? currentApi
-        : registeredOwnership === true
+        : registeredOwnership?.owned === true
           ? this.registeredApi
           : currentApi ?? this.registeredApi;
+    const directConfigDisableForRegisteredApi =
+      hadRegisteredCapability &&
+      this.registeredOwnershipSource === 'direct-plugin-config' &&
+      currentApi === this.registeredApi &&
+      directPluginConfigMemoryEnabledForApi(currentApi) === false;
     const shouldStampDisabled =
-      currentOwnership === true ||
-      registeredOwnership === true;
+      currentOwnership?.owned === true ||
+      registeredOwnership?.owned === true ||
+      directConfigDisableForRegisteredApi;
 
     try {
       if (
@@ -696,6 +709,7 @@ export class DkgMemoryPlugin {
   invalidateRegistration(): void {
     this.registeredCapability = null;
     this.registeredApi = null;
+    this.registeredOwnershipSource = null;
   }
 
   async close(): Promise<void> {
@@ -738,7 +752,8 @@ export class DkgMemoryPlugin {
       return false;
     }
 
-    if (!isMemorySlotOwnedByThisAdapter(api)) {
+    const ownership = memorySlotOwnershipForApi(api);
+    if (ownership?.owned !== true) {
       api.logger.warn?.(
         '[dkg-memory] plugins.slots.memory is not set to "adapter-openclaw" in the workspace config — ' +
         'skipping memory-capability registration so this adapter does not silently override the elected ' +
@@ -751,6 +766,7 @@ export class DkgMemoryPlugin {
     api.registerMemoryCapability(capability);
     this.registeredCapability = capability;
     this.registeredApi = api;
+    this.registeredOwnershipSource = ownership.source;
     const modeLabel = (api.registrationMode ?? 'full');
     api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
     return true;
@@ -792,19 +808,46 @@ function buildDisabledMemoryCapability(): MemoryPluginCapability {
  *
  * Some OpenClaw gateway versions expose the merged config on `api.cfg`,
  * `runtime.cfg`, or `runtime.config`, while others pass the adapter's
- * validated plugin config directly as `api.config`. Only the merged config
- * carries `plugins.slots.memory`, so skip plugin-shaped config objects here.
+ * validated plugin config directly as `api.config` / `api.pluginConfig`.
+ * Prefer the merged slot owner when it exists; for direct-config-only gateway
+ * phases, explicit `memory.enabled` is the scoped ownership signal.
  */
-function isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
-  return memorySlotOwnershipForApi(api) === true;
-}
+type MemorySlotOwnershipSource = 'merged-config' | 'direct-plugin-config';
 
-function memorySlotOwnershipForApi(api: OpenClawPluginApi): boolean | undefined {
+type MemorySlotOwnership = {
+  owned: boolean;
+  source: MemorySlotOwnershipSource;
+};
+
+function memorySlotOwnershipForApi(api: OpenClawPluginApi): MemorySlotOwnership | undefined {
   const mergedConfig = resolveOpenClawMergedConfig(api);
   const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
   const slots = plugins?.slots as Record<string, unknown> | undefined;
-  if (!slots || !Object.prototype.hasOwnProperty.call(slots, 'memory')) return undefined;
-  return slots.memory === 'adapter-openclaw';
+  if (slots && Object.prototype.hasOwnProperty.call(slots, 'memory')) {
+    return { owned: slots.memory === 'adapter-openclaw', source: 'merged-config' };
+  }
+  const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);
+  if (directMemoryEnabled === undefined) return undefined;
+  return { owned: directMemoryEnabled, source: 'direct-plugin-config' };
+}
+
+function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): boolean | undefined {
+  if (!api) return undefined;
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  const candidates = [
+    anyApi?.pluginConfig,
+    anyApi?.config,
+    runtime?.pluginConfig,
+    runtime?.config,
+  ];
+  for (const candidate of candidates) {
+    if (!looksLikeAdapterPluginConfig(candidate)) continue;
+    const memory = (candidate as Record<string, unknown>).memory;
+    if (!isObjectRecord(memory) || !Object.prototype.hasOwnProperty.call(memory, 'enabled')) continue;
+    return memory.enabled === true;
+  }
+  return undefined;
 }
 
 

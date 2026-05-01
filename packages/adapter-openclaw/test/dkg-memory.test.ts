@@ -157,7 +157,7 @@ describe('DkgMemoryPlugin.register', () => {
     const api = makeApi();
     plugin.register(api);
     api.config = {
-      memory: { enabled: false },
+      daemonUrl: 'http://localhost:9200',
     } as any;
 
     expect(plugin.disable(api)).toBe(false);
@@ -166,6 +166,28 @@ describe('DkgMemoryPlugin.register', () => {
     expect(plugin.isRegistered()).toBe(false);
     plugin.reAssertCapability();
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers and disables memory for direct-plugin-config-only gateways', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
   });
 
   it('does not stamp the inactive capability when another plugin owns the memory slot', () => {

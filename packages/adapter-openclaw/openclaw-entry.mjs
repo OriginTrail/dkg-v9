@@ -14,6 +14,13 @@ let instance = null;
 const lifecycleServiceApis = new WeakMap();
 const entryAssignedWorkspaceDirs = new WeakMap();
 let lifecycleOwnerToken = null;
+const PARTIAL_DIRECT_CONFIG_KEYS = new Set([
+  'daemonUrl',
+  'dkgHome',
+  'stateDir',
+  'stateDirSource',
+  'installedWorkspace',
+]);
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -104,6 +111,7 @@ function resolveEntryConfig(api, options = {}) {
     currentPluginConfig,
   ].filter(isObjectRecord);
   const fallbackDirectConfigs = [
+    directPluginConfigFrom(runtime?.config),
     directPluginConfigFrom(runtime?.pluginConfig),
   ].filter(isObjectRecord);
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
@@ -117,7 +125,7 @@ function resolveEntryConfig(api, options = {}) {
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
   const configIsPartial =
     !hasConfigSource ||
-    (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
+    (entryConfigs.length === 0 && directConfigs.every(isPartialDirectAdapterConfig));
   const currentConfigSources = [
     ...currentEntryConfigs,
     ...currentDirectConfigs,
@@ -150,7 +158,10 @@ function resolveEntryConfig(api, options = {}) {
     mergedConfig?.agents?.defaults?.workspace ??
     mergedConfig?.workspace;
   const apiWorkspaceDir = apiWorkspaceDirFrom(anyApi);
-  const workspaceDir = configWorkspaceDir ?? apiWorkspaceDir;
+  const installedWorkspaceDir = typeof config.installedWorkspace === 'string'
+    ? config.installedWorkspace
+    : undefined;
+  const workspaceDir = configWorkspaceDir ?? apiWorkspaceDir ?? installedWorkspaceDir;
   return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: configWorkspaceDir, configIsPartial };
 }
 
@@ -183,6 +194,13 @@ function directPluginConfigFrom(config) {
     return config;
   }
   return undefined;
+}
+
+function isPartialDirectAdapterConfig(config) {
+  if (isStateMetadataOnlyAdapterConfig(config)) return true;
+  if (!looksLikeAdapterPluginConfig(config)) return false;
+  const keys = Object.keys(config);
+  return keys.length > 0 && keys.every((key) => PARTIAL_DIRECT_CONFIG_KEYS.has(key));
 }
 
 function syncSkillToWorkspace(workspaceDir, log) {

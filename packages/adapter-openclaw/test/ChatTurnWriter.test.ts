@@ -1026,6 +1026,33 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("repeat before reply\nrepeat before reply");
   });
 
+  it("T359 - late duplicate inbound messageId does not enqueue stale text after persist", async () => {
+    const ctx = { channelId: "telegram", accountId: "bot", conversationId: "chat-late-dup", sessionKey: "sk" };
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "late duplicate q", metadata: { messageId: "late-dup-in" } },
+      ctx,
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "late duplicate a", success: true, metadata: { messageId: "late-dup-out" } },
+      ctx,
+    );
+    await flushMicrotasks();
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "late duplicate q", metadata: { messageId: "late-dup-in" } },
+      ctx,
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "next outbound should not pair stale text", success: true, metadata: { messageId: "late-dup-out-2" } },
+      ctx,
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("late duplicate q");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("late duplicate a");
+  });
+
   it("T359 - conversationless message-id dedupe is scoped by session key", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "session A q", metadata: { messageId: "local-in-1" } },

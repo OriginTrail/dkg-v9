@@ -1584,7 +1584,12 @@ export class ChatTurnWriter {
 
   private clearMessageHookInboundDedupKeys(keys: string[]): void {
     for (const key of keys) {
-      this.deleteMessageHookDedupKey(key);
+      // Provider messageId keys stay in the TTL cache after the queue is
+      // consumed, so a late retry of the same inbound cannot seed stale text
+      // for the next outbound. Only batch-scoped no-ID keys are disposable.
+      if (this.isNoIdInboundBatchKey(key)) {
+        this.deleteMessageHookDedupKey(key);
+      }
     }
   }
 

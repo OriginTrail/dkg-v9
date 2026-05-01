@@ -276,6 +276,58 @@ describe('DkgNodePlugin', () => {
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
+  it('clears memory capability through current direct-config api when previous slot ownership is known', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const initialRegisterMemoryCapability = vi.fn();
+    const currentRegisterMemoryCapability = vi.fn();
+    const initialApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: initialRegisterMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    const currentDirectApi = {
+      config: {
+        memory: { enabled: false },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: currentRegisterMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(initialApi, { enableFullRuntime: true });
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(currentDirectApi, { enableFullRuntime: true });
+
+    expect(currentRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    const disabledCapability = currentRegisterMemoryCapability.mock.calls[0][0];
+    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+  });
+
   it('does not clear another plugin memory slot when refreshed config disables memory', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',

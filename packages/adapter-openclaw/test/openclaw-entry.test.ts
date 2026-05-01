@@ -690,6 +690,48 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls).toEqual([]);
   });
 
+  it('applies DKG_DAEMON_URL to partial first-load bootstrap config', async () => {
+    const prevDaemonUrl = process.env.DKG_DAEMON_URL;
+    process.env.DKG_DAEMON_URL = 'http://127.0.0.1:9730';
+    try {
+      const entry = await loadEntryWithFakeRuntime();
+      const api = makeDirectPluginConfigApi({
+        stateDir: '/bootstrap-env/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/bootstrap-env',
+      }, {
+        runtime: {
+          config: {
+            plugins: {
+              entries: {
+                'adapter-openclaw': {
+                  config: {
+                    daemonUrl: 'http://127.0.0.1:9500',
+                    memory: { enabled: true },
+                    channel: { enabled: false },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      entry(api);
+
+      const instance = globalThis.__openclawEntryTestInstances![0];
+      expect(instance.config).toMatchObject({
+        daemonUrl: 'http://127.0.0.1:9730',
+        stateDir: '/bootstrap-env/.dkg-adapter',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+    } finally {
+      if (prevDaemonUrl === undefined) delete process.env.DKG_DAEMON_URL;
+      else process.env.DKG_DAEMON_URL = prevDaemonUrl;
+    }
+  });
+
   it('resolves workspace from runtime.config even when it only carries workspace metadata', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

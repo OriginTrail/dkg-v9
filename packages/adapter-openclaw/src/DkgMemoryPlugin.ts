@@ -627,13 +627,21 @@ export class DkgMemoryPlugin {
     const targetApi = typeof api?.registerMemoryCapability === 'function'
       ? api
       : this.registeredApi;
+    const targetOwnership = targetApi ? memorySlotOwnershipForApi(targetApi) : undefined;
+    const registeredOwnership =
+      this.registeredApi && this.registeredApi !== targetApi
+        ? memorySlotOwnershipForApi(this.registeredApi)
+        : undefined;
+    const shouldStampDisabled =
+      targetOwnership === true ||
+      (targetOwnership === undefined && registeredOwnership === true);
 
     try {
       if (
         hadRegisteredCapability &&
         targetApi &&
         typeof targetApi.registerMemoryCapability === 'function' &&
-        isMemorySlotOwnedByThisAdapter(targetApi)
+        shouldStampDisabled
       ) {
         targetApi.registerMemoryCapability(buildDisabledMemoryCapability());
         return true;
@@ -785,10 +793,15 @@ function buildDisabledMemoryCapability(): MemoryPluginCapability {
  * carries `plugins.slots.memory`, so skip plugin-shaped config objects here.
  */
 function isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
+  return memorySlotOwnershipForApi(api) === true;
+}
+
+function memorySlotOwnershipForApi(api: OpenClawPluginApi): boolean | undefined {
   const mergedConfig = resolveOpenClawMergedConfig(api);
   const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
   const slots = plugins?.slots as Record<string, unknown> | undefined;
-  return slots?.memory === 'adapter-openclaw';
+  if (!slots || !Object.prototype.hasOwnProperty.call(slots, 'memory')) return undefined;
+  return slots.memory === 'adapter-openclaw';
 }
 
 

@@ -107,14 +107,14 @@ function resolveEntryConfig(api) {
   const configIsPartial =
     !hasConfigSource ||
     (entryConfigs.length === 0 && directConfigs.every(isStateMetadataOnlyAdapterConfig));
-  const fallbackConfig = mergeAdapterPluginConfigs(...fallbackEntryConfigs, ...fallbackDirectConfigs);
-  const bootstrapConfig = configIsPartial
-    ? mergeAdapterPluginConfigs(fallbackConfig, config)
-    : config;
 
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
   }
+  const fallbackConfig = mergeAdapterPluginConfigs(...fallbackEntryConfigs, ...fallbackDirectConfigs);
+  const bootstrapConfig = configIsPartial
+    ? mergeAdapterPluginConfigs(fallbackConfig, config)
+    : config;
 
   const workspaceDir =
     workspaceConfig?.agents?.defaults?.workspace ??

@@ -90,9 +90,18 @@ function resolveEntryConfig(api, options = {}) {
   const fallbackEntryConfigs = fallbackFullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObjectRecord);
-  const currentDirectConfigs = [
+  const currentDirectApiConfigs = [
     directApiConfigFrom(anyApi?.config),
-    directPluginConfigFrom(anyApi?.pluginConfig, { allowEmpty: options.hasInstance === true }),
+  ].filter(isObjectRecord);
+  const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig, {
+    allowEmpty:
+      options.hasInstance === true &&
+      currentEntryConfigs.length === 0 &&
+      currentDirectApiConfigs.length === 0,
+  });
+  const currentDirectConfigs = [
+    ...currentDirectApiConfigs,
+    currentPluginConfig,
   ].filter(isObjectRecord);
   const fallbackDirectConfigs = [
     directPluginConfigFrom(runtime?.pluginConfig),

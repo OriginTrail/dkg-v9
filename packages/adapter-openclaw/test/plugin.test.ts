@@ -235,6 +235,42 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('updates gateway status when refreshed config disables the channel module', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockResolvedValue(undefined);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: false },
+      });
+      (plugin as any).client = {};
+      (plugin as any).chatTurnWriter = {} as any;
+      const mockApi = {
+        config: {},
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: true });
+      expect((plugin as any).channelPlugin).toBeNull();
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
   it('clears a registered memory capability when refreshed config disables memory', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
@@ -285,7 +321,7 @@ describe('DkgNodePlugin', () => {
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
-  it('does not clear memory capability through current direct-config api without current slot ownership', async () => {
+  it('clears previous memory registry without stamping current direct-config api when ownership is unknown', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       memory: { enabled: true },
@@ -332,10 +368,11 @@ describe('DkgNodePlugin', () => {
     (plugin as any).registerIntegrationModules(currentDirectApi, { enableFullRuntime: true });
 
     expect(currentRegisterMemoryCapability).not.toHaveBeenCalled();
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(2);
     expect((plugin as any).memoryPlugin).toBeNull();
     expect((plugin as any).memoryResolverApi).toBeNull();
     oldMemoryPlugin.reAssertCapability();
-    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(2);
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 

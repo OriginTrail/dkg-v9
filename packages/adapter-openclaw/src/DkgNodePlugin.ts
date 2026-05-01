@@ -1319,13 +1319,18 @@ export class DkgNodePlugin {
     return true;
   }
 
-  private stopChannelPluginForReconfigure(api: OpenClawPluginApi): void {
+  private stopChannelPluginForReconfigure(
+    api: OpenClawPluginApi,
+    options: { updateGatewayStatus?: boolean } = {},
+  ): void {
     const channelPlugin = this.channelPlugin;
     if (!channelPlugin) return;
     channelPlugin.setPreDispatchReAssert(null);
     this.channelPlugin = null;
     this.channelPluginConfigFingerprint = null;
-    const stopWork = Promise.resolve(channelPlugin.stop({ updateGatewayStatus: false }))
+    const stopWork = Promise.resolve(channelPlugin.stop({
+      updateGatewayStatus: options.updateGatewayStatus,
+    }))
       .then(
         () => true,
         (err: any) => {
@@ -1389,7 +1394,9 @@ export class DkgNodePlugin {
     const channelConfig = this.config.channel;
     const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
     if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
-      this.stopChannelPluginForReconfigure(api);
+      this.stopChannelPluginForReconfigure(api, {
+        updateGatewayStatus: !channelConfig?.enabled,
+      });
     }
     if (channelConfig?.enabled) {
       if (this.channelPluginStopInFlight) {

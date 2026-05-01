@@ -624,11 +624,18 @@ export class DkgMemoryPlugin {
 
   disable(api?: OpenClawPluginApi): boolean {
     const hadRegisteredCapability = this.registeredCapability !== null;
-    const targetApi = typeof api?.registerMemoryCapability === 'function'
+    const currentApi = typeof api?.registerMemoryCapability === 'function'
       ? api
-      : this.registeredApi;
-    const targetOwnership = targetApi ? memorySlotOwnershipForApi(targetApi) : undefined;
-    const shouldStampDisabled = targetOwnership === true;
+      : null;
+    const currentOwnership = currentApi ? memorySlotOwnershipForApi(currentApi) : undefined;
+    const registeredOwnership = this.registeredApi ? memorySlotOwnershipForApi(this.registeredApi) : undefined;
+    const targetApi =
+      currentOwnership === true
+        ? currentApi
+        : registeredOwnership === true
+          ? this.registeredApi
+          : currentApi ?? this.registeredApi;
+    const shouldStampDisabled = currentOwnership === true || registeredOwnership === true;
 
     try {
       if (

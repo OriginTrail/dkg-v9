@@ -644,7 +644,7 @@ describe('openclaw-entry', () => {
   it('does not backfill stale runtime config when current api.config is state-only partial', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
-    const secondApi = makeDirectPluginConfigApi(undefined as any, {
+    const secondApi = makeDirectPluginConfigApi({}, {
       config: {
         stateDir: '/partial-api-config/.dkg-adapter',
         stateDirSource: 'setup-default',
@@ -666,7 +666,6 @@ describe('openclaw-entry', () => {
         },
       },
     });
-    delete (secondApi as any).pluginConfig;
 
     entry(firstApi);
     entry(secondApi);

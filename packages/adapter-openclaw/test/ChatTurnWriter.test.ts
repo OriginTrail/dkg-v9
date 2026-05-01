@@ -369,6 +369,26 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T359 - typed hook bare id is not treated as a provider message id", async () => {
+    const ctx = { channelId: "telegram", accountId: "bot", conversationId: "chat-bare-id", id: "chat-object-id" } as any;
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "bare id q1" },
+      ctx,
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "bare id q2" },
+      ctx,
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "bare id a", success: true },
+      ctx,
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("bare id q1\nbare id q2");
+  });
+
   it("T359 - typed and internal W4b surfaces for the same Telegram message persist once", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "same inbound", metadata: { messageId: "same-in-1" } },
@@ -684,6 +704,50 @@ describe("ChatTurnWriter", () => {
       sessionKey: "real-sk",
     });
     expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+  });
+
+  it("T359 - weak conversation W4b in-flight suppresses real-session W4a duplicate", async () => {
+    let releaseStore: (() => void) | null = null;
+    let storeCalls = 0;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      storeCalls++;
+      await new Promise<void>((resolve) => { releaseStore = resolve; });
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak inflight q", metadata: { messageId: "weak-inflight-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-inflight" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak inflight a", success: true },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-inflight" },
+    );
+    await flushMicrotasks();
+    expect(storeCalls).toBe(1);
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "weak inflight q" },
+        { role: "assistant", content: "weak inflight a" },
+      ],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-inflight", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    expect(storeCalls).toBe(1);
+    const weakSessionKey = (writer as any).weakSessionKey("telegram", "bot", "chat-weak-inflight");
+    const weakSessionId = `openclaw:telegram:bot:chat-weak-inflight:${encodeURIComponent(weakSessionKey)}`;
+    const strongSessionId = "openclaw:telegram:bot:chat-weak-inflight:real-sk";
+    expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(true);
+    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
+
+    releaseStore!();
+    await writer.flush();
+
+    expect(storeCalls).toBe(1);
+    expect((writer as any).w4bSessionCounts.get(weakSessionId)).toBe(1);
+    expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
   });
 
   it("T359 - conversationless promotion does not become a standing alias", async () => {

@@ -520,6 +520,7 @@ export class ChatTurnWriter {
     const identity = this.identityFieldsFromPayload(ctx);
     const externalCursorKey = this.externalCursorKeyFromSessionKey(identity.sessionKey);
     const typedW4bCursorKeys = this.typedW4bMarkerCursorKeys(identity);
+    const w4bInflightSessionIds = this.w4bInflightGuardSessionIds(identity, sessionId);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -539,7 +540,7 @@ export class ChatTurnWriter {
       .catch(() => undefined)
       .then(async () => {
         if (resetAtSchedule) await resetAtSchedule;
-        await this.runAgentEndPersist(event, sessionId, externalCursorKey, typedW4bCursorKeys);
+        await this.runAgentEndPersist(event, sessionId, externalCursorKey, typedW4bCursorKeys, w4bInflightSessionIds);
       });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
@@ -559,6 +560,7 @@ export class ChatTurnWriter {
     sessionId: string,
     externalCursorKey?: string,
     typedW4bCursorKeys: string[] = [],
+    w4bInflightSessionIds: string[] = [sessionId],
   ): Promise<void> {
     try {
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
@@ -665,7 +667,7 @@ export class ChatTurnWriter {
             // and a future outbound re-pairs; the unchanged watermark
             // means the next `agent_end` will re-yield this pair as
             // backfill (correct retry behavior).
-            if (this.peekCrossPathInflight(sessionId, w4bOrigin) || this.hasInFlightPersistOrigin(sessionId, w4bOrigin)) {
+            if (this.hasW4bInflightOrigin(w4bInflightSessionIds, w4bOrigin)) {
               continue;
             }
           }
@@ -751,6 +753,15 @@ export class ChatTurnWriter {
     if (!bucket) return false;
     for (const job of bucket) {
       if (this.persistJobOriginKeys.get(job)?.has(originKey)) return true;
+    }
+    return false;
+  }
+
+  private hasW4bInflightOrigin(sessionIds: string[], originKey: string): boolean {
+    for (const sessionId of Array.from(new Set(sessionIds))) {
+      if (this.peekCrossPathInflight(sessionId, originKey) || this.hasInFlightPersistOrigin(sessionId, originKey)) {
+        return true;
+      }
     }
     return false;
   }
@@ -1027,19 +1038,7 @@ export class ChatTurnWriter {
       return null;
     }
 
-    const messageId = firstString(
-      ctx.messageId,
-      ctx.MessageId,
-      ctx.message_id,
-      ctx.id,
-      ...this.extractMessageIds({
-        ...event,
-        context: eventContext,
-        metadata,
-        content,
-        role: direction === "inbound" ? "user" : "assistant",
-      } as ChatTurnMessage),
-    );
+    const messageId = this.typedHookMessageId(event, eventContext, metadata, ctx);
     const successValue = eventContext.success ?? event.success;
     const context: NonNullable<InternalMessageEvent["context"]> = {
       channelId,
@@ -1077,6 +1076,28 @@ export class ChatTurnWriter {
       if (text) return text;
     }
     return "";
+  }
+
+  private typedHookMessageId(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string | undefined {
+    return firstString(
+      ctx.messageId,
+      ctx.MessageId,
+      ctx.message_id,
+      event.messageId,
+      event.MessageId,
+      event.message_id,
+      eventContext.messageId,
+      eventContext.MessageId,
+      eventContext.message_id,
+      metadata.messageId,
+      metadata.MessageId,
+      metadata.message_id,
+    );
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {
@@ -1585,6 +1606,22 @@ export class ChatTurnWriter {
         this.promoteSessionState(fromSessionId, strongSessionId);
       }
     }
+  }
+
+  private w4bInflightGuardSessionIds(identity: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }, sessionId: string): string[] {
+    const ids = new Set<string>([sessionId]);
+    if (identity.channelId && identity.conversationId) {
+      const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+      if (weakSession) {
+        ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
+      }
+    }
+    return Array.from(ids);
   }
 
   private promoteSessionState(fromSessionId: string, strongSessionId: string): void {

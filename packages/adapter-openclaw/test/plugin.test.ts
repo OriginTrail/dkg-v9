@@ -474,7 +474,7 @@ describe('DkgNodePlugin', () => {
     expect(registerMemoryCapability.mock.calls[1][0]).not.toBe(initialCapability);
   });
 
-  it('clears previous memory registry without stamping current direct-config api when ownership is unknown', async () => {
+  it('clears previous memory registry without stamping a stale registered api when ownership is unknown', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       memory: { enabled: true },
@@ -521,11 +521,11 @@ describe('DkgNodePlugin', () => {
     (plugin as any).registerIntegrationModules(currentDirectApi, { enableFullRuntime: true });
 
     expect(currentRegisterMemoryCapability).not.toHaveBeenCalled();
-    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
     expect((plugin as any).memoryPlugin).toBeNull();
     expect((plugin as any).memoryResolverApi).toBeNull();
     oldMemoryPlugin.reAssertCapability();
-    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
     expect(oldMemoryPlugin.isRegistered()).toBe(false);
   });
 
@@ -4623,7 +4623,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - OPENCLAW_STATE_DIR ending .dkg-adapter without workspace metadata uses direct layout without sibling migration', async () => {
+  it('T75 - OPENCLAW_STATE_DIR ending .dkg-adapter migrates sibling legacy state from env-derived workspace', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-env-no-workspace-${Date.now()}`);
     const stateDir = path.join(workspaceDir, '.dkg-adapter');
@@ -4655,12 +4655,8 @@ describe('DkgNodePlugin', () => {
         path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
       expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
-      if (fs.existsSync(watermarkPath)) {
-        const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
-        expect(persisted['openclaw:tg:::env-untrusted']).toBeUndefined();
-      }
-      const legacyState = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
-      expect(legacyState['openclaw:tg:::env-untrusted']).toEqual({ w: 9, b: 4 });
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::env-untrusted']).toEqual({ w: 9, b: 4 });
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
@@ -4669,7 +4665,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - explicit config.stateDir ending .dkg-adapter uses direct layout without sibling legacy migration', async () => {
+  it('T75 - explicit config.stateDir ending .dkg-adapter migrates sibling legacy state from config-derived workspace', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-custom-dkg-adapter-${Date.now()}`);
@@ -4702,12 +4698,8 @@ describe('DkgNodePlugin', () => {
         path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
       expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
-      if (fs.existsSync(watermarkPath)) {
-        const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
-        expect(persisted['openclaw:tg:::unrelated']).toBeUndefined();
-      }
-      const legacyState = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
-      expect(legacyState['openclaw:tg:::unrelated']).toEqual({ w: 4, b: 1 });
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::unrelated']).toEqual({ w: 4, b: 1 });
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;

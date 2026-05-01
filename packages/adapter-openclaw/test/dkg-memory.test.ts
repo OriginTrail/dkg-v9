@@ -280,7 +280,7 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the previous registry without stamping a current unknown slot', () => {
+  it('clears the previous registry without stamping through a stale registered api', () => {
     const initialApi = makeApi();
     plugin.register(initialApi);
     const currentApi = {
@@ -294,13 +294,13 @@ describe('DkgMemoryPlugin.register', () => {
       registerMemoryCapability: vi.fn(),
     } as unknown as MockApi;
 
-    expect(plugin.disable(currentApi)).toBe(true);
+    expect(plugin.disable(currentApi)).toBe(false);
 
     expect(currentApi.registerMemoryCapability).not.toHaveBeenCalled();
-    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
     expect(plugin.isRegistered()).toBe(false);
     plugin.reAssertCapability();
-    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('registers a prompt builder that teaches WM identity selection', () => {

@@ -635,21 +635,17 @@ export class DkgMemoryPlugin {
       ? api
       : null;
     const currentOwnership = currentApi ? memorySlotOwnershipForApi(currentApi) : undefined;
-    const registeredOwnership = this.registeredApi ? memorySlotOwnershipForApi(this.registeredApi) : undefined;
-    const targetApi =
-      currentOwnership?.owned === true
-        ? currentApi
-        : registeredOwnership?.owned === true
-          ? this.registeredApi
-          : currentApi ?? this.registeredApi;
     const directConfigDisableForRegisteredApi =
       hadRegisteredCapability &&
       this.registeredOwnershipSource === 'direct-plugin-config' &&
       currentApi === this.registeredApi &&
       directPluginConfigMemoryEnabledForApi(currentApi) === false;
+    const targetApi =
+      currentOwnership?.owned === true || directConfigDisableForRegisteredApi
+        ? currentApi
+        : null;
     const shouldStampDisabled =
       currentOwnership?.owned === true ||
-      registeredOwnership?.owned === true ||
       directConfigDisableForRegisteredApi;
 
     try {

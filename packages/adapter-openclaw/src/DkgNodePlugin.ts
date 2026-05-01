@@ -718,6 +718,8 @@ export class DkgNodePlugin {
       stateDirIsKnownWorkspaceDefault ? 'direct' : 'nested';
     const legacyStateDirs = [
       runtimeWorkspaceDir,
+      envWorkspaceDir,
+      configuredWorkspaceDir,
       trimmedWorkspaceDir,
       setupWorkspaceDir,
     ]

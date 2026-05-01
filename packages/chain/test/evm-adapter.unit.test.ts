@@ -8,11 +8,13 @@ import { decodeEvmError, enrichEvmError, EVMChainAdapter, type EVMAdapterConfig 
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
+const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
     privateKey: DEPLOYER_PK,
+    adminPrivateKey: ADMIN_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
     ...overrides,
@@ -113,6 +115,28 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const addrs = a.getSignerAddresses();
     expect(addrs).toHaveLength(2);
     expect(addrs[0]).not.toBe(addrs[1]);
+  });
+
+  it('rejects adminPrivateKey when it duplicates an operational key', () => {
+    expect(() => new EVMChainAdapter(minimalConfig({ adminPrivateKey: DEPLOYER_PK })))
+      .toThrow('EVM adminPrivateKey must be distinct from operational keys');
+  });
+
+  it('requires adminPrivateKey unless publish/read-only mode is explicit', () => {
+    expect(() => new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: DEPLOYER_PK,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+    } as EVMAdapterConfig)).toThrow('EVM adminPrivateKey is required');
+
+    expect(() => new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: DEPLOYER_PK,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+    })).not.toThrow();
   });
 
   it('getProvider returns JsonRpcProvider', () => {

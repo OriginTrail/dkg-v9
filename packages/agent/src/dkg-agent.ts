@@ -163,8 +163,13 @@ const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
  */
 const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
 const RANDOM_SAMPLING_BIND_RETRY_MS = 30_000;
+const STORAGE_ACK_REGISTRATION_RETRY_MS = 30_000;
 
 type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
+type ACKSignerResolution = {
+  wallet: ethers.Wallet | null;
+  retryable: boolean;
+};
 
 interface SyncRequestEnvelope {
   contextGraphId: string;
@@ -346,6 +351,10 @@ export interface DKGAgentConfig {
   ackSignerKey?: string;
   /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
+   * `adminPrivateKey` is the private key for the profile admin wallet used
+   * only for profile/key-management transactions. Core nodes using chainConfig
+   * must provide it; edge nodes may omit it and run without profile
+   * creation/key-repair privileges.
    * `operationalKeys` are the private keys for operational wallets.
    * The first key is the primary signer (identity, staking); all are used
    * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
@@ -353,6 +362,7 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     hubAddress: string;
+    adminPrivateKey?: string;
     operationalKeys: string[];
     chainId?: string;
   };
@@ -406,6 +416,8 @@ export class DKGAgent {
   private randomSamplingHandle: RandomSamplingHandle | null = null;
   private randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
   private randomSamplingBindRetryInFlight = false;
+  private storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private storageACKRegistrationRetryInFlight = false;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -518,6 +530,7 @@ export class DKGAgent {
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
 
+    const nodeRole = config.nodeRole ?? 'edge';
     let chain: ChainAdapter;
     let opKeys = config.chainConfig?.operationalKeys;
     if (config.chainAdapter) {
@@ -526,13 +539,24 @@ export class DKGAgent {
         opKeys = [(chain as any).getOperationalPrivateKey()];
       }
     } else if (config.chainConfig && opKeys?.length) {
-      chain = new EVMChainAdapter({
+      const evmConfigBase = {
         rpcUrl: config.chainConfig.rpcUrl,
         privateKey: opKeys[0],
         additionalKeys: opKeys.slice(1),
         hubAddress: config.chainConfig.hubAddress,
         chainId: config.chainConfig.chainId,
-      });
+      };
+      if (config.chainConfig.adminPrivateKey) {
+        chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
+      } else {
+        if (nodeRole === 'core') {
+          throw new Error(
+            'EVM adminPrivateKey is required for core nodes using chainConfig. ' +
+            'Provide the persisted profile admin key, or pass a pre-built chainAdapter for explicit no-admin mode.',
+          );
+        }
+        chain = new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+      }
     } else {
       chain = new NoChainAdapter();
     }
@@ -545,7 +569,6 @@ export class DKGAgent {
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
-    const nodeRole = config.nodeRole ?? 'edge';
     const nodeConfig: DKGNodeConfig = {
       listenAddresses: [`/ip4/${host}/tcp/${port}`],
       announceAddresses: config.announceAddresses,
@@ -586,6 +609,79 @@ export class DKGAgent {
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks,
     );
+  }
+
+  private getACKSignerCandidateWallets(ctx: OperationContext): ethers.Wallet[] {
+    const operationalKeys = this.config.chainAdapter
+      ? []
+      : (this.config.chainConfig?.operationalKeys ?? []);
+    const keys = [
+      this.config.ackSignerKey,
+      ...operationalKeys,
+      typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined,
+    ].filter((key): key is string => Boolean(key));
+
+    const wallets: ethers.Wallet[] = [];
+    const seen = new Set<string>();
+    for (const key of keys) {
+      try {
+        const wallet = new ethers.Wallet(key);
+        const addressKey = wallet.address.toLowerCase();
+        if (seen.has(addressKey)) continue;
+        seen.add(addressKey);
+        wallets.push(wallet);
+      } catch (err) {
+        this.log.warn(ctx, `Ignoring invalid ACK signer key: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return wallets;
+  }
+
+  private async resolveConfirmedACKSigner(
+    identityId: bigint,
+    candidates: ethers.Wallet[],
+    ctx: OperationContext,
+  ): Promise<ACKSignerResolution> {
+    const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+    if (typeof isOperationalWalletRegistered !== 'function') {
+      this.log.warn(
+        ctx,
+        'V10 StorageACK signer disabled: chain adapter does not implement required on-chain operational wallet confirmation',
+      );
+      return { wallet: null, retryable: false };
+    }
+
+    let sawLookupError = false;
+    for (const wallet of candidates) {
+      try {
+        if (await isOperationalWalletRegistered.call(this.chain, identityId, wallet.address)) {
+          return { wallet, retryable: false };
+        }
+      } catch (err) {
+        sawLookupError = true;
+        this.log.warn(
+          ctx,
+          `Unable to confirm ACK signer ${wallet.address} on-chain: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (sawLookupError) {
+      this.log.warn(
+        ctx,
+        `V10 StorageACK handler registration deferred: signer confirmation failed due lookup error(s)`,
+      );
+      return { wallet: null, retryable: true };
+    }
+
+    this.log.warn(
+      ctx,
+      `V10 StorageACK signer disabled: no candidate key is confirmed on-chain as ` +
+      `OPERATIONAL_KEY for identity ${identityId}`,
+    );
+    return { wallet: null, retryable: false };
   }
 
   async start(): Promise<void> {
@@ -641,36 +737,65 @@ export class DKGAgent {
     this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
+    const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
+    let onChainIdentityId = 0n;
 
     // Auto-detect or register on-chain identity.
     // Edge nodes skip profile creation — they operate with agent identity only.
     if (this.chain.chainId !== 'none') {
-      let identityId = 0n;
       try {
-        identityId = await this.chain.getIdentityId();
-        if (identityId === 0n && effectiveRole === 'core') {
+        onChainIdentityId = await this.chain.getIdentityId();
+        if (onChainIdentityId === 0n && effectiveRole === 'core') {
           this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
-          identityId = await this.chain.ensureProfile({
+          onChainIdentityId = await this.chain.ensureProfile({
             nodeName: this.config.name,
           });
-          this.log.info(ctx, `On-chain profile created, identityId=${identityId}`);
-        } else if (identityId === 0n) {
+          this.log.info(ctx, `On-chain profile created, identityId=${onChainIdentityId}`);
+        } else if (onChainIdentityId === 0n) {
           this.log.info(ctx, `Edge node — skipping on-chain profile creation (agent identity only)`);
         } else {
-          this.log.info(ctx, `On-chain identity found: identityId=${identityId}`);
+          this.log.info(ctx, `On-chain identity found: identityId=${onChainIdentityId}`);
         }
       } catch (err) {
         this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
         try {
-          identityId = await this.chain.getIdentityId();
-          if (identityId > 0n) {
-            this.log.info(ctx, `Recovered identityId=${identityId} after partial failure`);
+          onChainIdentityId = await this.chain.getIdentityId();
+          if (onChainIdentityId > 0n) {
+            this.log.info(ctx, `Recovered identityId=${onChainIdentityId} after partial failure`);
           }
         } catch { /* ignore */ }
       }
-      if (identityId > 0n) {
-        this.publisher.setIdentityId(identityId);
-        this.log.info(ctx, `Publisher using identityId=${identityId}`);
+      if (onChainIdentityId > 0n) {
+        if (typeof this.chain.ensureOperationalWalletsRegistered === 'function') {
+          try {
+            const registration = await this.chain.ensureOperationalWalletsRegistered({
+              identityId: onChainIdentityId,
+              additionalAddresses: ackSignerCandidates.map((wallet) => wallet.address),
+            });
+            if (registration.registered.length > 0) {
+              this.log.info(
+                ctx,
+                `Registered ${registration.registered.length} operational wallet(s) on-chain for ` +
+                `identityId=${onChainIdentityId}`,
+              );
+            }
+            if (registration.taken.length > 0) {
+              this.log.warn(
+                ctx,
+                `Operational wallet(s) already registered to another identity: ` +
+                registration.taken.map((w) => `${w.address}->${w.identityId}`).join(', '),
+              );
+            }
+          } catch (err) {
+            this.log.warn(
+              ctx,
+              `Operational wallet auto-registration failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
+        this.publisher.setIdentityId(onChainIdentityId);
+        this.log.info(ctx, `Publisher using identityId=${onChainIdentityId}`);
       } else if (effectiveRole === 'core') {
         this.log.warn(ctx, `No valid on-chain identity — on-chain publishes will be skipped`);
       }
@@ -681,13 +806,22 @@ export class DKGAgent {
     // sign ACKs (the handler would reject immediately) and advertising the
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
-      const ackSignerKeyStr = this.config.ackSignerKey
-        ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
-      if (ackSignerKeyStr) {
-        try {
-          const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
-          const identityId = await this.chain.getIdentityId();
-          if (identityId > 0n) {
+      if (ackSignerCandidates.length > 0) {
+        let storageACKProtocolRegistered = false;
+        let storageACKProtocolUnregistered = false;
+        const attemptStorageACKRegistration = async (
+          attemptCtx: OperationContext,
+        ): Promise<'registered' | 'retryable' | 'disabled'> => {
+          if (storageACKProtocolRegistered) return 'registered';
+          if (onChainIdentityId > 0n) {
+            const signerResolution = await this.resolveConfirmedACKSigner(
+              onChainIdentityId,
+              ackSignerCandidates,
+              attemptCtx,
+            );
+            const ackSignerWallet = signerResolution.wallet;
+            if (!ackSignerWallet) return signerResolution.retryable ? 'retryable' : 'disabled';
+
             // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
             // per KnowledgeAssetsV10.sol:362-373. Resolve both from the chain
             // adapter BEFORE constructing the handler so the handler can sign
@@ -702,28 +836,96 @@ export class DKGAgent {
               : undefined;
             if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
               this.log.warn(
-                ctx,
+                attemptCtx,
                 `Skipping V10 StorageACK handler: chain adapter does not expose ` +
                 `getEvmChainId() + getKnowledgeAssetsV10Address(); handler cannot build the ` +
                 `H5-prefixed ACK digest that KnowledgeAssetsV10 verifies on-chain`,
               );
-            } else {
-              const ackHandler = new StorageACKHandler(this.store, {
-                nodeRole: effectiveRole,
-                nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
-                signerWallet: ackSignerWallet,
-                contextGraphSharedMemoryUri,
-                chainId: chainIdForHandler,
-                kav10Address: kav10AddressForHandler,
-              }, this.eventBus);
-              this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-              this.log.info(ctx, `Registered V10 StorageACK handler (identity=${identityId})`);
+              return 'disabled';
             }
+
+            const ackHandler = new StorageACKHandler(this.store, {
+              nodeRole: effectiveRole,
+              nodeIdentityId: onChainIdentityId,
+              signerWallet: ackSignerWallet,
+              contextGraphSharedMemoryUri,
+              chainId: chainIdForHandler,
+              kav10Address: kav10AddressForHandler,
+              isSignerRegistered: async () => {
+                const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+                if (typeof isOperationalWalletRegistered !== 'function') return false;
+                return isOperationalWalletRegistered.call(
+                  this.chain,
+                  onChainIdentityId,
+                  ackSignerWallet.address,
+                );
+              },
+              onSignerUnregistered: () => {
+                if (storageACKProtocolUnregistered) return;
+                storageACKProtocolUnregistered = true;
+                storageACKProtocolRegistered = false;
+                this.router.unregister(PROTOCOL_STORAGE_ACK);
+                this.log.warn(
+                  attemptCtx,
+                  `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
+                  `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
+                );
+              },
+              onSignerRegistrationLookupFailed: (err) => {
+                this.log.warn(
+                  attemptCtx,
+                  `V10 StorageACK signer registration lookup failed for ${ackSignerWallet.address}; ` +
+                  `keeping handler active: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              },
+            }, this.eventBus);
+            this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+            storageACKProtocolRegistered = true;
+            this.clearStorageACKRegistrationRetry();
+            this.log.info(
+              attemptCtx,
+              `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
+            );
+            return 'registered';
           } else {
-            this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+            this.log.warn(attemptCtx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+            return 'disabled';
           }
+          return 'disabled';
+        };
+
+        const scheduleStorageACKRegistrationRetry = () => {
+          if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
+          this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${STORAGE_ACK_REGISTRATION_RETRY_MS}ms`);
+          this.storageACKRegistrationRetryTimer = setTimeout(() => {
+            this.storageACKRegistrationRetryTimer = null;
+            if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
+            this.storageACKRegistrationRetryInFlight = true;
+            attemptStorageACKRegistration(createOperationContext('connect'))
+              .then((result) => {
+                if (result === 'retryable') scheduleStorageACKRegistrationRetry();
+              })
+              .catch((err: unknown) => {
+                this.log.warn(
+                  ctx,
+                  `V10 StorageACK handler registration retry failed: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+                );
+                scheduleStorageACKRegistrationRetry();
+              })
+              .finally(() => {
+                this.storageACKRegistrationRetryInFlight = false;
+              });
+          }, STORAGE_ACK_REGISTRATION_RETRY_MS);
+          if (this.storageACKRegistrationRetryTimer.unref) this.storageACKRegistrationRetryTimer.unref();
+        };
+
+        try {
+          const result = await attemptStorageACKRegistration(ctx);
+          if (result === 'retryable') scheduleStorageACKRegistrationRetry();
         } catch (err) {
           this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
+          scheduleStorageACKRegistrationRetry();
         }
       } else if (typeof this.chain.signACKDigest === 'function') {
         this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
@@ -1180,6 +1382,12 @@ export class DKGAgent {
     if (!this.randomSamplingBindRetryTimer) return;
     clearInterval(this.randomSamplingBindRetryTimer);
     this.randomSamplingBindRetryTimer = null;
+  }
+
+  private clearStorageACKRegistrationRetry(): void {
+    if (!this.storageACKRegistrationRetryTimer) return;
+    clearTimeout(this.storageACKRegistrationRetryTimer);
+    this.storageACKRegistrationRetryTimer = null;
   }
 
   /**
@@ -7229,6 +7437,8 @@ export class DKGAgent {
       this.swmCleanupTimer = null;
     }
     this.clearRandomSamplingBindRetry();
+    this.clearStorageACKRegistrationRetry();
+    this.storageACKRegistrationRetryInFlight = false;
     if (this.randomSamplingHandle) {
       try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
       this.randomSamplingHandle = null;

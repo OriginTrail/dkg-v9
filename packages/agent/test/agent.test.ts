@@ -15,7 +15,7 @@ import {
   parseCclPolicy,
 } from '../src/index.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { EVMChainAdapter, MockChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -42,6 +42,24 @@ class CapturingContextGraphChainAdapter extends MockChainAdapter {
       participantAgents: params.participantAgents ? [...params.participantAgents] : undefined,
     });
     return super.createOnChainContextGraph(params);
+  }
+}
+
+class NonRegisteringACKChainAdapter extends MockChainAdapter {
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }) {
+    return {
+      identityId: options?.identityId ?? (await this.getIdentityId()),
+      registered: [],
+      alreadyRegistered: [],
+      taken: [],
+    };
+  }
+
+  async isOperationalWalletRegistered(): Promise<boolean> {
+    return false;
   }
 }
 
@@ -759,6 +777,103 @@ describe('PeerId key extraction', () => {
 
     await agent.stop();
   }, 10000);
+});
+
+describe('DKGAgent ACK signer gating', () => {
+  it('rejects core chainConfig without a profile admin key', async () => {
+    const operational = ethers.Wallet.createRandom();
+
+    await expect(DKGAgent.create({
+      name: 'CoreMissingAdminKey',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:0',
+        hubAddress: ethers.ZeroAddress,
+        operationalKeys: [operational.privateKey],
+      },
+      nodeRole: 'core',
+    })).rejects.toThrow(/adminPrivateKey is required for core nodes/);
+  });
+
+  it('auto-registers an ACK signer before registering the StorageACK handler', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerAutoRegister',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(42n, ackSigner.address)).toBe(true);
+      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not register StorageACK when no ACK key is confirmed on-chain', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new NonRegisteringACKChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 43n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerUnconfirmed',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not source ACK signer candidates from chainConfig when a chainAdapter is supplied', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const staleChainConfigSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 44n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerChainAdapterIgnoresChainConfig',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:0',
+        hubAddress: ethers.ZeroAddress,
+        adminPrivateKey: ethers.Wallet.createRandom().privateKey,
+        operationalKeys: [staleChainConfigSigner.privateKey],
+      },
+      nodeRole: 'core',
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(44n, staleChainConfigSigner.address)).toBe(false);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });
 
 describe('DKGAgent (integration)', () => {

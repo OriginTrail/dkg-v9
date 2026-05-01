@@ -113,6 +113,22 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "OperationalAddressZero",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "key",
+        "type": "bytes32"
+      }
+    ],
+    "name": "OperationalKeyTaken",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint16",
@@ -121,6 +137,17 @@
       }
     ],
     "name": "OperatorFeeOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileDoesntExist",
     "type": "error"
   },
   {
@@ -161,6 +188,24 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address[]",
+        "name": "operationalWallets",
+        "type": "address[]"
+      }
+    ],
+    "name": "addOperationalWallets",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "askContract",
     "outputs": [
@@ -179,6 +224,19 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
         "name": "",
         "type": "address"
       }
@@ -217,19 +275,6 @@
     "name": "createProfile",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
-      {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

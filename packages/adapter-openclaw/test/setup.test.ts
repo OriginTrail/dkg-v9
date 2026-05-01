@@ -3306,6 +3306,58 @@ describe('runSetup preflight runs before faucet (C10)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// readWallets — wallets.json parsing
+// ---------------------------------------------------------------------------
+
+describe('readWallets', () => {
+  it('returns admin wallet first, then operational wallets, without duplicates', () => {
+    const dkgHome = join(testDir, '.dkg');
+    const adminAddress = '0xA000000000000000000000000000000000000001';
+    const opAddress = '0xb000000000000000000000000000000000000001';
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({
+        adminWallet: { address: adminAddress },
+        wallets: [
+          { address: opAddress },
+          { address: adminAddress },
+        ],
+      }),
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      expect(readWallets()).toEqual([adminAddress, opAddress]);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+    }
+  });
+
+  it('does not return an admin-only wallets.json for faucet funding', () => {
+    const dkgHome = join(testDir, '.dkg');
+    const adminAddress = '0xA000000000000000000000000000000000000001';
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({
+        adminWallet: { address: adminAddress },
+        wallets: [],
+      }),
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      expect(readWallets()).toEqual([]);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // readWalletsWithRetry — retry accounting (C4a extraction)
 // ---------------------------------------------------------------------------
 
@@ -3368,7 +3420,7 @@ describe('logManualFundingInstructions', () => {
     logSpy.mockRestore();
   });
 
-  it('caps the curl body at the first 3 addresses matching the auto-path cap', () => {
+  it('splits manual curl bodies into faucet-sized batches', () => {
     const addrs = [
       '0x1111111111111111111111111111111111111111',
       '0x2222222222222222222222222222222222222222',
@@ -3379,19 +3431,18 @@ describe('logManualFundingInstructions', () => {
     logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
 
     const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
-    // The curl body is built from JSON.stringify(fundable) — assert the
-    // cap by looking for the exact first-three array in the output and
-    // the absence of the 4th/5th addresses inside the curl line.
     expect(logged).toContain(JSON.stringify(addrs.slice(0, 3)));
-    const curlLine = logSpy.mock.calls
+    expect(logged).toContain(JSON.stringify(addrs.slice(3)));
+    const curlLines = logSpy.mock.calls
       .map(c => String(c[0]))
-      .find(line => line.includes('--data-raw'));
-    expect(curlLine).toBeDefined();
-    expect(curlLine).not.toContain(addrs[3]);
-    expect(curlLine).not.toContain(addrs[4]);
+      .filter(line => line.includes('--data-raw'));
+    expect(curlLines).toHaveLength(2);
+    expect(curlLines[0]).not.toContain(addrs[3]);
+    expect(curlLines[1]).toContain(addrs[3]);
+    expect(curlLines[1]).toContain(addrs[4]);
   });
 
-  it('emits a follow-on note listing the omitted wallets when more than 3 are passed', () => {
+  it('emits a note to run each batch when more than 3 addresses are passed', () => {
     const addrs = [
       '0x1111111111111111111111111111111111111111',
       '0x2222222222222222222222222222222222222222',
@@ -3403,9 +3454,7 @@ describe('logManualFundingInstructions', () => {
 
     const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
     expect(logged).toMatch(/faucet supports up to 3 wallets/i);
-    expect(logged).toContain('2 wallet');
-    expect(logged).toContain(addrs[3]);
-    expect(logged).toContain(addrs[4]);
+    expect(logged).toMatch(/run each batch/i);
   });
 
   it('does not emit the extras note when exactly 3 (or fewer) addresses are passed', () => {

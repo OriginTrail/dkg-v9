@@ -104,6 +104,7 @@ export function makeAdapterConfig(
   hubAddress: string,
   privateKey: string,
   additionalKeys?: string[],
+  adminPrivateKey?: string,
 ): EVMAdapterConfig {
   return {
     rpcUrl,
@@ -111,7 +112,38 @@ export function makeAdapterConfig(
     hubAddress,
     chainId: `evm:${HARDHAT_CHAIN_ID}`,
     additionalKeys,
+    adminPrivateKey: adminPrivateKey ?? pickDefaultAdminKey(privateKey, additionalKeys ?? []),
   };
+}
+
+function pickDefaultAdminKey(privateKey: string, additionalKeys: string[]): string {
+  const blocked = new Set([privateKey, ...additionalKeys].map((key) => key.toLowerCase()));
+  const preferredByOperational = new Map<string, string>([
+    [HARDHAT_KEYS.CORE_OP.toLowerCase(), HARDHAT_KEYS.CORE_ADMIN],
+    [HARDHAT_KEYS.REC1_OP.toLowerCase(), HARDHAT_KEYS.REC1_ADMIN],
+    [HARDHAT_KEYS.REC2_OP.toLowerCase(), HARDHAT_KEYS.REC2_ADMIN],
+    [HARDHAT_KEYS.REC3_OP.toLowerCase(), HARDHAT_KEYS.REC3_ADMIN],
+  ]);
+  const preferred = preferredByOperational.get(privateKey.toLowerCase());
+  if (preferred && !blocked.has(preferred.toLowerCase())) {
+    return preferred;
+  }
+
+  const candidates = [
+    HARDHAT_KEYS.CORE_ADMIN,
+    HARDHAT_KEYS.REC1_ADMIN,
+    HARDHAT_KEYS.REC2_ADMIN,
+    HARDHAT_KEYS.REC3_ADMIN,
+    HARDHAT_KEYS.EXTRA3,
+    HARDHAT_KEYS.EXTRA2,
+    HARDHAT_KEYS.PUBLISHER2,
+    HARDHAT_KEYS.DEPLOYER,
+  ];
+  const adminKey = candidates.find((candidate) => !blocked.has(candidate.toLowerCase()));
+  if (!adminKey) {
+    throw new Error('No distinct Hardhat admin key available for adapter config');
+  }
+  return adminKey;
 }
 
 export async function createNodeProfile(

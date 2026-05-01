@@ -30,6 +30,7 @@ import type {
   NodeChallenge,
   ProofPeriodStatus,
   CreateChallengeResult,
+  OperationalWalletRegistrationResult,
 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -62,6 +63,9 @@ const ERROR_ABI_CONTRACTS = [
   'PublishingConvictionAccount',
   'RandomSampling', 'RandomSamplingStorage',
 ];
+
+const ADMIN_KEY_PURPOSE = 1;
+const OPERATIONAL_KEY_PURPOSE = 2;
 
 let _errorInterface: Interface | null = null;
 
@@ -126,7 +130,7 @@ export function enrichEvmError(err: unknown): string | null {
   return decoded.name;
 }
 
-export interface EVMAdapterConfig {
+interface EVMAdapterBaseConfig {
   rpcUrl: string;
   /** Primary operational wallet key (used for identity registration, staking, etc.) */
   privateKey: string;
@@ -135,6 +139,22 @@ export interface EVMAdapterConfig {
   hubAddress: string;
   chainId?: string;
 }
+
+export type EVMAdapterConfig = EVMAdapterBaseConfig & (
+  | {
+      /** Admin wallet key used for profile/key-management transactions. */
+      adminPrivateKey: string;
+      allowNoAdminSigner?: false;
+    }
+  | {
+      /**
+       * Explicit publish/read-only mode for callers that never create profiles
+       * or mutate profile keys. ACK/profile-management paths stay disabled.
+       */
+      allowNoAdminSigner: true;
+      adminPrivateKey?: undefined;
+    }
+);
 
 interface ContractCache {
   hub: Contract;
@@ -170,6 +190,8 @@ export class EVMChainAdapter implements ChainAdapter {
   private readonly signer: Wallet;
   /** All operational signers (includes primary). Used round-robin for publish TXs. */
   private readonly signerPool: Wallet[];
+  /** Admin signer — used only for profile/key-management operations. */
+  private readonly adminSigner?: Wallet;
   private signerIndex = 0;
   private readonly hubAddress: string;
   private contracts: ContractCache;
@@ -181,6 +203,18 @@ export class EVMChainAdapter implements ChainAdapter {
     this.signerPool = [this.signer];
     for (const key of config.additionalKeys ?? []) {
       this.signerPool.push(new Wallet(key, this.provider));
+    }
+    if (config.adminPrivateKey) {
+      this.adminSigner = new Wallet(config.adminPrivateKey, this.provider);
+      const adminAddress = this.adminSigner.address.toLowerCase();
+      if (this.signerPool.some((signer) => signer.address.toLowerCase() === adminAddress)) {
+        throw new Error('EVM adminPrivateKey must be distinct from operational keys');
+      }
+    } else if (!config.allowNoAdminSigner) {
+      throw new Error(
+        'EVM adminPrivateKey is required. Set allowNoAdminSigner=true only for publish/read-only adapters ' +
+        'that never create profiles or mutate profile keys.',
+      );
     }
     this.hubAddress = config.hubAddress;
     this.chainId = config.chainId ?? 'evm:31337';
@@ -232,6 +266,107 @@ export class EVMChainAdapter implements ChainAdapter {
   /** Primary operational private key (hex string with 0x prefix). */
   getOperationalPrivateKey(): string {
     return this.signer.privateKey;
+  }
+
+  private walletKeyHash(address: string): string {
+    return ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(address)]));
+  }
+
+  private async hasAdminPurpose(
+    identityStorage: Contract,
+    identityId: bigint,
+    address: string,
+  ): Promise<boolean> {
+    return identityStorage.keyHasPurpose(
+      identityId,
+      this.walletKeyHash(address),
+      ADMIN_KEY_PURPOSE,
+    );
+  }
+
+  private async hasOperationalPurpose(
+    identityStorage: Contract,
+    identityId: bigint,
+    address: string,
+  ): Promise<boolean> {
+    return identityStorage.keyHasPurpose(
+      identityId,
+      this.walletKeyHash(address),
+      OPERATIONAL_KEY_PURPOSE,
+    );
+  }
+
+  async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    return this.hasOperationalPurpose(identityStorage, identityId, address);
+  }
+
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }): Promise<OperationalWalletRegistrationResult> {
+    await this.init();
+
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    const result: OperationalWalletRegistrationResult = {
+      identityId,
+      registered: [],
+      alreadyRegistered: [],
+      taken: [],
+    };
+    if (identityId === 0n) return result;
+
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    const candidates = [
+      ...this.signerPool.map((s) => s.address),
+      ...(options?.additionalAddresses ?? []),
+    ];
+    const seen = new Set<string>();
+    const missing: string[] = [];
+
+    for (const candidate of candidates) {
+      const address = ethers.getAddress(candidate);
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const existingIdentityId = BigInt(await identityStorage.getIdentityId(address));
+      if (existingIdentityId === identityId) {
+        result.alreadyRegistered.push(address);
+      } else if (existingIdentityId === 0n) {
+        missing.push(address);
+      } else {
+        result.taken.push({ address, identityId: existingIdentityId });
+      }
+    }
+
+    if (missing.length === 0) return result;
+
+    if (!this.adminSigner) {
+      throw new Error(
+        `Cannot register operational wallets for identity ${identityId}: ` +
+        'adminPrivateKey is not configured.',
+      );
+    }
+    if (!(await this.hasAdminPurpose(identityStorage, identityId, this.adminSigner.address))) {
+      throw new Error(
+        `Cannot register operational wallets for identity ${identityId}: configured admin wallet ` +
+        `${this.adminSigner.address} is not registered on-chain as an admin key for this identity.`,
+      );
+    }
+
+    const profile = this.contracts.profile!.connect(this.adminSigner) as Contract;
+    const tx = await profile.addOperationalWallets(identityId, missing);
+    await tx.wait();
+
+    for (const address of missing) {
+      if (await this.hasOperationalPurpose(identityStorage, identityId, address)) {
+        result.registered.push(address);
+      }
+    }
+
+    return result;
   }
 
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
@@ -352,11 +487,15 @@ export class EVMChainAdapter implements ChainAdapter {
     // Step 1: Create profile if none exists
     if (identityId === 0n) {
       const nodeName = options?.nodeName ?? `node-${Date.now()}`;
-      const adminWallet = ethers.Wallet.createRandom();
+      if (!this.adminSigner) {
+        throw new Error(
+          'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.',
+        );
+      }
       const nodeId = ethers.hexlify(ethers.randomBytes(32));
 
       const tx = await this.contracts.profile!.createProfile(
-        adminWallet.address,
+        this.adminSigner.address,
         [],
         nodeName,
         nodeId,
@@ -426,12 +565,19 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async registerIdentity(proof: IdentityProof): Promise<bigint> {
     await this.init();
+    if (!this.adminSigner) {
+      throw new Error(
+        'Cannot register identity: adminPrivateKey is required so the profile admin key is not lost.',
+      );
+    }
+    const nodeName = `node-${ethers.hexlify(ethers.randomBytes(4)).slice(2)}`;
+    const nodeId = proof.publicKey.length > 0 ? proof.publicKey : ethers.randomBytes(32);
 
     const tx = await this.contracts.profile!.createProfile(
-      this.signer.address,
-      [this.signer.address],
-      '',
-      proof.publicKey,
+      this.adminSigner.address,
+      [],
+      nodeName,
+      nodeId,
       0,
     );
     const receipt = await tx.wait();
@@ -1995,9 +2141,12 @@ export class EVMChainAdapter implements ChainAdapter {
     if (!identityStorage) return false;
 
     // Match on-chain verification: keyHasPurpose(identityId, keccak256(signer), OPERATIONAL_KEY)
-    const OPERATIONAL_KEY = 2;
     const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-    const hasPurpose: boolean = await identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
+    const hasPurpose: boolean = await identityStorage.keyHasPurpose(
+      claimedIdentityId,
+      keyHash,
+      OPERATIONAL_KEY_PURPOSE,
+    );
     if (!hasPurpose) return false;
 
     // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked").
@@ -2037,13 +2186,18 @@ export class EVMChainAdapter implements ChainAdapter {
     const identityStorage = await this.resolveContract('IdentityStorage');
     if (!identityStorage) return false;
 
-    const OPERATIONAL_KEY = 2;
     const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-    return identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
+    return identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE);
   }
 
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
     try {
+      const identityId = await this.getIdentityId();
+      if (identityId === 0n) return undefined;
+      if (!(await this.isOperationalWalletRegistered(identityId, this.signer.address))) {
+        return undefined;
+      }
+
       const sig = ethers.Signature.from(await this.signer.signMessage(digest));
       return {
         r: ethers.getBytes(sig.r),

@@ -384,6 +384,13 @@ export interface UpdateKCParams {
   signatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
 }
 
+export interface OperationalWalletRegistrationResult {
+  identityId: bigint;
+  registered: string[];
+  alreadyRegistered: string[];
+  taken: Array<{ address: string; identityId: bigint }>;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -522,6 +529,19 @@ export interface ChainAdapter {
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+
+  /** Idempotently register local operational wallets for an existing identity. */
+  ensureOperationalWalletsRegistered?(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }): Promise<OperationalWalletRegistrationResult>;
+
+  /**
+   * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.
+   * Required for V10 ACK signing; adapters that cannot inspect an on-chain
+   * registry should omit this capability and ACK signing will remain disabled.
+   */
+  isOperationalWalletRegistered?(identityId: bigint, address: string): Promise<boolean>;
 
   /**
    * Verify that a recovered signer address owns the claimed identity without

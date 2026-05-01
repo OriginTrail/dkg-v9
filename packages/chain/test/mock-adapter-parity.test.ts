@@ -84,6 +84,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // ChainAdapter contract. They must remain EVM-only.
   'nextSigner',
   'nextAuthorizedSigner',
+  'walletKeyHash',
+  'hasAdminPurpose',
+  'hasOperationalPurpose',
   'resolveContract',
   'resolveAssetStorage',
   'init',
@@ -131,6 +134,8 @@ const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
   'getMinimumRequiredSignatures',
   'verifyACKIdentity',
   'verifySyncIdentity',
+  'ensureOperationalWalletsRegistered',
+  'isOperationalWalletRegistered',
   'updateKnowledgeCollectionV10',
   'stakeWithLock',
   'getDelegatorConvictionMultiplier',
@@ -189,6 +194,7 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       rpcUrl: 'http://127.0.0.1:1',
       hubAddress: '0x0000000000000000000000000000000000000001',
       privateKey: '0x' + '1'.repeat(64),
+      allowNoAdminSigner: true,
     });
     expect(mock.chainType).toBe(evm.chainType);
   });

@@ -37,6 +37,23 @@ export interface StorageACKHandlerConfig {
    * of the H5 prefix on the V10 ACK digest.
    */
   kav10Address: string;
+  /**
+   * Optional live confirmation hook. When provided, the handler calls it
+   * immediately before signing so removed/unregistered operational keys stop
+   * producing ACKs without needing a process restart.
+   */
+  isSignerRegistered?: () => Promise<boolean>;
+  /**
+   * Called when the live confirmation hook reports the signer is no longer
+   * registered. Agents can use this to stop advertising StorageACK support.
+   */
+  onSignerUnregistered?: () => void | Promise<void>;
+  /**
+   * Called when the live confirmation hook itself fails. The handler keeps
+   * the last confirmed signer state and does not treat lookup errors as
+   * revocation.
+   */
+  onSignerRegistrationLookupFailed?: (err: unknown) => void | Promise<void>;
 }
 
 /**
@@ -242,6 +259,27 @@ export class StorageACKHandler {
       intentTokenAmount,
       BigInt(verifiedLeafCount),
     );
+    if (this.config.isSignerRegistered) {
+      let signerRegistered: boolean | undefined;
+      try {
+        signerRegistered = await this.config.isSignerRegistered();
+      } catch (err) {
+        try {
+          await this.config.onSignerRegistrationLookupFailed?.(err);
+        } catch {
+          // Keep ACK availability independent from logging/callback failures.
+        }
+      }
+      if (signerRegistered === false) {
+        try {
+          await this.config.onSignerUnregistered?.();
+        } catch {
+          // Keep the signing refusal deterministic even if protocol cleanup fails.
+        }
+        throw new Error('StorageACK signer is not confirmed on-chain as an operational wallet');
+      }
+    }
+
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

@@ -96,6 +96,7 @@ function resolveEntryConfig(api, options = {}) {
     .filter(isObjectRecord);
   const currentDirectApiConfigs = [
     directApiConfigFrom(anyApi?.config),
+    directApiConfigFrom(anyApi?.cfg),
   ].filter(isObjectRecord);
   const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
   const currentDirectConfigs = [
@@ -104,6 +105,7 @@ function resolveEntryConfig(api, options = {}) {
   ].filter(isObjectRecord);
   const fallbackDirectConfigs = [
     directPluginConfigFrom(runtime?.config),
+    directPluginConfigFrom(runtime?.cfg),
     directPluginConfigFrom(runtime?.pluginConfig),
   ].filter(isObjectRecord);
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;

@@ -190,9 +190,22 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
-  it('does not use direct memory fallback when merged config exists without a memory slot', () => {
+  it('uses direct memory fallback when merged config only carries route metadata', () => {
     const api = makeApi();
-    delete (api.config as any).plugins.slots.memory;
+    api.config = {
+      session: { id: 'bootstrap' },
+    } as any;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not use direct memory fallback when merged config explicitly exposes an unset memory slot', () => {
+    const api = makeApi();
+    (api.config as any).plugins.slots.memory = undefined;
     (api as any).pluginConfig = {
       memory: { enabled: true },
     };

@@ -258,6 +258,28 @@ describe('openclaw-entry', () => {
     });
   });
 
+  it('accepts api.cfg when the gateway passes validated plugin config directly', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      cfg: {
+        daemonUrl: 'http://127.0.0.1:9505',
+        stateDir: '/direct-cfg/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/direct-cfg',
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9505',
+      stateDir: '/direct-cfg/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/direct-cfg',
+    });
+  });
+
   it('deep-merges direct plugin memory and channel config over entry config', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

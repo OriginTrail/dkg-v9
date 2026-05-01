@@ -417,6 +417,54 @@ describe('openclaw-entry', () => {
     });
   });
 
+  it('prefers live api.cfg over stale api.config for full OpenClaw config', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi(undefined as any, {
+      cfg: {
+        agents: { defaults: { workspace: '/live-workspace' } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9710',
+                stateDir: '/live-workspace/.dkg-adapter',
+                memory: { enabled: true },
+                channel: { enabled: false },
+              },
+            },
+          },
+        },
+      },
+      config: {
+        agents: { defaults: { workspace: '/stale-workspace' } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9500',
+                stateDir: '/stale-workspace/.dkg-adapter',
+                memory: { enabled: false },
+                channel: { enabled: true, port: 9501 },
+              },
+            },
+          },
+        },
+      },
+    });
+    delete (api as any).pluginConfig;
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe('/live-workspace');
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9710',
+      stateDir: '/live-workspace/.dkg-adapter',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+  });
+
   it('treats operational direct plugin config as an authoritative singleton refresh', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
@@ -522,7 +570,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('does not backfill stale runtime plugin config when current direct config is state-only partial', async () => {
+  it('does not backfill stale runtime config when current direct config is state-only partial', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -531,10 +579,18 @@ describe('openclaw-entry', () => {
       installedWorkspace: '/partial-current',
     }, {
       runtime: {
-        pluginConfig: {
-          daemonUrl: 'http://127.0.0.1:9550',
-          memory: { enabled: false },
-          channel: { enabled: true, port: 9551 },
+        config: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9550',
+                  memory: { enabled: false },
+                  channel: { enabled: true, port: 9551 },
+                },
+              },
+            },
+          },
         },
       },
     });
@@ -548,6 +604,48 @@ describe('openclaw-entry', () => {
       stateDir: '/partial-current/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/partial-current',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+  });
+
+  it('does not backfill stale runtime config when current api.config is state-only partial', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi(undefined as any, {
+      config: {
+        stateDir: '/partial-api-config/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/partial-api-config',
+      },
+      runtime: {
+        config: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9580',
+                  memory: { enabled: false },
+                  channel: { enabled: true, port: 9581 },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    delete (secondApi as any).pluginConfig;
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: '/partial-api-config/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial-api-config',
       memory: { enabled: true },
       channel: { enabled: false },
     });

@@ -60,16 +60,18 @@ function resolveEntryConfig(api) {
   const anyApi = api;
   const runtime = anyApi?.runtime;
   const fullConfigCandidatesMostToLeast = [
-    anyApi?.config,
     anyApi?.cfg,
+    anyApi?.config,
     runtime?.cfg,
     runtime?.config,
   ].filter(isObjectRecord);
-  const fullConfigCandidatesLeastToMost = [
+  const currentFullConfigCandidatesLeastToMost = [
+    anyApi?.config,
+    anyApi?.cfg,
+  ].filter(isObjectRecord);
+  const fallbackFullConfigCandidatesLeastToMost = [
     runtime?.config,
     runtime?.cfg,
-    anyApi?.cfg,
-    anyApi?.config,
   ].filter(isObjectRecord);
   const mergedConfig =
     fullConfigCandidatesMostToLeast.find((candidate) => isObjectRecord(candidate.plugins) || isObjectRecord(candidate.agents)) ??
@@ -80,7 +82,10 @@ function resolveEntryConfig(api) {
       typeof candidate?.workspace === 'string'
     ) ??
     {};
-  const entryConfigs = fullConfigCandidatesLeastToMost
+  const currentEntryConfigs = currentFullConfigCandidatesLeastToMost
+    .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
+    .filter(isObjectRecord);
+  const fallbackEntryConfigs = fallbackFullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObjectRecord);
   const currentDirectConfigs = [
@@ -90,9 +95,13 @@ function resolveEntryConfig(api) {
   const fallbackDirectConfigs = [
     runtime?.pluginConfig,
   ].filter(isObjectRecord);
+  const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
+  const entryConfigs = hasCurrentConfigSource ? currentEntryConfigs : fallbackEntryConfigs;
   const directConfigs = currentDirectConfigs.length > 0
     ? currentDirectConfigs
-    : fallbackDirectConfigs;
+    : hasCurrentConfigSource
+      ? []
+      : fallbackDirectConfigs;
   const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
   const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
   const configIsPartial =

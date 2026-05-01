@@ -188,13 +188,9 @@ export class ChatTurnWriter {
   // persist jobs here, otherwise the reset assumption "all persists for
   // this session are tracked" is silently violated.
   private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
-  // Job-scoped promotion target for in-flight persists. A conversationless
-  // sessionKey can later appear in many conversations, so promotion must never
-  // become a standing alias for future events.
-  private promotedPersistJobs: Map<Promise<void>, string> = new Map();
   // Job-scoped content origins for active W4b persists. These let a later W4a
-  // skip the exact promoted in-flight turn without copying short-TTL dedupe
-  // maps from a conversationless session into an unrelated concrete chat.
+  // skip the exact in-flight turn without copying queues/counts/jobs from a
+  // conversationless session into an unrelated concrete chat.
   private persistJobOriginKeys: Map<Promise<void>, Set<string>> = new Map();
   // Per-session reset promises. `onAgentEnd` / `onMessageSent` await these
   // before processing so a compacted message array can't be read against
@@ -628,6 +624,12 @@ export class ChatTurnWriter {
             }
             continue;
           }
+          const typedW4bInflightOrigins = this.typedW4bInflightOrigins(
+            user,
+            assistant,
+            messageIds,
+            assistantMessageIds,
+          );
           // W4a turnId mixes pair position into the hash so backfill of
           // two same-text pairs (e.g. user said "hi" twice) produces
           // distinct turnIds and BOTH persist.
@@ -644,6 +646,9 @@ export class ChatTurnWriter {
           // within the TTL window collide on the W4a→W4a self-stamp
           // (R13.1).
           if (i === lastIdx) {
+            if (this.hasAnyInFlightPersistOrigin(typedW4bInflightOrigins)) {
+              continue;
+            }
             const w4bOrigin = this.w4bOriginKey(user, assistant);
             if (this.peekCrossPathStamp(sessionId, w4bOrigin)) {
               // W4b already persisted this pair via `message:sent`. The
@@ -759,6 +764,21 @@ export class ChatTurnWriter {
     return false;
   }
 
+  private hasAnyInFlightPersistOrigin(originKeys: string[]): boolean {
+    const wanted = new Set(originKeys.filter((key) => key.length > 0));
+    if (wanted.size === 0) return false;
+    for (const bucket of this.inFlightPersists.values()) {
+      for (const job of bucket) {
+        const origins = this.persistJobOriginKeys.get(job);
+        if (!origins) continue;
+        for (const origin of wanted) {
+          if (origins.has(origin)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private hasW4bInflightOrigin(sessionIds: string[], originKey: string): boolean {
     for (const sessionId of Array.from(new Set(sessionIds))) {
       if (this.peekCrossPathInflight(sessionId, originKey) || this.hasInFlightPersistOrigin(sessionId, originKey)) {
@@ -769,17 +789,12 @@ export class ChatTurnWriter {
   }
 
   private deleteTrackedPersistJob(sessionId: string, job: Promise<void>): void {
-    const promotedSessionId = this.promotedPersistJobs.get(job);
-    const candidates = new Set([sessionId]);
-    if (promotedSessionId) candidates.add(promotedSessionId);
     let removed = false;
-    for (const candidate of candidates) {
-      const bucket = this.inFlightPersists.get(candidate);
-      if (!bucket) continue;
-      removed = bucket.delete(job) || removed;
-      if (bucket.size === 0) this.inFlightPersists.delete(candidate);
+    const bucket = this.inFlightPersists.get(sessionId);
+    if (bucket) {
+      removed = bucket.delete(job);
+      if (bucket.size === 0) this.inFlightPersists.delete(sessionId);
     }
-    this.promotedPersistJobs.delete(job);
     this.persistJobOriginKeys.delete(job);
     if (removed) return;
     for (const [key, bucket] of Array.from(this.inFlightPersists.entries())) {
@@ -1279,6 +1294,12 @@ export class ChatTurnWriter {
         // content turns within a session still get distinct ids
         // because their messageIds differ.
         const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev, queuedMeta);
+        const w4bMarkerOccurrences = this.typedW4bMarkerOccurrences(w4bDiscriminator, queuedMeta);
+        const w4bInflightMarkerOrigins = this.typedW4bInflightOriginsFromOccurrences(
+          userText,
+          assistantText,
+          w4bMarkerOccurrences,
+        );
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText, w4bDiscriminator);
         // T10 — Reserve cross-path in-flight on W4b-origin BEFORE
         // persistOne so a concurrent W4a `agent_end` fire's
@@ -1296,14 +1317,13 @@ export class ChatTurnWriter {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
             daemonPersisted = true;
-            const completionSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
             // Post-success: stamp the content-only `w4bOrigin` key on
             // the SHORT-TTL cross-path map (T5) so a later W4a
             // `agent_end` last-pair peek can see that W4b already
             // persisted THIS turn and skip + bumpWatermark, but a
             // repeated same-content turn arriving outside the 5s
             // cross-path window doesn't false-dedup against this stamp.
-            this.markCrossPathStamp(completionSessionId, this.w4bOriginKey(userText, assistantText));
+            this.markCrossPathStamp(sessionId, this.w4bOriginKey(userText, assistantText));
             // R18.2 — Track the W4b session count under the durable session
             // we can prove. Conversationless typed turns keep their isolated
             // conversationless count and add per-message markers; promotion
@@ -1319,17 +1339,16 @@ export class ChatTurnWriter {
             // additional `userText` check here filters chunk-2+ deliveries
             // that ran out of pending users on chunk 1.
             if (userText) {
-              const durableSessionId = this.promotedDurableW4bSessionId(sessionId, completionSessionId);
               const markerChanged = this.markTypedW4bTurnPersisted(
-                durableSessionId,
+                sessionId,
                 userText,
                 assistantText,
-                this.typedW4bMarkerOccurrences(w4bDiscriminator, queuedMeta),
+                w4bMarkerOccurrences,
               );
               const countChanged = true;
               this.w4bSessionCounts.set(
-                durableSessionId,
-                (this.w4bSessionCounts.get(durableSessionId) ?? 0) + 1,
+                sessionId,
+                (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
               );
               // T17 — Persist the new count/marker to disk via the
               // debounced flush so a process restart preserves the
@@ -1339,8 +1358,8 @@ export class ChatTurnWriter {
               // backfill (count resets to 0, watermark file is
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
-              if ((markerChanged || countChanged) && !this.commitWatermarkStateSync(durableSessionId)) {
-                this.scheduleWatermarkFlush(durableSessionId, { retryOnFailure: true, attempts: 3 });
+              if ((markerChanged || countChanged) && !this.commitWatermarkStateSync(sessionId)) {
+                this.scheduleWatermarkFlush(sessionId, { retryOnFailure: true, attempts: 3 });
                 throw new Error("Failed to write W4b chat-turn watermark");
               }
               this.clearMessageHookInboundDedupKeys(consumedInboundDedupKeys);
@@ -1366,21 +1385,18 @@ export class ChatTurnWriter {
             // next outbound will collapse the full queue (old items +
             // new) into one user-side, matching W4a's pairing.
             if (queuedItems.length > 0) {
-              const restoreKey = this.resolvePromotedPersistJobSession(conversationKey, w4bJob);
-              const restored = this.pendingUserMessages.get(restoreKey) ?? [];
+              const restored = this.pendingUserMessages.get(conversationKey) ?? [];
               restored.unshift(...queuedItems);
-              this.pendingUserMessages.set(restoreKey, restored);
-              const restoredMeta = this.pendingUserMessageMeta.get(restoreKey) ?? [];
+              this.pendingUserMessages.set(conversationKey, restored);
+              const restoredMeta = this.pendingUserMessageMeta.get(conversationKey) ?? [];
               restoredMeta.unshift(...queuedMeta);
-              this.pendingUserMessageMeta.set(restoreKey, restoredMeta);
+              this.pendingUserMessageMeta.set(conversationKey, restoredMeta);
             }
             // Release the in-flight reservation so a retry can proceed.
             // No `w4bOrigin` release needed — we don't stamp it pre-persist
             // anymore; only stamping happens post-success above.
             if (outboundDedupKey) this.deleteMessageHookDedupKey(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
-            const failureSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
-            if (failureSessionId !== sessionId) this.releaseTurnIdReservation(failureSessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
             // T10 — Always release the cross-path in-flight reservation,
@@ -1389,11 +1405,12 @@ export class ChatTurnWriter {
             // 5s post-success window; on failure the reservation must
             // not leak to block legitimate later same-content turns.
             this.unmarkCrossPathInflight(sessionId, w4bOriginKey);
-            const finalSessionId = this.resolvePromotedPersistJobSession(sessionId, w4bJob);
-            if (finalSessionId !== sessionId) this.unmarkCrossPathInflight(finalSessionId, w4bOriginKey);
           }
         });
         this.markPersistJobOrigin(w4bJob, w4bOriginKey);
+        for (const origin of w4bInflightMarkerOrigins) {
+          this.markPersistJobOrigin(w4bJob, origin);
+        }
         w4bJob.catch(() => {});
       }
     } catch (err) {
@@ -1620,29 +1637,6 @@ export class ChatTurnWriter {
     }
   }
 
-  private promoteWeakSessionState(identity: {
-    channelId?: string;
-    accountId?: string;
-    conversationId?: string;
-    sessionKey?: string;
-  }): void {
-    if (!identity.channelId || !identity.sessionKey || this.isWeakSessionKey(identity.sessionKey)) return;
-    const strongSessionId = this.composeSessionId(identity);
-    const candidateSessionIds = new Set<string>();
-    if (identity.conversationId) {
-      // A weak typed session only proves channel/account/conversation, not the
-      // agent-specific sessionKey. Keep conversation-scoped weak state isolated
-      // unless an exact same-message dedupe path rekeys its pending inbound.
-      candidateSessionIds.add(this.composeSessionId({ ...identity, conversationId: "" }));
-    }
-
-    for (const fromSessionId of candidateSessionIds) {
-      if (fromSessionId !== strongSessionId) {
-        this.promoteSessionState(fromSessionId, strongSessionId);
-      }
-    }
-  }
-
   private w4bInflightGuardSessionIds(identity: {
     channelId?: string;
     accountId?: string;
@@ -1657,65 +1651,6 @@ export class ChatTurnWriter {
       }
     }
     return Array.from(ids);
-  }
-
-  private promoteSessionState(fromSessionId: string, strongSessionId: string): void {
-    let changed = false;
-    if (this.promoteInFlightPersists(fromSessionId, strongSessionId)) {
-      changed = true;
-    }
-    if (this.pendingUserMessages.has(fromSessionId) || this.pendingUserMessageMeta.has(fromSessionId)) {
-      this.movePendingInboundQueue(fromSessionId, strongSessionId);
-      changed = true;
-    }
-    for (const [dedupKey, queueKey] of this.messageHookInboundQueueKeys.entries()) {
-      if (queueKey === fromSessionId) {
-        this.messageHookInboundQueueKeys.set(dedupKey, strongSessionId);
-        changed = true;
-      }
-    }
-    for (const [dedupKey, sessionId] of this.messageHookDedupSessionKeys.entries()) {
-      if (sessionId === fromSessionId) {
-        this.messageHookDedupSessionKeys.set(dedupKey, strongSessionId);
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.logger.debug?.("[ChatTurnWriter] Promoted typed-message session identity", {
-        fromSessionId,
-        strongSessionId,
-      });
-    }
-  }
-
-  private resolvePromotedPersistJobSession(sessionId: string, job?: Promise<void>): string {
-    return job ? this.promotedPersistJobs.get(job) ?? sessionId : sessionId;
-  }
-
-  private promotedDurableW4bSessionId(originalSessionId: string, completionSessionId: string): string {
-    if (originalSessionId === completionSessionId) return completionSessionId;
-    const original = this.parseComposedSessionId(originalSessionId);
-    const completion = this.parseComposedSessionId(completionSessionId);
-    if (original && completion && !original.conversationId && completion.conversationId) {
-      return originalSessionId;
-    }
-    return completionSessionId;
-  }
-
-  private promoteInFlightPersists(fromSessionId: string, strongSessionId: string): boolean {
-    const source = this.inFlightPersists.get(fromSessionId);
-    if (!source || source.size === 0) {
-      this.inFlightPersists.delete(fromSessionId);
-      return false;
-    }
-    const target = this.inFlightPersists.get(strongSessionId) ?? new Set<Promise<void>>();
-    for (const job of source) {
-      target.add(job);
-      this.promotedPersistJobs.set(job, strongSessionId);
-    }
-    this.inFlightPersists.set(strongSessionId, target);
-    this.inFlightPersists.delete(fromSessionId);
-    return true;
   }
 
   /**
@@ -2310,6 +2245,31 @@ export class ChatTurnWriter {
     return Array.from(markers);
   }
 
+  private typedW4bInflightOrigin(marker: string): string {
+    return `typed-w4b-marker::${marker}`;
+  }
+
+  private typedW4bInflightOrigins(
+    user: string,
+    assistant: string,
+    messageIds: string[],
+    assistantMessageIds: string[] = [],
+  ): string[] {
+    return this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds)
+      .map((marker) => this.typedW4bInflightOrigin(marker));
+  }
+
+  private typedW4bInflightOriginsFromOccurrences(
+    user: string,
+    assistant: string,
+    occurrences: string[],
+  ): string[] {
+    return occurrences
+      .map((occurrence) => this.typedW4bExternalMarkerId(user, assistant, occurrence))
+      .filter((marker) => marker.length > 0)
+      .map((marker) => this.typedW4bInflightOrigin(marker));
+  }
+
   private findTypedW4bExternalMarker(
     cursorKeys: string[],
     user: string,
@@ -2590,7 +2550,6 @@ export class ChatTurnWriter {
   private deriveSessionId(ctx?: any): string {
     const identity = this.identityFieldsFromPayload(ctx);
     if (!identity.channelId || !identity.sessionKey) return "";
-    this.promoteWeakSessionState(identity);
     return this.composeSessionId(identity);
   }
 
@@ -2657,7 +2616,6 @@ export class ChatTurnWriter {
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
     };
-    this.promoteWeakSessionState(identity);
     return this.composeSessionId(identity);
   }
 
@@ -2892,7 +2850,6 @@ export class ChatTurnWriter {
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
     };
-    this.promoteWeakSessionState(identity);
     return this.composeSessionId(identity);
   }
 

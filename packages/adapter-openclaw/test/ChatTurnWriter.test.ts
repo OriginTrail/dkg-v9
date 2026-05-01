@@ -731,14 +731,15 @@ describe("ChatTurnWriter", () => {
     writer.onAgentEnd({
       sessionId: "test",
       messages: [
-        { role: "user", content: "late weak q" },
+        { role: "user", content: "late weak q", metadata: { messageId: "late-weak-in" } },
         { role: "assistant", content: "late weak a" },
       ],
     }, { channelId: "telegram", accountId: "bot", conversationId: "chat-late", sessionKey: "real-sk" });
     await flushMicrotasks();
 
-    expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(false);
-    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(true);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect((writer as any).inFlightPersists.has(weakSessionId)).toBe(true);
+    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
 
     releaseStore!();
     await writer.flush();
@@ -834,6 +835,8 @@ describe("ChatTurnWriter", () => {
       ],
     }, { channelId: "telegram", accountId: "bot", conversationId: "chat-alias-A", sessionKey: "real-sk" });
     await flushMicrotasks();
+    expect((writer as any).inFlightPersists.has(conversationlessSessionId)).toBe(true);
+    expect((writer as any).inFlightPersists.has(strongSessionId)).toBe(false);
 
     releaseStore!();
     await writer.flush();
@@ -855,6 +858,30 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe(conversationlessSessionId);
     expect((writer as any).w4bSessionCounts.get(conversationlessSessionId)).toBe(2);
     expect((writer as any).w4bSessionCounts.has(strongSessionId)).toBe(false);
+  });
+
+  it("T359 - conversationless pending inbound does not promote into an unrelated concrete chat", async () => {
+    const conversationlessSessionId = "openclaw:telegram:bot::real-sk";
+    const concreteSessionId = "openclaw:telegram:bot:chat-concrete-B:real-sk";
+
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "chat A session-only q", metadata: { messageId: "session-only-in" } },
+      { channelId: "telegram", accountId: "bot", sessionKey: "real-sk" },
+    );
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-B", sessionKey: "real-sk" });
+    await flushMicrotasks();
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "chat B reply must not use chat A user", success: true, metadata: { messageId: "chat-B-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-B", sessionKey: "real-sk" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    expect((writer as any).pendingUserMessages.get(conversationlessSessionId)).toEqual(["chat A session-only q"]);
+    expect((writer as any).pendingUserMessages.has(concreteSessionId)).toBe(false);
   });
 
   it("T359 - typed endpoint-only events without session identity are dropped", async () => {

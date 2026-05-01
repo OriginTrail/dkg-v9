@@ -1735,6 +1735,7 @@ export class ChatTurnWriter {
     if (existing.conversationId !== target.conversationId) return false;
     const existingWeak = this.isWeakSessionKey(existing.sessionKey);
     const targetWeak = this.isWeakSessionKey(target.sessionKey);
+    if (this.pendingQueueUsesTypedSessionFallback(existingKey) && !targetWeak) return true;
     if (existingWeak === targetWeak) return false;
     if (targetWeak) return this.pendingQueueUsesTypedSessionFallback(existingKey);
     return outboundUsesTypedSessionIdFallback;

@@ -926,6 +926,31 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("split strong outbound");
   });
 
+  it("T359 - typed sessionId fallback inbound promotes to concrete outbound sessionKey", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "fallback to concrete inbound", metadata: { messageId: "fallback-concrete-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-fallback-concrete", sessionId: "typed-session-c" },
+    );
+
+    await writer.onMessageSent({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-fallback-concrete",
+        content: "concrete outbound",
+        success: true,
+        messageId: "fallback-concrete-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-fallback-concrete:internal-sk");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("fallback to concrete inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("concrete outbound");
+  });
+
   it("T359 - queue promotion appends later weak duplicates after earlier strong messages", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "first strong inbound", metadata: { messageId: "order-strong-first" } },

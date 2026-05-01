@@ -1862,6 +1862,120 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
+  it('stop should account for a marker created after storeChatTurn settles during final shutdown drain', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = ((...args: unknown[]) => {
+        storeCalls.push(args);
+        return storePromise;
+      }) as any;
+      const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Late store', 'corr-late-marker-after-store', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+      expect((plugin as any).pendingTurnPersistence.size).toBe(1);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      resolveStore();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-late-marker-after-store',
+        user: 'Late store',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should not create a hidden marker job when storeChatTurn settles after the final shutdown window', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = ((...args: unknown[]) => {
+        storeCalls.push(args);
+        return storePromise;
+      }) as any;
+      const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Late timeout', 'corr-late-marker-after-timeout', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+
+      const stopPromise = plugin.stop();
+      await vi.advanceTimersByTimeAsync(1_750);
+      await stopPromise;
+
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      resolveStore();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('completed after shutdown marker drain'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stop should force one final ChatTurnWriter marker flush before dropping timed-out marker jobs', async () => {
     vi.useFakeTimers();
     try {
@@ -2258,6 +2372,7 @@ describe('DkgChannelPlugin', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect((reply as any).SessionKey).toBe('agent:legacy:actual');
+    expect(reply.sessionKey).toBe('agent:legacy:actual');
     expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
       sessionKey: 'agent:legacy:actual',
       turnId: 'corr-route-uppercase-session',
@@ -2961,6 +3076,10 @@ describe('DkgChannelPlugin', () => {
       expect(stopSettled).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(250);
       await stopPromise;
       expect(stopSettled).toBe(true);
       expect((plugin as any).pendingTurnPersistence.size).toBe(0);

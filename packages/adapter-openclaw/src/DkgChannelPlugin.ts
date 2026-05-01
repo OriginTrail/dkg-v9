@@ -370,6 +370,7 @@ export class DkgChannelPlugin {
     attempt: number;
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
+    inFlight: Promise<void> | null;
   }>();
   private readonly pendingMarkerPersistence = new Map<string, {
     attempt: number;
@@ -674,7 +675,7 @@ export class DkgChannelPlugin {
         this.api?.logger.warn?.(
           `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
         );
-        await this.flushPendingMarkerPersistenceBeforeDrop();
+        await this.flushPendingPersistenceBeforeDrop();
         this.clearPendingTurnPersistence();
         this.clearPendingMarkerPersistence();
       }
@@ -909,6 +910,7 @@ export class DkgChannelPlugin {
       attempt: 0,
       timer: null,
       allowDuringShutdown,
+      inFlight: null,
     });
   }
 
@@ -935,10 +937,64 @@ export class DkgChannelPlugin {
     this.notifyStopIdle();
   }
 
-  private async flushPendingMarkerPersistenceBeforeDrop(): Promise<void> {
+  private async flushPendingPersistenceBeforeDrop(): Promise<void> {
+    if (this.pendingTurnPersistence.size === 0 && this.pendingMarkerPersistence.size === 0) return;
+    const deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS;
+    while (Date.now() < deadlineAt) {
+      const turnsSettled = await this.waitForPendingTurnPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      await this.flushPendingMarkerPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      const hasInFlightTurn = Array.from(this.pendingTurnPersistence.values()).some((job) => job.inFlight);
+      if (!hasInFlightTurn && this.pendingMarkerPersistence.size === 0) return;
+      if (!turnsSettled && hasInFlightTurn) break;
+    }
+
+    for (const [correlationId, job] of this.pendingTurnPersistence) {
+      if (!job.inFlight) continue;
+      this.api?.logger.warn?.(
+        `[dkg-channel] Final turn persistence did not settle during shutdown for ${correlationId}; dropping turn job.`,
+      );
+    }
+  }
+
+  private async waitForPendingTurnPersistenceBeforeDrop(deadlineAt: number): Promise<boolean> {
+    const inFlightTurns = Array.from(this.pendingTurnPersistence.entries())
+      .filter(([, job]) => job.inFlight)
+      .map(([correlationId, job]) => ({ correlationId, inFlight: job.inFlight! }));
+    if (inFlightTurns.length === 0) return true;
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    if (remainingMs === 0) return false;
+
+    for (const { inFlight } of inFlightTurns) {
+      void inFlight.catch(() => {});
+    }
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const settled = await Promise.race([
+        Promise.allSettled(inFlightTurns.map(({ inFlight }) => inFlight)).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), remainingMs);
+        }),
+      ]);
+      if (!settled) {
+        for (const { correlationId } of inFlightTurns) {
+          if (!this.pendingTurnPersistence.get(correlationId)?.inFlight) continue;
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final turn persistence wait timed out during shutdown for ${correlationId}; checking marker jobs before drop.`,
+          );
+        }
+      }
+      return settled;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async flushPendingMarkerPersistenceBeforeDrop(deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS): Promise<void> {
     if (!this.chatTurnWriter || this.pendingMarkerPersistence.size === 0) return;
     const jobs = Array.from(this.pendingMarkerPersistence.entries());
-    const deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS;
     for (const [correlationId, job] of jobs) {
       try {
         if (job.timer) clearTimeout(job.timer);
@@ -1259,6 +1315,9 @@ export class DkgChannelPlugin {
       const returnedSessionKey =
         (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
         || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '');
+      const normalizedReply = returnedSessionKey
+        ? { ...reply, sessionKey: returnedSessionKey }
+        : reply;
       if (!returnedSessionKey && this.chatTurnWriter) {
         api.logger.warn?.(
           `[dkg-channel] routeInboundMessage reply for ${correlationId} did not include sessionKey; skipping ChatTurnWriter marker for this direct-channel turn.`,
@@ -1269,7 +1328,7 @@ export class DkgChannelPlugin {
         sessionKey: returnedSessionKey || undefined,
         markerUser: markerUserMessage,
       }, true);
-      return reply;
+      return normalizedReply;
     }
 
     throw new Error(
@@ -1923,6 +1982,12 @@ export class DkgChannelPlugin {
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
       },
     );
+    if (this.stopping && !this.pendingTurnPersistence.has(correlationId)) {
+      this.api?.logger.warn?.(
+        `[dkg-channel] Turn persistence for ${correlationId} completed after shutdown marker drain; skipping late ChatTurnWriter marker job.`,
+      );
+      return;
+    }
     await this.markExternalTurnPersistedAfterStore({
       sessionKey: opts?.sessionKey,
       turnId: opts?.turnId ?? correlationId,
@@ -2034,8 +2099,14 @@ export class DkgChannelPlugin {
 
     const attemptPersist = (attempt: number): void => {
       if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
-      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null, allowDuringShutdown });
-      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts, allowDuringShutdown)
+      const persistWrite = this.persistTurn(userMessage, assistantReply, correlationId, identity, opts, allowDuringShutdown);
+      this.pendingTurnPersistence.set(correlationId, {
+        attempt,
+        timer: null,
+        allowDuringShutdown,
+        inFlight: persistWrite,
+      });
+      void persistWrite
         .then(() => {
           this.deletePendingTurnPersistence(correlationId);
         })
@@ -2068,10 +2139,14 @@ export class DkgChannelPlugin {
             }
             const job = this.pendingTurnPersistence.get(correlationId);
             if (!job) return;
-            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
             attemptPersist(attempt + 1);
           }, retryDelayMs);
-          this.pendingTurnPersistence.set(correlationId, { attempt, timer, allowDuringShutdown });
+          this.pendingTurnPersistence.set(correlationId, {
+            attempt,
+            timer,
+            allowDuringShutdown,
+            inFlight: null,
+          });
         });
     };
 

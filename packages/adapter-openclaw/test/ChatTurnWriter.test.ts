@@ -791,6 +791,30 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("strong typed q");
   });
 
+  it("T359 - conversationless promotion does not move short TTL dedupe maps", async () => {
+    const conversationlessSessionId = "openclaw:telegram:bot::real-sk";
+    const strongSessionId = "openclaw:telegram:bot:chat-ttl:real-sk";
+    const turnKey = "same-ttl-turn";
+    const originKey = (writer as any).w4bOriginKey("ttl q", "ttl a");
+
+    (writer as any).markTurnIdSeen(conversationlessSessionId, turnKey);
+    (writer as any).markCrossPathStamp(conversationlessSessionId, originKey);
+    (writer as any).markCrossPathInflight(conversationlessSessionId, originKey);
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [],
+    }, { channelId: "telegram", accountId: "bot", conversationId: "chat-ttl", sessionKey: "real-sk" });
+    await flushMicrotasks();
+
+    expect((writer as any).peekTurnIdSeen(conversationlessSessionId, turnKey)).toBe(true);
+    expect((writer as any).peekCrossPathStamp(conversationlessSessionId, originKey)).toBe(true);
+    expect((writer as any).peekCrossPathInflight(conversationlessSessionId, originKey)).toBe(true);
+    expect((writer as any).peekTurnIdSeen(strongSessionId, turnKey)).toBe(false);
+    expect((writer as any).peekCrossPathStamp(strongSessionId, originKey)).toBe(false);
+    expect((writer as any).peekCrossPathInflight(strongSessionId, originKey)).toBe(false);
+  });
+
   it("T359 - repeated same-text typed replies without outbound messageIds do not dedupe distinct turns", async () => {
     writer.onTypedMessageReceived(
       { from: "user-1", content: "repeat q1", metadata: { messageId: "repeat-in-1" } },
@@ -844,6 +868,26 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][3]?.turnId).not.toBe(
       mockClient.storeChatTurn.mock.calls[1][3]?.turnId,
     );
+  });
+
+  it("T359 - no-messageId duplicate inbound surfaces queue once", async () => {
+    const ctx = { channelId: "telegram", accountId: "bot", conversationId: "chat-noid-dup" };
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "no id duplicate q" },
+      ctx,
+    );
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "no id duplicate q" },
+      ctx,
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "no id duplicate a", success: true },
+      ctx,
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("no id duplicate q");
   });
 
   it("T359 - conversationless message-id dedupe is scoped by session key", async () => {

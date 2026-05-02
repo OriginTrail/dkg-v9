@@ -24,6 +24,49 @@ describe('DkgNodePlugin', () => {
     expect(plugin).toBeDefined();
   });
 
+  it('merges partial config refreshes without dropping existing module config', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true, memoryDir: '/memory' },
+      channel: { enabled: true, port: 9201 },
+    });
+
+    plugin.updateConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    }, { partial: true });
+
+    expect((plugin as any).config).toMatchObject({
+      daemonUrl: 'http://localhost:9200',
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+      memory: { enabled: true, memoryDir: '/memory' },
+      channel: { enabled: true, port: 9201 },
+    });
+  });
+
+  it('replaces config snapshots when the refresh is fully materialized', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9201 },
+    });
+
+    plugin.updateConfig({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    });
+
+    expect((plugin as any).config).toEqual({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    });
+  });
+
   it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
     // Pre-fix: when memory slot was owned by a different plugin, the
     // resolver bootstrap (`memoryResolverApi = api` + `refreshMemoryResolverState`)
@@ -66,6 +109,468 @@ describe('DkgNodePlugin', () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it('reads memory slot ownership from runtime config when api.config is adapter plugin config', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        daemonUrl: 'http://localhost:9200',
+        stateDir: '/workspace/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/workspace',
+        memory: { enabled: true },
+      },
+      runtime: {
+        config: {
+          plugins: {
+            slots: {
+              memory: 'adapter-openclaw',
+            },
+          },
+        },
+      },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) {
+        return { ok: true, status: 200, json: async () => ({ peerId: 'p-runtime-config' }) } as Response;
+      }
+      if (url.includes('/api/agent/identity')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ identity: { agentAddress: '0x0000000000000000000000000000000000000001' } }),
+        } as Response;
+      }
+      if (url.includes('/api/context-graph/list')) {
+        return { ok: true, status: 200, json: async () => ({ contextGraphs: [] }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+    try {
+      plugin.register(mockApi);
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('queues channel module recreation until the previous bridge stops', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    let resolveStop!: () => void;
+    const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockImplementation(() => stopPromise);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: true },
+      });
+      (plugin as any).client = {};
+      (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+      const syncLocalAgentSpy = vi
+        .spyOn(plugin as any, 'syncLocalAgentIntegrationState')
+        .mockResolvedValue(undefined);
+      (plugin as any).chatTurnWriter = {} as any;
+      const registerMemoryCapability = vi.fn();
+      const mockApi = {
+        config: {
+          plugins: {
+            slots: {
+              memory: 'adapter-openclaw',
+            },
+          },
+        },
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability,
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true, registrationMode: 'full' });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      const chatTurnWriter = (plugin as any).chatTurnWriter;
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: true },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true, registrationMode: 'full' });
+      (plugin as any).scheduleLocalAgentIntegrationRetry(mockApi, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+      (plugin as any).registerLocalAgentIntegration(mockApi, 'full');
+
+      expect(firstChannelPlugin).toBeDefined();
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
+      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: false });
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+      expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+      expect(syncLocalAgentSpy).not.toHaveBeenCalled();
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+      resolveStop();
+      await stopInFlight;
+      const secondChannelPlugin = (plugin as any).channelPlugin;
+
+      expect(secondChannelPlugin).toBeDefined();
+      expect(secondChannelPlugin).not.toBe(firstChannelPlugin);
+      expect((secondChannelPlugin as any).chatTurnWriter).toBe(chatTurnWriter);
+      expect((secondChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+      expect(registerSpy).toHaveBeenCalledTimes(2);
+      expect(syncLocalAgentSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
+  it('keeps the existing channel bridge when reconfiguration stop fails', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockRejectedValue(new Error('port still busy'));
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: true },
+      });
+      (plugin as any).client = {};
+      (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+      (plugin as any).chatTurnWriter = {} as any;
+      const registerMemoryCapability = vi.fn();
+      const mockApi = {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability,
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      expect((firstChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: true },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+      expect(stopInFlight).toBeDefined();
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((firstChannelPlugin as any).preDispatchReAssert).toBeNull();
+      await stopInFlight;
+
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((plugin as any).channelPluginConfigFingerprint).not.toBeNull();
+      expect((firstChannelPlugin as any).preDispatchReAssert).toEqual(expect.any(Function));
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+      expect(mockApi.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Channel module reconfiguration stop failed'),
+      );
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
+  it('cancels a queued channel restart when a later refresh disables the channel', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    let resolveStop!: () => void;
+    const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockImplementation(() => stopPromise);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: false },
+      });
+      (plugin as any).client = {};
+      (plugin as any).chatTurnWriter = {} as any;
+      const mockApi = {
+        config: {},
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const firstChannelPlugin = (plugin as any).channelPlugin;
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9202 },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      const stopInFlight = (plugin as any).channelPluginStopInFlight;
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      expect((plugin as any).channelPlugin).toBe(firstChannelPlugin);
+      expect((plugin as any).pendingChannelStartApi).toBeNull();
+      expect(stopSpy).toHaveBeenNthCalledWith(1, { updateGatewayStatus: false });
+      expect(stopSpy).toHaveBeenNthCalledWith(2, { updateGatewayStatus: true });
+
+      resolveStop();
+      await stopInFlight;
+
+      expect((plugin as any).channelPlugin).toBeNull();
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
+  it('updates gateway status when refreshed config disables the channel module', async () => {
+    const registerSpy = vi.spyOn(DkgChannelPlugin.prototype, 'register').mockImplementation(() => {});
+    const stopSpy = vi.spyOn(DkgChannelPlugin.prototype, 'stop').mockResolvedValue(undefined);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 9201 },
+        memory: { enabled: false },
+      });
+      (plugin as any).client = {};
+      (plugin as any).chatTurnWriter = {} as any;
+      const mockApi = {
+        config: {},
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+      expect(stopSpy).toHaveBeenCalledWith({ updateGatewayStatus: true });
+      await (plugin as any).channelPluginStopInFlight;
+      expect((plugin as any).channelPlugin).toBeNull();
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
+  it('clears a registered memory capability when refreshed config disables memory', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const activeCapability = registerMemoryCapability.mock.calls[0][0];
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = registerMemoryCapability.mock.calls[1][0];
+    expect(disabledCapability).not.toBe(activeCapability);
+    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    const result = await disabledCapability.runtime.getMemorySearchManager({});
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+
+    oldMemoryPlugin.reAssertCapability();
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
+  });
+
+  it('rebuilds a registered memory capability when updateConfig refreshes the daemon client', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const initialCapability = registerMemoryCapability.mock.calls[0][0];
+    (plugin as any).initialized = true;
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9300',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(registerMemoryCapability.mock.calls[1][0]).not.toBe(initialCapability);
+  });
+
+  it('clears previous memory registry without stamping a stale registered api when ownership is unknown', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const initialRegisterMemoryCapability = vi.fn();
+    const currentRegisterMemoryCapability = vi.fn();
+    const initialApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: initialRegisterMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    const currentDirectApi = {
+      config: {
+        memory: { enabled: false },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: currentRegisterMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(initialApi, { enableFullRuntime: true });
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
+
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(currentDirectApi, { enableFullRuntime: true });
+
+    expect(currentRegisterMemoryCapability).not.toHaveBeenCalled();
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+    oldMemoryPlugin.reAssertCapability();
+    expect(initialRegisterMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
+  });
+
+  it('does not clear another plugin memory slot when refreshed config disables memory', () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    (plugin as any).client = {};
+    (plugin as any).refreshMemoryResolverState = vi.fn(() => Promise.resolve());
+    const registerMemoryCapability = vi.fn();
+    const mockApi = {
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      },
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability,
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+    const oldMemoryPlugin = (plugin as any).memoryPlugin;
+
+    (mockApi.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+    (plugin as any).initialized = true;
+    plugin.updateConfig({
+      daemonUrl: 'http://localhost:9300',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+    (plugin as any).registerIntegrationModules(mockApi, { enableFullRuntime: true });
+
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect((plugin as any).memoryPlugin).toBeNull();
+    expect((plugin as any).memoryResolverApi).toBeNull();
+    expect(oldMemoryPlugin.isRegistered()).toBe(false);
+    oldMemoryPlugin.reAssertCapability();
+    expect(registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('registers session_end hook and all exported tools via register()', () => {
@@ -1272,6 +1777,152 @@ describe('DkgNodePlugin', () => {
     expect(client.baseUrl).toBe('http://example.com:9200');
   });
 
+  it('refreshes daemon-scoped clients and identity caches after singleton config update', async () => {
+    const originalFetch = globalThis.fetch;
+    const stateDir = path.join(require('os').tmpdir(), `dkg-t75-client-refresh-${Date.now()}`);
+    const oldAgent = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const newAgent = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const flushAsync = async () => {
+      for (let i = 0; i < 25; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const isNew = url.startsWith('http://localhost:9300');
+      if (url.endsWith('/api/status')) {
+        return new Response(JSON.stringify({ peerId: isNew ? 'peer-new' : 'peer-old' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/agent/identity')) {
+        return new Response(JSON.stringify({
+          agentAddress: isNew ? newAgent : oldAgent,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/context-graph/list')) {
+        return new Response(JSON.stringify({
+          contextGraphs: [{ id: isNew ? 'cg-new' : 'cg-old', synced: true, isSystem: false }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      stateDir,
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      registerMemoryCapability: vi.fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      plugin.register(mockApi);
+      await flushAsync();
+      expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
+      expect((plugin as any).nodePeerId).toBe('peer-old');
+      expect((plugin as any).nodeAgentAddress).toBe(oldAgent);
+      expect((plugin as any).availableContextGraphCache).toEqual(['cg-old']);
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9300',
+        stateDir,
+        channel: { enabled: false },
+        memory: { enabled: true },
+      } as any);
+
+      expect(plugin.getClient().baseUrl).toBe('http://localhost:9300');
+      expect((plugin as any).nodePeerId).toBeUndefined();
+      expect((plugin as any).nodeAgentAddress).toBeUndefined();
+      expect((plugin as any).availableContextGraphCache).toEqual([]);
+      expect(((plugin as any).chatTurnWriter as any).client.baseUrl).toBe('http://localhost:9300');
+      expect(((plugin as any).memoryPlugin as any).client.baseUrl).toBe('http://localhost:9300');
+
+      plugin.register(mockApi);
+      await flushAsync();
+      expect((plugin as any).nodePeerId).toBe('peer-new');
+      expect((plugin as any).nodeAgentAddress).toBe(newAgent);
+      expect((plugin as any).availableContextGraphCache).toEqual(['cg-new']);
+    } finally {
+      await plugin.stop();
+      globalThis.fetch = originalFetch;
+      try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('drops stale local-agent sync work after daemon client refresh', async () => {
+    vi.useFakeTimers();
+    let resolveLoad: ((value: null) => void) | undefined;
+    const oldClient = {
+      getLocalAgentIntegration: vi.fn(() => new Promise<null>((resolve) => { resolveLoad = resolve; })),
+      connectLocalAgentIntegration: vi.fn(),
+    };
+    const newClient = {
+      getLocalAgentIntegration: vi.fn(),
+      connectLocalAgentIntegration: vi.fn(),
+    };
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+      memory: { enabled: false },
+    } as any);
+    const api: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      (plugin as any).client = oldClient;
+      (plugin as any).channelPlugin = {
+        isUsingGatewayRoute: false,
+        isListening: true,
+        bridgePort: 0,
+        start: vi.fn(async () => {}),
+        setClient: vi.fn(),
+      };
+
+      const sync = (plugin as any).syncLocalAgentIntegrationState(api, 'full');
+      expect(oldClient.getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+      (plugin as any).scheduleLocalAgentIntegrationRetry(api, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+
+      (plugin as any).daemonClientGeneration += 1;
+      (plugin as any).client = newClient;
+      (plugin as any).resetDaemonScopedCachesForClientChange();
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+
+      resolveLoad?.(null);
+      await sync;
+
+      expect(oldClient.connectLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(newClient.connectLocalAgentIntegration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('registers OpenClaw through the generic local-agent endpoint', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
@@ -1628,6 +2279,534 @@ describe('DkgNodePlugin', () => {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('clears the stored local-agent bridge state when the channel is hot-disabled', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                bridgeUrl: 'http://127.0.0.1:9201',
+                healthUrl: 'http://127.0.0.1:9201/health',
+              },
+              runtime: { status: 'ready', ready: true, lastError: null },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      };
+
+      plugin.register(mockApi);
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      plugin.register(mockApi);
+
+      await vi.waitFor(() => {
+        const clearCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/openclaw') &&
+          call[1]?.method === 'PUT',
+        );
+        expect(clearCall).toBeTruthy();
+      });
+      const clearCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw') &&
+        call[1]?.method === 'PUT',
+      );
+      const clearBody = JSON.parse(String(clearCall?.[1]?.body));
+      expect(clearBody).toMatchObject({
+        enabled: false,
+        transport: { kind: 'openclaw-channel' },
+        capabilities: {
+          localChat: false,
+          chatAttachments: false,
+          connectFromUi: false,
+        },
+        metadata: {
+          channelId: 'dkg-ui',
+          registrationMode: 'full',
+          transportMode: 'disabled',
+        },
+        runtime: {
+          status: 'configured',
+          ready: false,
+          lastError: 'DKG UI channel disabled by adapter config',
+        },
+      });
+      expect(clearBody.transport.bridgeUrl).toBeUndefined();
+      expect(clearBody.transport.healthUrl).toBeUndefined();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('clears stored local-agent bridge state when disable races with a completed in-flight stop', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = Promise.resolve(true);
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          enabled: false,
+          capabilities: expect.objectContaining({
+            localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
+          }),
+          metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          runtime: expect.objectContaining({ status: 'configured', ready: false }),
+        }),
+      );
+    });
+  });
+
+  it('clears stored local-agent bridge state on cold runtime registration with channel disabled', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          enabled: false,
+          capabilities: expect.objectContaining({
+            localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
+          }),
+          metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          runtime: expect.objectContaining({ status: 'configured', ready: false }),
+        }),
+      );
+    });
+  });
+
+  it('skips disabled-channel cleanup on cold runtime registration when no local-agent record exists', async () => {
+    const debug = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+    });
+    expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining('nothing to clear'));
+  });
+
+  it('retries disabled-channel local-agent cleanup after a transient stored-state load failure', async () => {
+    vi.useFakeTimers();
+    const warn = vi.fn();
+    const debug = vi.fn();
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce({
+        id: 'openclaw',
+        enabled: true,
+        runtime: { status: 'configured', ready: true },
+        metadata: { transportMode: 'openclaw-channel' },
+      });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn, debug },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying disabled-channel status update'));
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(2);
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          enabled: false,
+          metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          runtime: expect.objectContaining({ status: 'configured', ready: false }),
+        }),
+      );
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('loaded for disabled-channel cleanup after 1 retry attempt'));
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
+  it('stops disabled-channel cleanup retry when the stored local-agent record is still missing', async () => {
+    vi.useFakeTimers();
+    const warn = vi.fn();
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn, debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying disabled-channel status update'));
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(2);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('nothing to clear'));
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
+  it('does not let a stale disabled-channel cleanup retry overwrite a later re-enable', async () => {
+    vi.useFakeTimers();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+
+      (plugin as any).config.channel = { enabled: true, port: 0 };
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
+  it('cancels a pending local-agent retry when clearing a disabled channel', async () => {
+    vi.useFakeTimers();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const syncLocalAgentIntegrationState = vi
+      .spyOn(plugin as any, 'syncLocalAgentIntegrationState')
+      .mockResolvedValue(undefined);
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).scheduleLocalAgentIntegrationRetry(mockApi, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+
+      (plugin as any).clearLocalAgentChannelIntegration(mockApi, 'full');
+
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(syncLocalAgentIntegrationState).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+          'openclaw',
+          expect.objectContaining({
+            enabled: false,
+            capabilities: expect.objectContaining({ localChat: false, connectFromUi: false }),
+            metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          }),
+        );
+      });
+    } finally {
+      vi.useRealTimers();
+      syncLocalAgentIntegrationState.mockRestore();
+    }
+  });
+
+  it('does not re-enable an explicitly disconnected stored bridge when channel is disabled', async () => {
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: false,
+      runtime: { status: 'disconnected', ready: false },
+      metadata: { userDisabled: true },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+    });
+    expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+  });
+
+  it('does not advertise memory capabilities when clearing a disabled channel during memory disable', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    const memoryPlugin = {
+      isRegistered: vi.fn(() => true),
+      disable: vi.fn(() => true),
+      close: vi.fn(async () => {}),
+    };
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).memoryPlugin = memoryPlugin;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          capabilities: expect.objectContaining({
+            localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
+            dkgPrimaryMemory: false,
+            wmImportPipeline: false,
+          }),
+        }),
+      );
+    });
+    expect(memoryPlugin.disable).toHaveBeenCalledWith(mockApi);
   });
 
   it('recomputes gatewayUrl from current gateway config even when the port stays at the default', async () => {
@@ -2411,12 +3590,10 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('skips the stored-integration retry loop entirely when both memory and channel are disabled', async () => {
-    // Live-validation follow-up: when the adapter has nothing runtime
-    // to sync (both integrations disabled), the daemon fetch is pure
-    // overhead and used to loop at 1 Hz. With the fix it short-circuits
-    // before the first load call so cold daemons do not burn CPU or
-    // log spam on metadata-only plugin loads.
+  it('retries only disabled-channel cleanup when both memory and channel are disabled', async () => {
+    // A disabled channel still retries the cleanup path so it can clear stale
+    // bridge state after daemon cold-start races. It must not run startup
+    // re-registration or reconnect the bridge while both integrations are off.
     vi.useFakeTimers();
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn();
@@ -2440,14 +3617,18 @@ describe('DkgNodePlugin', () => {
 
       plugin.register(mockApi);
       await Promise.resolve();
-      // Advance a full minute — if the retry loop were active we'd see
-      // multiple GETs by now.
+      // Advance a full minute. Disabled cleanup retries at 5s, 10s, then 20s;
+      // the 40s follow-up lands after this window.
       await vi.advanceTimersByTimeAsync(60_000);
 
       const getCalls = fakeFetch.mock.calls.filter((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
       );
-      expect(getCalls).toHaveLength(0);
+      const connectCalls = fakeFetch.mock.calls.filter((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(getCalls).toHaveLength(4);
+      expect(connectCalls).toHaveLength(0);
     } finally {
       vi.useRealTimers();
       await plugin?.stop();
@@ -3116,7 +4297,7 @@ describe('DkgNodePlugin', () => {
     delete process.env.OPENCLAW_STATE_DIR;
     const tmpRoot = require('os').tmpdir();
     const workspaceDir = path.join(tmpRoot, `dkg-t24-workspace-${Date.now()}`);
-    const homeDir = `${require('os').homedir()}/.openclaw`;
+    const homeDir = path.join(require('os').homedir(), '.openclaw');
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -3132,7 +4313,7 @@ describe('DkgNodePlugin', () => {
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiFallback);
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
 
       // Force setStateDir to fail.
       const writer = (plugin as any).chatTurnWriter;
@@ -3154,7 +4335,7 @@ describe('DkgNodePlugin', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Failure: migration target cleared, but stateDir stays at fallback.
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
       expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
 
       // A second register() with the SAME apiBetter MUST re-trigger the
@@ -3164,11 +4345,11 @@ describe('DkgNodePlugin', () => {
       // The migration was triggered again — `chatTurnWriterMigrationTarget`
       // should be set during the in-flight async work.
       const target = (plugin as any).chatTurnWriterMigrationTarget;
-      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.openclaw');
+      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter');
       // Wait for retry to settle.
       await new Promise((r) => setTimeout(r, 50));
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
     } finally {
       if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3190,7 +4371,7 @@ describe('DkgNodePlugin', () => {
     delete process.env.OPENCLAW_STATE_DIR;
     const tmpRoot = require('os').tmpdir();
     const workspaceDir = path.join(tmpRoot, `dkg-t18-workspace-${Date.now()}`);
-    const homeDir = `${require('os').homedir()}/.openclaw`;
+    const homeDir = path.join(require('os').homedir(), '.openclaw');
     try {
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -3207,7 +4388,7 @@ describe('DkgNodePlugin', () => {
       } as unknown as OpenClawPluginApi;
       plugin.register(apiFallback);
       const writer1 = (plugin as any).chatTurnWriter;
-      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(homeDir.replace(/\\/g, '/'));
 
       // Second register with workspaceDir → triggers in-place migration.
       const apiBetter: OpenClawPluginApi = {
@@ -3227,19 +4408,19 @@ describe('DkgNodePlugin', () => {
       // migration. While the async `setStateDir` is in flight,
       // `chatTurnWriterMigrationTarget` reflects the target.
       expect((plugin as any).chatTurnWriterMigrationTarget?.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
       // Wait for the fire-and-forget setStateDir to complete.
       await new Promise((r) => setTimeout(r, 100));
       // After success, chatTurnWriterStateDir flips and migration
       // target clears.
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter',
       );
       expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
       const path2 = (writer2 as any).watermarkFilePath as string;
       expect(path2.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
     } finally {
       if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3590,7 +4771,7 @@ describe('DkgNodePlugin', () => {
       const watermarkPath: string = (ctw as any).watermarkFilePath;
       const normalized = watermarkPath.replace(/\\/g, '/');
       // Must have fallen through empty env to workspaceDir-derived path.
-      expect(normalized).toContain('/tmp/dkg-t26-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      expect(normalized).toContain('/tmp/dkg-t26-workspace/.dkg-adapter/chat-turn-watermarks.json');
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
       else process.env.OPENCLAW_STATE_DIR = prevEnv;
@@ -3616,7 +4797,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        '/tmp/dkg-t26-workspace-ws/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        '/tmp/dkg-t26-workspace-ws/.dkg-adapter/chat-turn-watermarks.json',
       );
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
@@ -3629,7 +4810,7 @@ describe('DkgNodePlugin', () => {
     // straight to `~/.openclaw` when `runtime.state.resolveStateDir()` and
     // `OPENCLAW_STATE_DIR` were both absent, so two workspaces on the
     // same machine would share `chat-turn-watermarks.json`. The new
-    // fallback prefers `api.workspaceDir + '/.openclaw'` when present.
+    // fallback prefers the workspace-local `.dkg-adapter` default when present.
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     try {
@@ -3650,14 +4831,13 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const ctw = (plugin as any).chatTurnWriter;
       expect(ctw).toBeDefined();
-      // ChatTurnWriter stores the resolved stateDir privately and writes
-      // `<stateDir>/dkg-adapter/chat-turn-watermarks.json`. Inspecting
-      // `watermarkFilePath` confirms the workspace-derived path won.
+      // ChatTurnWriter stores setup/workspace default watermarks directly
+      // under `.dkg-adapter`, without the legacy nested subdirectory.
       const watermarkPath: string = (ctw as any).watermarkFilePath;
       // Normalize separators for cross-platform path comparison (Windows
       // path.join produces backslashes from a forward-slash workspaceDir).
       const normalized = watermarkPath.replace(/\\/g, '/');
-      expect(normalized).toContain('/tmp/dkg-r162-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      expect(normalized).toContain('/tmp/dkg-r162-workspace/.dkg-adapter/chat-turn-watermarks.json');
       // Must NOT have fallen back to the home dir.
       expect(normalized).not.toContain(homedir().replace(/\\/g, '/') + '/.openclaw/dkg-adapter');
       // The home-dir fallback warn must NOT have fired.
@@ -3730,7 +4910,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       await plugin.stop();
     } finally {
@@ -3802,7 +4982,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        workspaceDir.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       expect(watermarkPath.replace(/\\/g, '/')).not.toContain(staleConfigStateDir.replace(/\\/g, '/'));
       await plugin.stop();
@@ -3811,6 +4991,95 @@ describe('DkgNodePlugin', () => {
       else process.env.OPENCLAW_STATE_DIR = prevEnv;
       try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
       try { fs.rmSync(staleInstalledWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - stale setup-owned marker does not override a configured custom stateDir', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const installedWorkspace = path.join(require('os').tmpdir(), `dkg-t75-installed-workspace-${Date.now()}`);
+    const configuredStateDir = path.join(require('os').tmpdir(), `dkg-t75-custom-with-stale-marker-${Date.now()}`);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace,
+        stateDir: configuredStateDir,
+        stateDirSource: 'setup-default',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const targetStateDir = path.join(installedWorkspace, '.dkg-adapter');
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        configuredStateDir.replace(/\\/g, '/'),
+      );
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(configuredStateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(watermarkPath.replace(/\\/g, '/')).not.toContain(targetStateDir.replace(/\\/g, '/'));
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(installedWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(configuredStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - stale setup-owned marker does not make custom .dkg-adapter config direct', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const installedWorkspace = path.join(require('os').tmpdir(), `dkg-t75-installed-marker-${Date.now()}`);
+    const customWorkspace = path.join(require('os').tmpdir(), `dkg-t75-custom-marker-${Date.now()}`);
+    const configuredStateDir = path.join(customWorkspace, '.dkg-adapter');
+    const legacyFile = path.join(customWorkspace, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::stale-marker': { w: 8, b: 2 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace,
+        stateDir: configuredStateDir,
+        stateDirSource: 'setup-default',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(configuredStateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(configuredStateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      expect(fs.existsSync(legacyFile)).toBe(true);
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(installedWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(customWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   });
 
@@ -3851,6 +5120,170 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - OPENCLAW_STATE_DIR pointing at .dkg-adapter uses direct layout and migrates sibling legacy state', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-env-direct-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::env-direct': { w: 7, b: 3 },
+      }));
+      process.env.OPENCLAW_STATE_DIR = stateDir;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::env-direct']).toEqual({ w: 7, b: 3 });
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - user-owned config.stateDir matching installedWorkspace .dkg-adapter keeps nested layout', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-config-direct-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace: workspaceDir,
+        stateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - OPENCLAW_STATE_DIR ending .dkg-adapter migrates sibling legacy state from env-derived workspace', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-env-no-workspace-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::env-untrusted': { w: 9, b: 4 },
+      }));
+      process.env.OPENCLAW_STATE_DIR = stateDir;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::env-untrusted']).toEqual({ w: 9, b: 4 });
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - user-owned config.stateDir ending .dkg-adapter does not migrate sibling legacy state', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-custom-dkg-adapter-${Date.now()}`);
+    const stateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::unrelated': { w: 4, b: 1 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      expect(fs.existsSync(legacyFile)).toBe(true);
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - setup-owned configured stateDir migrates when api.workspaceDir appears later', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
@@ -3877,7 +5310,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(apiWithoutWorkspace);
       const writer = (plugin as any).chatTurnWriter;
       expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
-        staleConfigStateDir.replace(/\\/g, '/'),
+        path.join(staleInstalledWorkspace, '.dkg-adapter').replace(/\\/g, '/'),
       );
 
       const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
@@ -3891,8 +5324,8 @@ describe('DkgNodePlugin', () => {
         workspaceDir,
       } as unknown as OpenClawPluginApi;
       plugin.register(apiWithWorkspace);
-      const targetStateDir = path.join(workspaceDir, '.openclaw');
-      expect(setStateDirSpy).toHaveBeenCalledWith(targetStateDir);
+      const targetStateDir = path.join(workspaceDir, '.dkg-adapter');
+      expect(setStateDirSpy).toHaveBeenCalledWith(targetStateDir, expect.objectContaining({ stateLayout: 'direct' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -3959,7 +5392,7 @@ describe('DkgNodePlugin', () => {
         registerHook: () => {},
         on: () => {},
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
-        runtime: { state: { resolveStateDir: () => path.join(aliasWorkspace, '.openclaw') } },
+        runtime: { state: { resolveStateDir: () => path.join(aliasWorkspace, '.dkg-adapter') } },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiRuntimeAlias);
       expect(setStateDirSpy).toHaveBeenCalledTimes(1);
@@ -4009,7 +5442,7 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toContain(
-        currentWorkspace.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+        currentWorkspace.replace(/\\/g, '/') + '/.dkg-adapter/chat-turn-watermarks.json',
       );
       await plugin.stop();
     } finally {
@@ -4092,6 +5525,96 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - runtime state API .dkg-adapter root uses direct layout without workspaceDir metadata', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-runtime-direct-${Date.now()}`);
+    const runtimeStateDir = path.join(workspaceDir, '.dkg-adapter');
+    const legacyFile = path.join(workspaceDir, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::runtime-direct': { w: 11, b: 5 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => runtimeStateDir } },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(runtimeStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(runtimeStateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
+      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
+      expect(persisted['openclaw:tg:::runtime-direct']).toEqual({ w: 11, b: 5 });
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T75 - runtime state API returning the active .dkg-adapter root does not downgrade direct layout', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-runtime-same-direct-${Date.now()}`);
+    const runtimeStateDir = path.join(workspaceDir, '.dkg-adapter');
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiWithWorkspace: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiWithWorkspace);
+      const writer = (plugin as any).chatTurnWriter;
+      const setStateDirSpy = vi.spyOn(writer, 'setStateDir');
+
+      const apiRuntimeOnly: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        runtime: { state: { resolveStateDir: () => runtimeStateDir } },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiRuntimeOnly);
+
+      expect(setStateDirSpy).not.toHaveBeenCalled();
+      expect(((plugin as any).chatTurnWriter as any).watermarkFilePath.replace(/\\/g, '/')).toBe(
+        path.join(runtimeStateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - writer migrates from configured stateDir when runtime state API appears later', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
@@ -4129,7 +5652,7 @@ describe('DkgNodePlugin', () => {
         runtime: { state: { resolveStateDir: () => runtimeStateDir } },
       } as unknown as OpenClawPluginApi;
       plugin.register(apiWithRuntime);
-      expect(setStateDirSpy).toHaveBeenCalledWith(runtimeStateDir);
+      expect(setStateDirSpy).toHaveBeenCalledWith(runtimeStateDir, expect.objectContaining({ stateLayout: 'nested' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -4171,7 +5694,7 @@ describe('DkgNodePlugin', () => {
 
       process.env.OPENCLAW_STATE_DIR = envStateDir;
       plugin.register(mockApi);
-      expect(setStateDirSpy).toHaveBeenCalledWith(envStateDir);
+      expect(setStateDirSpy).toHaveBeenCalledWith(envStateDir, expect.objectContaining({ stateLayout: 'nested' }));
       expect((plugin as any).chatTurnWriter).toBe(writer);
 
       await new Promise((r) => setTimeout(r, 100));
@@ -4375,7 +5898,7 @@ describe('DkgNodePlugin', () => {
 
     const runtime = {
       state: {
-        resolveStateDir: () => path.join(workspaceDir, '.openclaw'),
+        resolveStateDir: () => path.join(workspaceDir, '.dkg-adapter'),
       },
       channel: {
         routing: {

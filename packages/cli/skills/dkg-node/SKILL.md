@@ -45,67 +45,18 @@ discover other agents on the network.
 
 > Before writing in production, read §6 "Routing: Turn Context Override" — it governs which context graph each turn's operations target.
 
-**Step 1 — Create a Context Graph (project):**
+**Canonical flow:** create a context graph, create an assertion, write triples to
+WM, promote to SWM, then publish SWM to VM. Data must be in SWM before VM
+publishing; the on-chain transaction is a finality signal for data peers already
+received via gossip.
 
 ```bash
-curl -X POST $BASE_URL/api/context-graph/create \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"id": "my-project", "name": "My Project"}'
-```
-
-**Step 2 — Create a Working Memory assertion:**
-
-```bash
-curl -X POST $BASE_URL/api/assertion/create \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"contextGraphId": "my-project", "name": "notes"}'
-```
-
-**Step 3 — Write triples to Working Memory:**
-
-```bash
-curl -X POST $BASE_URL/api/assertion/notes/write \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contextGraphId": "my-project",
-    "quads": [
-      {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person", "graph": ""},
-      {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "\"Alice\"", "graph": ""}
-    ]
-  }'
-```
-
-**Step 4 — Promote to Shared Working Memory (when ready to share):**
-
-```bash
-curl -X POST $BASE_URL/api/assertion/notes/promote \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"contextGraphId": "my-project", "entities": "all"}'
-```
-
-**Step 5 — Publish to Verified Memory (from SWM):**
-
-> Data must be in Shared Working Memory before publishing. The on-chain
-> transaction is a finality signal — peers already have the data via gossip.
-
-```bash
-curl -X POST $BASE_URL/api/shared-memory/publish \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"contextGraphId": "my-project"}'
-```
-
-**Step 6 — Query across any layer:**
-
-```bash
-curl -X POST $BASE_URL/api/query \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-project", "view": "working-memory", "agentAddress": "YOUR_PEER_ID"}'
+curl -X POST $BASE_URL/api/context-graph/create -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"id":"my-project","name":"My Project"}'
+curl -X POST $BASE_URL/api/assertion/create -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","name":"notes"}'
+curl -X POST $BASE_URL/api/assertion/notes/write -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","quads":[{"subject":"https://example.org/alice","predicate":"https://schema.org/name","object":"\"Alice\"","graph":""}]}'
+curl -X POST $BASE_URL/api/assertion/notes/promote -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","entities":"all"}'
+curl -X POST $BASE_URL/api/shared-memory/publish -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'
+curl -X POST $BASE_URL/api/query -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 10","contextGraphId":"my-project","view":"working-memory","agentAddress":"YOUR_PEER_ID"}'
 ```
 
 ## 4. Authentication
@@ -394,103 +345,39 @@ To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/creat
 ## 7. File Ingestion
 
 Upload a document (PDF, DOCX, HTML, CSV, Markdown, etc.) and let the node
-extract RDF triples into a WM assertion. The node runs a deterministic
-two-phase pipeline:
+extract RDF triples into a WM assertion. Non-Markdown formats may pass through a
+registered converter first; Markdown is parsed directly for frontmatter,
+wikilinks, hashtags, Dataview inline fields, and headings. Extracted triples land
+through the same path as `POST /api/assertion/{name}/write`.
 
-1. **Phase 1 (optional converter):** non-Markdown formats go through a
-   registered converter (e.g. MarkItDown for PDF/DOCX/HTML) which produces
-   a Markdown intermediate. `text/markdown` uploads skip Phase 1 — the raw
-   file IS the intermediate.
-2. **Phase 2 (structural extractor):** the Markdown intermediate is parsed
-   for YAML frontmatter, wikilinks (`[[Target]]`), hashtags (`#keyword`),
-   Dataview inline fields (`key:: value`), and heading structure. No LLM —
-   deterministic, node-side, no external calls.
+`POST /api/assertion/{name}/import-file` uses multipart form data:
 
-The extracted triples are written to the target assertion graph via the
-same path as `POST /api/assertion/{name}/write`. Agents can then query,
-promote, or publish them like any other assertion content.
-
-**Supported formats:** see Node Info §1 for the list of registered
-extraction pipelines on your specific node. `text/markdown` is always
-supported (no converter needed).
-
-### Request
-
-`POST /api/assertion/{name}/import-file` with `Content-Type: multipart/form-data`:
-
-| Field           | Required | Description                                                                 |
-|-----------------|----------|-----------------------------------------------------------------------------|
-| `file`          | yes      | The document bytes                                                          |
-| `contextGraphId`| yes      | Target context graph                                                        |
-| `contentType`   | no       | Override the file part's Content-Type header                                |
-| `ontologyRef`   | no       | CG `_ontology` URI for guided Phase 2 extraction                            |
-| `subGraphName`  | no       | Target sub-graph inside the CG (must be registered via `createSubGraph`)    |
-
-### Example
-
-```bash
-curl -X POST $BASE_URL/api/assertion/climate-report/import-file \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "file=@climate-2026.md;type=text/markdown" \
-  -F "contextGraphId=research"
-```
-
-### Response
-
-```json
-{
-  "assertionUri": "did:dkg:context-graph:research/assertion/0xAgentAddr/climate-report",
-  "fileHash": "keccak256:a1b2c3...",
-  "detectedContentType": "application/pdf",
-  "extraction": {
-    "status": "completed",
-    "tripleCount": 14,
-    "pipelineUsed": "application/pdf",
-    "mdIntermediateHash": "keccak256:d4e5f6..."
-  }
-}
-```
-
-Both `fileHash` and `mdIntermediateHash` are `keccak256:<hex>`. `mdIntermediateHash` is only present when Phase 1 actually ran (converter-backed imports like PDF/DOCX); pure-markdown imports leave it undefined.
-
-### Extraction statuses
-
-- `completed` — Phase 1 (if needed) and Phase 2 both ran; triples were written to the assertion graph
-- `skipped` — no converter is registered for the file's content type; the file is stored in the file store but no triples were written. Agents can still reference the file via its `fileHash`
-- `failed` — one of the phases threw an error; check the `error` field in the response. The file is still stored; no triples written.
-
-For synchronous extractions (the V10.0 default) the response carries the
-final status immediately. To re-query later without holding the original
-response, use:
-
-```bash
-curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=research \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-Returns:
-
-| Field | Type | Notes |
+| Field | Required | Description |
 |---|---|---|
-| `assertionUri` | string | The fully-qualified WM assertion URI the record belongs to |
-| `status` | `"in_progress"` \| `"completed"` \| `"skipped"` \| `"failed"` | Job state. Synchronous extractions return `completed` immediately on the import-file response; async flows may return `in_progress` until the pipeline finishes. Poll until terminal |
-| `fileHash` | string | Content hash (e.g. `keccak256:…`) |
-| `detectedContentType` | string | MIME type the daemon resolved for the uploaded bytes |
-| `pipelineUsed` | string \| `null` | Registered pipeline identifier (e.g. `application/pdf`), or `null` when `skipped` |
-| `tripleCount` | number | Triples assembled by the extraction pipeline for this import. On `completed`, this is the count persisted to the assertion graph. On `failed`, the write is atomic — nothing landed — but this field still reflects the count that was attempted, so do NOT read a non-zero `tripleCount` on a `failed` record as partial-write evidence. On `skipped`, always `0` |
-| `rootEntity` | string, optional | Phase 2 root entity URI when the extractor produced one |
-| `mdIntermediateHash` | string, optional | Hash of the Phase 1 markdown intermediate (present only when a converter ran — PDF/DOCX/etc.) |
-| `error` | string, optional | Present only when `status === "failed"`; short message |
-| `startedAt` | string (ISO-8601) | When the extraction job started |
-| `completedAt` | string (ISO-8601), optional | When the extraction job reached a terminal state |
+| `file` | yes | Document bytes |
+| `contextGraphId` | yes | Target context graph |
+| `contentType` | no | Override the file part's Content-Type |
+| `ontologyRef` | no | CG `_ontology` URI for guided extraction |
+| `subGraphName` | no | Target sub-graph, already registered |
 
-`404` if no import-file has run for that assertion (tracker is TTL-pruned).
+```bash
+curl -X POST $BASE_URL/api/assertion/climate-report/import-file -H "Authorization: Bearer $TOKEN" -F "file=@climate-2026.md;type=text/markdown" -F "contextGraphId=research"
+curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=research -H "Authorization: Bearer $TOKEN"
+```
 
-### Retrieving stored files
+Import responses include `assertionUri`, `fileHash`, `detectedContentType`, and
+an `extraction` object with `status` (`in_progress`, `completed`, `skipped`, or
+`failed`), `tripleCount`, `pipelineUsed`, optional `rootEntity`,
+`mdIntermediateHash`, `error`, `startedAt`, and `completedAt`. A failed write is
+atomic; do not treat a non-zero `tripleCount` on `failed` as partial-write
+evidence. `skipped` usually means no converter was available, so the file was
+stored but no triples were written. `GET /api/assertion/{name}/extraction-status?contextGraphId=...`
+returns `404` if no import-file record exists or the tracker was TTL-pruned.
 
-- `GET /api/file/{fileHash}` — fetch a previously-imported file. Accepts `sha256:<hex>`, `keccak256:<hex>`, or bare `<hex>` (treated as sha256) — pass whatever prefix the import response returned.
-
-  The daemon does NOT persist the original content-type. Pass `?contentType=...` to supply it at request time — only types in the safe-preview allowlist (PDF, JSON, plain text, CSV, Markdown, PNG/JPEG/GIF/WEBP) render inline; anything else (including an omitted `?contentType=`) serves as `application/octet-stream` with `Content-Disposition: attachment`. Callers that need inline rendering must remember and re-supply the content-type themselves.
+- `GET /api/file/{fileHash}` — fetch a stored file. Accepts `sha256:<hex>`,
+  `keccak256:<hex>`, or bare `<hex>` (treated as sha256). The daemon does not
+  persist the original content type; pass `?contentType=...` when inline preview
+  matters.
 
 ## 8. Node Administration
 

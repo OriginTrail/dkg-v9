@@ -1,6 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
+import {
+  canonicalPathForCompare,
+  legacyWatermarkPathForStateDir,
+  watermarkPathForStateDir,
+  type ChatTurnWriterStateLayout,
+} from "./state-dir-path.js";
 
 /**
  * Durable direct-channel marker lifecycle:
@@ -64,6 +70,12 @@ interface WatermarkStateSnapshot {
   pendingIndex?: number;
 }
 
+interface LegacyMergeSource {
+  markerKey: string;
+  contentHash: string;
+  watermarkFilePath: string;
+}
+
 /**
  * Canonical shape mirrors `InternalHookEvent` from
  * `@openclaw/openclaw/src/hooks/internal-hook-types.ts`:
@@ -103,6 +115,7 @@ export class ChatTurnWriter {
   private client: any;
   private logger: Logger;
   private stateDir: string;
+  private stateLayout: ChatTurnWriterStateLayout;
   private cachedWatermarks: Map<string, number> = new Map();
   // FIFO queue per conversation key. Two inbound messages arriving before the
   // first reply are both retained; `onMessageSent` consumes the oldest so the
@@ -208,12 +221,31 @@ export class ChatTurnWriter {
   private crossPathInflight: Map<string, number> = new Map();
   private static readonly CROSS_PATH_INFLIGHT_TTL_MS = 60_000;
 
-  constructor(options: { client: any; logger: Logger; stateDir: string }) {
+  constructor(options: {
+    client: any;
+    logger: Logger;
+    stateDir: string;
+    stateLayout?: ChatTurnWriterStateLayout;
+    legacyStateDirs?: string[];
+  }) {
     this.client = options.client;
     this.logger = options.logger;
     this.stateDir = options.stateDir;
-    this.watermarkFilePath = path.join(this.stateDir, "dkg-adapter", "chat-turn-watermarks.json");
-    this.initFromFile();
+    this.stateLayout = options.stateLayout ?? "nested";
+    this.watermarkFilePath = watermarkPathForStateDir(this.stateDir, this.stateLayout);
+    const activeWatermarkFileLoaded = this.initFromFile();
+    this.migrateLegacyWatermarkFiles(
+      this.legacyWatermarkFilePathsForLayout(
+        this.stateDir,
+        this.stateLayout,
+        options.legacyStateDirs ?? [],
+      ),
+      { ignoreMigrationMarkers: !activeWatermarkFileLoaded },
+    );
+  }
+
+  setClient(client: any): void {
+    this.client = client;
   }
 
   /**
@@ -236,14 +268,15 @@ export class ChatTurnWriter {
    *      preserved unchanged.
    *   3. Update internal paths atomically.
    *   4. Write the merged state to the new location.
-   *   5. Best-effort delete the old file so a future fallback resolve
-   *      doesn't repopulate from stale data.
+   *   5. Leave the old file untouched so failed writes can retry and
+   *      operator-owned fallback paths are not silently deleted.
    */
-  async setStateDir(newStateDir: string): Promise<void> {
-    if (newStateDir === this.stateDir) return;
-    const newWatermarkFilePath = path.join(
-      newStateDir, "dkg-adapter", "chat-turn-watermarks.json",
-    );
+  async setStateDir(
+    newStateDir: string,
+    options: { stateLayout?: ChatTurnWriterStateLayout; legacyStateDirs?: string[] } = {},
+  ): Promise<void> {
+    const newStateLayout = options.stateLayout ?? this.stateLayout;
+    const newWatermarkFilePath = watermarkPathForStateDir(newStateDir, newStateLayout);
     if (newWatermarkFilePath === this.watermarkFilePath) return;
     // Drain in-flight work BEFORE we touch any state. flush() awaits
     // all outstanding persists/resets/chains — we must capture their
@@ -276,42 +309,35 @@ export class ChatTurnWriter {
     const mergedWm = new Map(this.cachedWatermarks);
     const mergedBc = new Map(this.w4bSessionCounts);
     const mergedMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
+    let destinationFileLoaded = !destinationFileExisted ? false : true;
     try {
       if (destinationFileExisted) {
-        const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === "object") {
-          for (const [key, val] of Object.entries(parsed)) {
-            let w = -1, b = 0;
-            if (typeof val === "number") {
-              w = val;
-            } else if (val && typeof val === "object") {
-              const obj = val as { w?: unknown; b?: unknown; m?: unknown };
-              if (typeof obj.w === "number") w = obj.w;
-              if (typeof obj.b === "number") b = obj.b;
-              if (obj.m && typeof obj.m === "object" && !Array.isArray(obj.m)) {
-                this.mergeExternalTurnMarkers(
-                  destinationMarkers,
-                  key,
-                  obj.m as Record<string, unknown>,
-                );
-                this.mergeExternalTurnMarkers(
-                  mergedMarkers,
-                  key,
-                  obj.m as Record<string, unknown>,
-                );
-              }
-            }
-            destinationWm.set(key, w);
-            destinationBc.set(key, b);
-            mergedWm.set(key, Math.max(mergedWm.get(key) ?? -1, w));
-            mergedBc.set(key, Math.max(mergedBc.get(key) ?? 0, b));
-          }
-        }
+        this.mergeWatermarkFileInto(
+          newWatermarkFilePath,
+          mergedWm,
+          mergedBc,
+          mergedMarkers,
+          destinationWm,
+          destinationBc,
+          destinationMarkers,
+        );
       }
     } catch (err) {
+      destinationFileLoaded = false;
       this.logger.warn?.("[ChatTurnWriter.setStateDir] Failed to merge destination file; proceeding with current state", { err });
     }
+    const legacyMergeSources = this.mergeLegacyWatermarkFilesInto(
+      this.legacyWatermarkFilePathsForLayout(
+        newStateDir,
+        newStateLayout,
+        options.legacyStateDirs ?? [],
+      ),
+      newWatermarkFilePath,
+      mergedWm,
+      mergedBc,
+      mergedMarkers,
+      { ignoreMigrationMarkers: !destinationFileLoaded },
+    );
     // T27 — Write to the NEW path FIRST; only swap internal state on
     // confirmed success. Pre-fix the swap happened pre-write, so a
     // failed write left `this.stateDir` / `this.watermarkFilePath`
@@ -386,6 +412,9 @@ export class ChatTurnWriter {
         );
       }
     }
+    if (wrote) {
+      this.recordLegacyMigrationSources(newWatermarkFilePath, legacyMergeSources);
+    }
     // T45 - If the initial new-path write failed, live state is still
     // untouched. If only the final post-union rewrite failed, live may
     // hold merged state but the old path is preserved so a retry or
@@ -406,6 +435,7 @@ export class ChatTurnWriter {
       // fallback files manually after confirming no live process still
       // depends on them.
       this.stateDir = newStateDir;
+      this.stateLayout = newStateLayout;
       this.watermarkFilePath = newWatermarkFilePath;
     } else {
       // T23/T27 — Internal state stays at the OLD path so a future
@@ -418,12 +448,13 @@ export class ChatTurnWriter {
     }
   }
 
-  private initFromFile(): void {
+  private initFromFile(): boolean {
     try {
       const dir = path.dirname(this.watermarkFilePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
+      if (!fs.existsSync(this.watermarkFilePath)) return false;
       if (fs.existsSync(this.watermarkFilePath)) {
         const content = fs.readFileSync(this.watermarkFilePath, "utf-8");
         const data = JSON.parse(content);
@@ -463,8 +494,199 @@ export class ChatTurnWriter {
           }
         }
       }
+      return true;
     } catch (err) {
       this.logger.warn?.("[ChatTurnWriter] Failed to load watermarks, starting fresh", { err });
+      return false;
+    }
+  }
+
+  private migrateLegacyWatermarkFiles(
+    legacyWatermarkFilePaths: string[],
+    options: { ignoreMigrationMarkers?: boolean } = {},
+  ): void {
+    const mergedSources = this.mergeLegacyWatermarkFilesInto(
+      legacyWatermarkFilePaths,
+      this.watermarkFilePath,
+      this.cachedWatermarks,
+      this.w4bSessionCounts,
+      this.externalTurnMarkers,
+      options,
+    );
+    if (mergedSources.length === 0) return;
+    if (this.writeWatermarkFile()) {
+      this.recordLegacyMigrationSources(this.watermarkFilePath, mergedSources);
+      this.logger.info?.(
+        "[ChatTurnWriter] Migrated legacy chat-turn watermark state into the active state dir.",
+        { watermarkFilePath: this.watermarkFilePath },
+      );
+    } else {
+      this.logger.warn?.(
+        "[ChatTurnWriter] Failed to write migrated legacy watermark state; preserving legacy source files for retry.",
+        { watermarkFilePath: this.watermarkFilePath },
+      );
+    }
+  }
+
+  private legacyWatermarkFilePathsForLayout(
+    stateDir: string,
+    stateLayout: ChatTurnWriterStateLayout,
+    legacyStateDirs: string[],
+  ): string[] {
+    const sameDirOppositeLayoutWatermarkPath = stateLayout === "direct"
+      ? legacyWatermarkPathForStateDir(stateDir)
+      : watermarkPathForStateDir(stateDir, "direct");
+    return [
+      sameDirOppositeLayoutWatermarkPath,
+      ...legacyStateDirs.map((legacyStateDir) => legacyWatermarkPathForStateDir(legacyStateDir)),
+    ];
+  }
+
+  private mergeLegacyWatermarkFilesInto(
+    legacyWatermarkFilePaths: string[],
+    targetWatermarkFilePath: string,
+    targetWm: Map<string, number>,
+    targetBc: Map<string, number>,
+    targetMarkers: Map<string, Map<string, number>>,
+    options: { ignoreMigrationMarkers?: boolean } = {},
+  ): LegacyMergeSource[] {
+    const targetCanonical = canonicalPathForCompare(targetWatermarkFilePath);
+    const migratedLegacySources = options.ignoreMigrationMarkers
+      ? new Map<string, string>()
+      : this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
+    const seen = new Set<string>();
+    const mergedSources: LegacyMergeSource[] = [];
+    for (const legacyWatermarkFilePath of legacyWatermarkFilePaths) {
+      const legacyCanonical = canonicalPathForCompare(legacyWatermarkFilePath);
+      if (legacyCanonical === targetCanonical || seen.has(legacyCanonical)) continue;
+      seen.add(legacyCanonical);
+      if (!fs.existsSync(legacyWatermarkFilePath)) continue;
+      try {
+        const legacyContentHash = this.hashWatermarkFileForMigration(legacyWatermarkFilePath);
+        if (migratedLegacySources.get(legacyCanonical) === legacyContentHash) continue;
+        this.mergeWatermarkFileInto(
+          legacyWatermarkFilePath,
+          targetWm,
+          targetBc,
+          targetMarkers,
+        );
+        mergedSources.push({
+          markerKey: legacyCanonical,
+          contentHash: legacyContentHash,
+          watermarkFilePath: legacyWatermarkFilePath,
+        });
+        this.logger.info?.(
+          "[ChatTurnWriter] Merged legacy chat-turn watermark state into active state.",
+          { legacyWatermarkFilePath, targetWatermarkFilePath },
+        );
+      } catch (err) {
+        this.logger.warn?.(
+          "[ChatTurnWriter] Failed to merge legacy chat-turn watermark state; preserving legacy source for retry.",
+          { err, legacyWatermarkFilePath, targetWatermarkFilePath },
+        );
+      }
+    }
+    return mergedSources;
+  }
+
+  private legacyMigrationMarkerPath(targetWatermarkFilePath: string): string {
+    return `${targetWatermarkFilePath}.legacy-migrated.json`;
+  }
+
+  private readLegacyMigrationSourceHashes(targetWatermarkFilePath: string): Map<string, string> {
+    const markerPath = this.legacyMigrationMarkerPath(targetWatermarkFilePath);
+    if (!fs.existsSync(markerPath)) return new Map();
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as { migratedLegacyWatermarkFiles?: unknown };
+      const values = marker?.migratedLegacyWatermarkFiles;
+      if (!values || typeof values !== "object" || Array.isArray(values)) return new Map();
+      return new Map(
+        Object.entries(values)
+          .filter((entry): entry is [string, string] =>
+            typeof entry[0] === "string" &&
+            typeof entry[1] === "string"
+          ),
+      );
+    } catch (err) {
+      this.logger.warn?.(
+        "[ChatTurnWriter] Failed to read legacy watermark migration marker; legacy sources may be retried.",
+        { err, markerPath },
+      );
+      return new Map();
+    }
+  }
+
+  private hashWatermarkFileForMigration(watermarkFilePath: string): string {
+    return createHash("sha256")
+      .update(fs.readFileSync(watermarkFilePath))
+      .digest("hex");
+  }
+
+  private recordLegacyMigrationSources(
+    targetWatermarkFilePath: string,
+    mergedSources: LegacyMergeSource[],
+  ): void {
+    if (mergedSources.length === 0) return;
+    const markerPath = this.legacyMigrationMarkerPath(targetWatermarkFilePath);
+    try {
+      const migratedLegacyWatermarkFiles = this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
+      for (const source of mergedSources) {
+        migratedLegacyWatermarkFiles.set(source.markerKey, source.contentHash);
+      }
+      const dir = path.dirname(markerPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        markerPath,
+        `${JSON.stringify({
+          migratedLegacyWatermarkFiles: Object.fromEntries(
+            [...migratedLegacyWatermarkFiles.entries()].sort(([left], [right]) =>
+              left.localeCompare(right)
+            ),
+          ),
+        }, null, 2)}\n`,
+        "utf-8",
+      );
+    } catch (err) {
+      this.logger.warn?.(
+        "[ChatTurnWriter] Failed to write legacy watermark migration marker; legacy sources may be retried.",
+        { err, markerPath, legacyWatermarkFilePaths: mergedSources.map((source) => source.watermarkFilePath) },
+      );
+    }
+  }
+
+  private mergeWatermarkFileInto(
+    sourceWatermarkFilePath: string,
+    targetWm: Map<string, number>,
+    targetBc: Map<string, number>,
+    targetMarkers: Map<string, Map<string, number>>,
+    mirrorWm?: Map<string, number>,
+    mirrorBc?: Map<string, number>,
+    mirrorMarkers?: Map<string, Map<string, number>>,
+  ): void {
+    const content = fs.readFileSync(sourceWatermarkFilePath, "utf-8");
+    const data = JSON.parse(content);
+    if (!data || typeof data !== "object") return;
+    for (const [key, val] of Object.entries(data)) {
+      if (typeof val === "number") {
+        targetWm.set(key, Math.max(targetWm.get(key) ?? -1, val));
+        mirrorWm?.set(key, val);
+      } else if (val && typeof val === "object") {
+        const obj = val as { w?: unknown; b?: unknown; m?: unknown };
+        if (typeof obj.w === "number") {
+          targetWm.set(key, Math.max(targetWm.get(key) ?? -1, obj.w));
+          mirrorWm?.set(key, obj.w);
+        }
+        if (typeof obj.b === "number") {
+          targetBc.set(key, Math.max(targetBc.get(key) ?? 0, obj.b));
+          mirrorBc?.set(key, obj.b);
+        }
+        if (obj.m && typeof obj.m === "object" && !Array.isArray(obj.m)) {
+          this.mergeExternalTurnMarkers(targetMarkers, key, obj.m as Record<string, unknown>);
+          if (mirrorMarkers) {
+            this.mergeExternalTurnMarkers(mirrorMarkers, key, obj.m as Record<string, unknown>);
+          }
+        }
+      }
     }
   }
 

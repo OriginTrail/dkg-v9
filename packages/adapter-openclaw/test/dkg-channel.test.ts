@@ -118,6 +118,293 @@ describe('DkgChannelPlugin', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
   });
 
+  it('captures full runtime config when api.config is adapter plugin config', () => {
+    const { runtime } = makeMockRuntime();
+    const fullConfig = {
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: '/runtime-workspace',
+        },
+      },
+    };
+    const api = makeApi({
+      config: {
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+      } as any,
+      runtime: {
+        ...runtime,
+        config: fullConfig,
+      },
+      registerChannel: trackFn(),
+      registerHttpRoute: trackFn(),
+    } as any);
+
+    plugin.register(api);
+
+    expect((plugin as any).cfg).toBe(fullConfig);
+  });
+
+  it('overlays current route metadata onto fallback merged runtime config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged route reply' });
+      },
+    });
+    const staleRuntimeConfig = {
+      agents: { defaults: { workspace: '/stale-runtime-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'stale-cg', ttlMs: 10_000 },
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+    };
+    const currentRouteMetadata = {
+      agents: { defaults: { workspace: '/live-cfg-workspace' } },
+      session: { projectContextGraphId: 'live-cg' },
+      workspace: '/live-cfg-workspace',
+    };
+    const api = makeApi({
+      cfg: currentRouteMetadata,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-merged-route', 'owner');
+
+    expect(reply.text).toBe('Merged route reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      agents: { defaults: { workspace: '/live-cfg-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'live-cg', ttlMs: 10_000 },
+      workspace: '/live-cfg-workspace',
+      plugins: staleRuntimeConfig.plugins,
+    });
+  });
+
+  it('uses direct plugin config as dispatch cfg fallback when no merged config exists', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct config reply' });
+      },
+    });
+    const directConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+    };
+    const fallbackRoute = trackAsyncFn(async () => ({
+      text: 'fallback',
+      correlationId: 'corr-direct-config',
+    }));
+    const api = makeApi({
+      config: directConfig,
+      runtime,
+      routeInboundMessage: fallbackRoute,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-config', 'owner');
+
+    expect(reply.text).toBe('Direct config reply');
+    expect(fallbackRoute.calls).toHaveLength(0);
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(directConfig);
+  });
+
+  it('keeps direct api.cfg ahead of stale api.pluginConfig for dispatch cfg fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct cfg reply' });
+      },
+    });
+    const liveConfig = {
+      daemonUrl: 'http://localhost:9300',
+      channel: { enabled: true, port: 0 },
+    };
+    const stalePluginConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      cfg: liveConfig,
+      pluginConfig: stalePluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-cfg', 'owner');
+
+    expect(reply.text).toBe('Direct cfg reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(liveConfig);
+  });
+
+  it.each(['cfg', 'config'] as const)('merges metadata-only api.%s with current api.pluginConfig for dispatch cfg fallback', async (sourceKey) => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged metadata reply' });
+      },
+    });
+    const metadataOnlyConfig = {
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    };
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    };
+    const api = makeApi({
+      [sourceKey]: metadataOnlyConfig,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-metadata-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Merged metadata reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(metadataOnlyConfig);
+    expect(dispatchCfg).toMatchObject({
+      ...metadataOnlyConfig,
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    });
+  });
+
+  it('keeps current api.pluginConfig ahead of runtime direct config fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Plugin config reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9400',
+      channel: { enabled: true, port: 0 },
+    };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      pluginConfig: currentPluginConfig,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Plugin config reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(currentPluginConfig);
+  });
+
+  it('keeps route metadata while overlaying api.pluginConfig when api.cfg is not merged config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Route metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9500',
+      channel: { enabled: true, port: 0 },
+    };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const routeMetadata = {
+      agents: { defaults: { workspace: '/route-workspace' } },
+      session: { ttlMs: 30_000 },
+      workspace: '/route-workspace',
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Route metadata fallback reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(routeMetadata);
+    expect(dispatchCfg).toMatchObject({
+      agents: routeMetadata.agents,
+      session: routeMetadata.session,
+      workspace: routeMetadata.workspace,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+    expect((routeMetadata as any).plugins).toBeUndefined();
+  });
+
+  it('keeps session-only route metadata while overlaying direct plugin config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Session metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9510',
+      channel: { enabled: true, port: 0 },
+    };
+    const routeMetadata = {
+      session: { dmScope: 'main', ttlMs: 30_000 },
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-session-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Session metadata fallback reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      session: routeMetadata.session,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+  });
+
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
     const reassertSpy = vi.fn();
     plugin.setPreDispatchReAssert(reassertSpy);
@@ -1471,7 +1758,7 @@ describe('DkgChannelPlugin', () => {
     expect(reply.text).toBe('Hello from legacy runtime');
     expect(dispatchCalls).toHaveLength(1);
     expect(dispatchCalls[0][0]).toMatchObject({ BodyForAgent: 'Hello', SessionKey: 'session-1' });
-    expect(dispatchCalls[0][1]).toBe(mockCfg);
+    expect(dispatchCalls[0][1]).toEqual(mockCfg);
     expect(dispatchCalls[0][2]).toMatchObject({
       deliver: expect.any(Function),
       onError: expect.any(Function),

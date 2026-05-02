@@ -32,6 +32,14 @@ import type {
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import type { ChatTurnWriter } from './ChatTurnWriter.js';
+import {
+  isStateMetadataOnlyAdapterConfig,
+  isObjectRecord,
+  looksLikeAdapterPluginConfig,
+  mergeAdapterPluginConfigs,
+  resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
+} from './openclaw-config.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -399,6 +407,7 @@ export class DkgChannelPlugin {
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
   private serverStop: Promise<void> | null = null;
+  private serverStopShouldUpdateGatewayStatus = false;
   private gatewayLifecycleStop: (() => void) | null = null;
   private gatewayLifecycleOwner: object | null = null;
   private gatewayLifecyclePendingOwner: object | null = null;
@@ -422,9 +431,13 @@ export class DkgChannelPlugin {
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
-    private readonly client: DkgDaemonClient,
+    private client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  setClient(client: DkgDaemonClient): void {
+    this.client = client;
   }
 
   /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
@@ -497,7 +510,7 @@ export class DkgChannelPlugin {
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg = (api as any).cfg ?? (api as any).config ?? this.runtime?.cfg ?? this.runtime?.config;
+    this.cfg = resolveChannelDispatchConfig(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {
@@ -633,8 +646,12 @@ export class DkgChannelPlugin {
   }
 
   async stop(options: { updateGatewayStatus?: boolean } = {}): Promise<void> {
-    if (this.serverStop) return this.serverStop;
     const updateGatewayStatus = options.updateGatewayStatus !== false;
+    if (this.serverStop) {
+      if (updateGatewayStatus) this.serverStopShouldUpdateGatewayStatus = true;
+      return this.serverStop;
+    }
+    this.serverStopShouldUpdateGatewayStatus = updateGatewayStatus;
     const stopWork = Promise.resolve().then(async () => {
       this.stopping = true;
       this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
@@ -680,7 +697,7 @@ export class DkgChannelPlugin {
         this.clearPendingMarkerPersistence();
       }
       this.stopDrainDeadlineAt = null;
-      if (updateGatewayStatus) {
+      if (this.serverStopShouldUpdateGatewayStatus) {
         this.reportGatewayLifecycleStopped(this.gatewayLifecycleStatusContext, this.gatewayLifecycleStatusOwner);
       }
       this.gatewayLifecycleStop?.();
@@ -693,6 +710,7 @@ export class DkgChannelPlugin {
     } finally {
       if (this.serverStop === stopWork) {
         this.serverStop = null;
+        this.serverStopShouldUpdateGatewayStatus = false;
       }
     }
   }
@@ -2459,4 +2477,109 @@ function getErrorMessage(err: unknown): string {
     return err.message;
   }
   return String(err);
+}
+
+function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  const sources = [
+    directAdapterConfigFrom(anyApi?.cfg),
+    directAdapterConfigFrom(anyApi?.config),
+    directAdapterConfigFrom(anyApi?.pluginConfig),
+    directAdapterConfigFrom(runtime?.cfg),
+    directAdapterConfigFrom(runtime?.config),
+    directAdapterConfigFrom(runtime?.pluginConfig),
+  ].filter(isObjectRecord);
+  let metadataOverlay: Record<string, unknown> | undefined;
+  for (const source of sources) {
+    if (isStateMetadataOnlyAdapterConfig(source)) {
+      metadataOverlay ??= source;
+      continue;
+    }
+    return metadataOverlay
+      ? mergeAdapterPluginConfigs(source, metadataOverlay)
+      : source;
+  }
+  return metadataOverlay;
+}
+
+function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const mergedConfig = resolveOpenClawMergedConfig(api);
+  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
+  if (mergedConfig) {
+    return routeConfig
+      ? mergeRouteMetadataWithMergedConfig(mergedConfig, routeConfig)
+      : mergedConfig;
+  }
+
+  const directConfig = resolveDirectAdapterConfigFallback(api);
+  if (routeConfig && directConfig) {
+    return mergeRouteConfigWithAdapterConfig(routeConfig, directConfig);
+  }
+
+  return directConfig ?? routeConfig;
+}
+
+function mergeRouteMetadataWithMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  routeConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const priorAgents = isObjectRecord(mergedConfig.agents) ? mergedConfig.agents : undefined;
+  const nextAgents = isObjectRecord(routeConfig.agents) ? routeConfig.agents : undefined;
+  const priorSession = isObjectRecord(mergedConfig.session) ? mergedConfig.session : undefined;
+  const nextSession = isObjectRecord(routeConfig.session) ? routeConfig.session : undefined;
+  const result: Record<string, unknown> = {
+    ...mergedConfig,
+    ...routeConfig,
+    plugins: mergedConfig.plugins,
+  };
+  if (priorAgents || nextAgents) {
+    result.agents = { ...(priorAgents ?? {}), ...(nextAgents ?? {}) };
+    const priorDefaults = isObjectRecord(priorAgents?.defaults) ? priorAgents.defaults : undefined;
+    const nextDefaults = isObjectRecord(nextAgents?.defaults) ? nextAgents.defaults : undefined;
+    if (priorDefaults || nextDefaults) {
+      (result.agents as Record<string, unknown>).defaults = {
+        ...(priorDefaults ?? {}),
+        ...(nextDefaults ?? {}),
+      };
+    }
+  }
+  if (priorSession || nextSession) {
+    result.session = { ...(priorSession ?? {}), ...(nextSession ?? {}) };
+  }
+  return result;
+}
+
+function directAdapterConfigFrom(candidate: unknown): Record<string, unknown> | undefined {
+  return isObjectRecord(candidate) && looksLikeAdapterPluginConfig(candidate)
+    ? candidate
+    : undefined;
+}
+
+function mergeRouteConfigWithAdapterConfig(
+  routeConfig: Record<string, unknown>,
+  adapterConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(routeConfig.plugins) ? routeConfig.plugins : undefined;
+  const entries = isObjectRecord(plugins?.entries) ? plugins.entries : undefined;
+  const existingEntry = isObjectRecord(entries?.['adapter-openclaw'])
+    ? entries['adapter-openclaw'] as Record<string, unknown>
+    : undefined;
+  const existingAdapterConfig = isObjectRecord(existingEntry?.config)
+    ? existingEntry.config as Record<string, unknown>
+    : undefined;
+
+  return {
+    ...routeConfig,
+    plugins: {
+      ...(plugins ?? {}),
+      entries: {
+        ...(entries ?? {}),
+        'adapter-openclaw': {
+          ...(existingEntry ?? {}),
+          config: mergeAdapterPluginConfigs(existingAdapterConfig, adapterConfig),
+        },
+      },
+    },
+  };
 }

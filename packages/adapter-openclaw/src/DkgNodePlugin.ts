@@ -44,7 +44,14 @@ import type {
 } from './types.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { canonicalPathForCompare } from './state-dir-path.js';
+import {
+  canonicalPathForCompare,
+  defaultStateDirForWorkspace,
+  legacyStateDirForWorkspace,
+  workspaceDirForDefaultStateDir,
+  type ChatTurnWriterStateLayout,
+} from './state-dir-path.js';
+import { mergeAdapterPluginConfigs } from './openclaw-config.js';
 
 // Same eth-address shape accepted by `toEip55Checksum`. Kept local so the
 // dkg_query explicit `agent_address` normalization can avoid throwing for
@@ -64,6 +71,8 @@ const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   nodeServedSkill: true,
 } as const;
 
+const DEFAULT_DAEMON_URL = 'http://127.0.0.1:9200';
+
 type ChatTurnWriterStateDirSource =
   | 'runtime'
   | 'env'
@@ -80,6 +89,14 @@ const STATE_DIR_SOURCE_PRIORITY: Record<ChatTurnWriterStateDirSource, number> = 
   'setup-default': 4,
   home: 5,
 };
+
+function channelConfigFingerprint(config: DkgOpenClawConfig['channel']): string | null {
+  if (!config?.enabled) return null;
+  return JSON.stringify({
+    enabled: true,
+    port: config.port ?? 9201,
+  });
+}
 
 const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
@@ -128,7 +145,7 @@ const AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS = 30_000;
 const AUTO_RECALL_QUERY_MAX_CHARS = 500;
 
 export class DkgNodePlugin {
-  private readonly config: DkgOpenClawConfig;
+  private config: DkgOpenClawConfig;
 
   // Resolved DKG home directory. Computed once at register() time via
   // `resolveDkgHome` so DkgDaemonClient reads the node-level `auth.token`
@@ -137,9 +154,16 @@ export class DkgNodePlugin {
 
   // HTTP client to daemon — used by all tools and integration modules
   private client!: DkgDaemonClient;
+  private daemonClientGeneration = 0;
 
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
+  private channelPluginConfigFingerprint: string | null = null;
+  private channelPluginStopInFlight: Promise<boolean> | null = null;
+  private channelPluginStartQueued = false;
+  private pendingChannelStartApi: OpenClawPluginApi | null = null;
+  private pendingChannelStartRegistrationMode: string | null = null;
+  private pendingChannelStartFingerprint: string | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private hookSurface: HookSurface | null = null;
   private hookSurfaceApi: OpenClawPluginApi | null = null;
@@ -209,6 +233,7 @@ export class DkgNodePlugin {
   // the writer at the upgraded location.
   private chatTurnWriterStateDir: string | null = null;
   private chatTurnWriterStateDirSource: ChatTurnWriterStateDirSource | null = null;
+  private chatTurnWriterStateLayout: ChatTurnWriterStateLayout | null = null;
   // T24 — Tracks the target stateDir of an in-flight async migration.
   // The migration is fire-and-forget from `register()` so we need a
   // separate flag from `chatTurnWriterStateDir` (which only flips on
@@ -377,6 +402,59 @@ export class DkgNodePlugin {
     this.config = { ...config };
   }
 
+  updateConfig(config?: DkgOpenClawConfig, options: { partial?: boolean } = {}): void {
+    if (!config || typeof config !== 'object') return;
+    const previousConfig = this.config;
+    this.config = options.partial
+      ? mergeAdapterPluginConfigs(
+        this.config as unknown as Record<string, unknown>,
+        config as unknown as Record<string, unknown>,
+      ) as unknown as DkgOpenClawConfig
+      : { ...config };
+    this.refreshDaemonClientForConfigUpdate(previousConfig);
+  }
+
+  private resolveDaemonClientOptions(config: DkgOpenClawConfig): { daemonUrl: string; dkgHome: string } {
+    const daemonUrl = config.daemonUrl ?? DEFAULT_DAEMON_URL;
+    return {
+      daemonUrl,
+      dkgHome: config.dkgHome ?? resolveDkgHome({ daemonUrl }),
+    };
+  }
+
+  private refreshDaemonClientForConfigUpdate(previousConfig: DkgOpenClawConfig): void {
+    if (!this.initialized) return;
+    const previous = this.resolveDaemonClientOptions(previousConfig);
+    const next = this.resolveDaemonClientOptions(this.config);
+    if (previous.daemonUrl === next.daemonUrl && previous.dkgHome === next.dkgHome) return;
+
+    this.daemonClientGeneration += 1;
+    this.resetDaemonScopedCachesForClientChange();
+    this.dkgHome = next.dkgHome;
+    this.client = new DkgDaemonClient({ baseUrl: next.daemonUrl, dkgHome: next.dkgHome });
+    this.chatTurnWriter?.setClient(this.client);
+    this.channelPlugin?.setClient(this.client);
+    this.memoryPlugin?.setClient(this.client, { reRegister: this.config.memory?.enabled === true });
+  }
+
+  private resetDaemonScopedCachesForClientChange(): void {
+    this.nodePeerId = undefined;
+    this.peerIdProbeInFlight = null;
+    this.nodeAgentAddress = undefined;
+    this.agentAddressProbeInFlight = null;
+    this.availableContextGraphCache = [];
+    this.availableContextGraphCacheAt = 0;
+    this.refreshStateInFlight = null;
+    if (this.peerIdDeferredRetryTimer) {
+      clearTimeout(this.peerIdDeferredRetryTimer);
+      this.peerIdDeferredRetryTimer = null;
+    }
+    this.clearLocalAgentIntegrationRetry();
+    this.localAgentIntegrationRetryAttempt = 0;
+    this.lastLocalAgentIntegrationWarnReason = null;
+    this.lastLocalAgentIntegrationLoadError = null;
+  }
+
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
   /**
@@ -473,7 +551,7 @@ export class DkgNodePlugin {
         // null `chatTurnWriter` and W3/W4a/W4b silently never install.
         this.ensureChatTurnWriter(api);
       }
-      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled, registrationMode });
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
@@ -486,7 +564,7 @@ export class DkgNodePlugin {
     }
 
     // Create daemon client — used by all tools and integration modules
-    const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
+    const daemonUrl = this.config.daemonUrl ?? DEFAULT_DAEMON_URL;
 
     // Resolve the DKG home directory once for this plugin's lifetime so the
     // client loads the same node-level auth.token the running daemon uses.
@@ -526,7 +604,7 @@ export class DkgNodePlugin {
     this.installHooksIfNeeded(api, { runtimeHooksEnabled: runtimeEnabled });
 
     // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled, registrationMode });
 
     if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
@@ -562,11 +640,11 @@ export class DkgNodePlugin {
     //   1. `runtime.state.resolveStateDir()` — gateway-provided, workspace-scoped.
     //   2. `OPENCLAW_STATE_DIR` env override — operator-controlled, opt-in.
     //   3. explicit `config.stateDir` — user-controlled config override.
-    //   4. `api.workspaceDir + .openclaw` — gateway-provided current workspace.
+    //   4. `api.workspaceDir + .dkg-adapter` — gateway-provided current workspace.
     //   5. setup-owned `config.stateDir` — fallback for older gateways.
     //   6. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
-    const homeDir = `${homedir()}/.openclaw`;
+    const homeDir = join(homedir(), '.openclaw');
     // T26 — Normalize each source through trim+non-empty before the
     // `??` chain. Pre-fix `??` treated empty string as a real value,
     // so an accidentally-empty `OPENCLAW_STATE_DIR=''` (or whitespace-
@@ -582,16 +660,29 @@ export class DkgNodePlugin {
     const trimmedWorkspaceDir = trimmedNonEmpty(workspaceDir);
     const configuredStateDir = trimmedNonEmpty(this.config.stateDir);
     const configuredStateDirSource = trimmedNonEmpty(this.config.stateDirSource);
+    const configuredHasSetupDefaultSource = configuredStateDirSource === 'setup-default';
     const setupWorkspaceDir = trimmedNonEmpty(this.config.installedWorkspace);
-    const setupDefaultStateDir = setupWorkspaceDir ? join(setupWorkspaceDir, '.openclaw') : undefined;
+    const setupDefaultStateDir = setupWorkspaceDir ? defaultStateDirForWorkspace(setupWorkspaceDir) : undefined;
+    const legacySetupDefaultStateDir = setupWorkspaceDir ? legacyStateDirForWorkspace(setupWorkspaceDir) : undefined;
+    const matchesPath = (a: string | undefined, b: string | undefined): boolean =>
+      !!a && !!b && canonicalPathForCompare(a) === canonicalPathForCompare(b);
+    const configuredDefaultWorkspaceDir =
+      configuredStateDir ? workspaceDirForDefaultStateDir(configuredStateDir) : undefined;
     const configuredIsSetupDefault =
-      configuredStateDirSource === 'setup-default' &&
+      configuredHasSetupDefaultSource &&
       !!configuredStateDir &&
-      !!setupDefaultStateDir &&
-      canonicalPathForCompare(configuredStateDir) === canonicalPathForCompare(setupDefaultStateDir);
-    const workspaceStateDir = trimmedWorkspaceDir ? join(trimmedWorkspaceDir, '.openclaw') : undefined;
+      (
+        matchesPath(configuredStateDir, setupDefaultStateDir) ||
+        matchesPath(configuredStateDir, legacySetupDefaultStateDir) ||
+        (!setupWorkspaceDir && !!configuredDefaultWorkspaceDir)
+      );
+    const workspaceStateDir = trimmedWorkspaceDir ? defaultStateDirForWorkspace(trimmedWorkspaceDir) : undefined;
     const runtimeStateDir = trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.());
+    const runtimeWorkspaceDir = runtimeStateDir ? workspaceDirForDefaultStateDir(runtimeStateDir) : undefined;
     const envStateDir = trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR);
+    const envWorkspaceDir = envStateDir ? workspaceDirForDefaultStateDir(envStateDir) : undefined;
+    const configuredSetupWorkspaceDir =
+      configuredIsSetupDefault ? setupWorkspaceDir ?? configuredDefaultWorkspaceDir : undefined;
     let stateDir = homeDir;
     let stateDirSource: ChatTurnWriterStateDirSource = 'home';
     if (runtimeStateDir) {
@@ -600,16 +691,55 @@ export class DkgNodePlugin {
     } else if (envStateDir) {
       stateDir = envStateDir;
       stateDirSource = 'env';
-    } else if (!configuredIsSetupDefault && configuredStateDir) {
+    } else if (!configuredHasSetupDefaultSource && configuredStateDir) {
       stateDir = configuredStateDir;
       stateDirSource = 'config';
     } else if (workspaceStateDir) {
       stateDir = workspaceStateDir;
       stateDirSource = 'workspace';
+    } else if (configuredIsSetupDefault && setupDefaultStateDir) {
+      stateDir = setupDefaultStateDir;
+      stateDirSource = 'setup-default';
+    } else if (!configuredStateDir && configuredHasSetupDefaultSource && setupDefaultStateDir) {
+      stateDir = setupDefaultStateDir;
+      stateDirSource = 'setup-default';
     } else if (configuredStateDir) {
       stateDir = configuredStateDir;
-      stateDirSource = 'setup-default';
+      stateDirSource = configuredIsSetupDefault ? 'setup-default' : 'config';
     }
+
+    const workspaceDerivedStateDirs =
+      stateDirSource === 'config' || stateDirSource === 'home'
+        ? []
+        : [
+          runtimeWorkspaceDir ? defaultStateDirForWorkspace(runtimeWorkspaceDir) : undefined,
+          envWorkspaceDir ? defaultStateDirForWorkspace(envWorkspaceDir) : undefined,
+          configuredSetupWorkspaceDir ? defaultStateDirForWorkspace(configuredSetupWorkspaceDir) : undefined,
+          workspaceStateDir,
+          setupDefaultStateDir,
+        ].filter((candidate): candidate is string => !!candidate);
+    const stateDirIsKnownWorkspaceDefault = workspaceDerivedStateDirs.some((candidate) =>
+      matchesPath(stateDir, candidate),
+    );
+    const stateLayout: ChatTurnWriterStateLayout =
+      stateDirIsKnownWorkspaceDefault ? 'direct' : 'nested';
+    const legacyStateDirs = (
+      stateDirSource === 'config' || stateDirSource === 'home'
+        ? []
+        : [
+          runtimeWorkspaceDir,
+          envWorkspaceDir,
+          configuredSetupWorkspaceDir,
+          trimmedWorkspaceDir,
+          setupWorkspaceDir,
+        ]
+    )
+      .filter((candidate): candidate is string => !!candidate)
+      .filter((candidate) => matchesPath(stateDir, defaultStateDirForWorkspace(candidate)))
+      .map((candidate) => legacyStateDirForWorkspace(candidate))
+      .filter((candidate, index, all) =>
+        all.findIndex((other) => matchesPath(other, candidate)) === index,
+      );
 
     const inferCurrentStateDirSource = (currentStateDir: string): ChatTurnWriterStateDirSource => {
       const current = canonicalPathForCompare(currentStateDir);
@@ -617,13 +747,14 @@ export class DkgNodePlugin {
         !!candidate && current === canonicalPathForCompare(candidate);
       if (matches(runtimeStateDir)) return 'runtime';
       if (matches(envStateDir)) return 'env';
-      if (matches(configuredStateDir)) return configuredIsSetupDefault ? 'setup-default' : 'config';
+      if (matches(setupDefaultStateDir)) return 'setup-default';
+      if (matches(configuredStateDir)) return configuredHasSetupDefaultSource ? 'setup-default' : 'config';
       if (matches(workspaceStateDir)) return 'workspace';
       if (current === canonicalPathForCompare(homeDir)) return 'home';
       return 'config';
     };
     const canMigrateWithinSource = (source: ChatTurnWriterStateDirSource): boolean =>
-      source === 'runtime' || source === 'env' || source === 'workspace';
+      source === 'runtime' || source === 'env' || source === 'workspace' || source === 'setup-default';
     const stateDirSourceLabel = (source: ChatTurnWriterStateDirSource, currentStateDir: string): string => {
       if (source === 'home') return `fallback '${homeDir}'`;
       if (source === 'setup-default') return `setup-owned '${currentStateDir}'`;
@@ -641,7 +772,11 @@ export class DkgNodePlugin {
       if (!currentStateDir) return;
       const currentCanonicalStateDir = canonicalPathForCompare(currentStateDir);
       const nextCanonicalStateDir = canonicalPathForCompare(stateDir);
-      if (currentCanonicalStateDir === nextCanonicalStateDir) return;
+      const currentStateLayout = this.chatTurnWriterStateLayout ?? 'nested';
+      const sameStateFile =
+        currentCanonicalStateDir === nextCanonicalStateDir &&
+        currentStateLayout === stateLayout;
+      if (sameStateFile) return;
       // T24 — Suppress re-trigger when an async migration to this
       // exact stateDir is already in flight. Without this, two
       // concurrent register() calls before the migration settles
@@ -653,15 +788,20 @@ export class DkgNodePlugin {
       ) return;
       const currentStateDirSource =
         this.chatTurnWriterStateDirSource ?? inferCurrentStateDirSource(currentStateDir);
+      const isSameDirLayoutMigration =
+        currentCanonicalStateDir === nextCanonicalStateDir &&
+        currentStateLayout !== stateLayout &&
+        stateDirSource !== 'home';
       const isUpgrade =
-        (
+        isSameDirLayoutMigration ||
+        ((
           STATE_DIR_SOURCE_PRIORITY[stateDirSource] < STATE_DIR_SOURCE_PRIORITY[currentStateDirSource] ||
           (
             stateDirSource === currentStateDirSource &&
             canMigrateWithinSource(stateDirSource)
           )
         ) &&
-        stateDirSource !== 'home';
+        stateDirSource !== 'home');
       if (!isUpgrade) return; // Don't downgrade or sidestep.
       const sourceLabel = stateDirSourceLabel(currentStateDirSource, currentStateDir);
       api.logger.info?.(
@@ -684,10 +824,11 @@ export class DkgNodePlugin {
       // would suppress all future retries because the field would
       // already match the desired target.
       this.chatTurnWriterMigrationTarget = stateDir;
-      this.chatTurnWriter.setStateDir(stateDir).then(
+      this.chatTurnWriter.setStateDir(stateDir, { stateLayout, legacyStateDirs }).then(
         () => {
           this.chatTurnWriterStateDir = stateDir;
           this.chatTurnWriterStateDirSource = stateDirSource;
+          this.chatTurnWriterStateLayout = stateLayout;
           this.chatTurnWriterMigrationTarget = null;
         },
         (err: any) => {
@@ -707,9 +848,16 @@ export class DkgNodePlugin {
         'Set config.stateDir or OPENCLAW_STATE_DIR explicitly to silence this.',
       );
     }
-    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+    this.chatTurnWriter = new ChatTurnWriter({
+      client: this.client,
+      logger: api.logger,
+      stateDir,
+      stateLayout,
+      legacyStateDirs,
+    });
     this.chatTurnWriterStateDir = stateDir;
     this.chatTurnWriterStateDirSource = stateDirSource;
+    this.chatTurnWriterStateLayout = stateLayout;
     this.channelPlugin?.setChatTurnWriter(this.chatTurnWriter);
   }
 
@@ -1167,7 +1315,109 @@ export class DkgNodePlugin {
    * Register DKG integration modules: channel and memory.
    * Each module is optional — enabled via config flags.
    */
-  private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {
+  private startChannelPlugin(api: OpenClawPluginApi): boolean {
+    const channelConfig = this.config.channel;
+    if (!channelConfig?.enabled) return false;
+    const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
+    if (!this.channelPlugin) {
+      this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+      this.channelPluginConfigFingerprint = nextChannelFingerprint;
+    }
+    this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
+    const memoryPlugin = this.memoryPlugin;
+    if (memoryPlugin?.isRegistered()) {
+      this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
+    }
+    this.channelPlugin.register(api);
+    api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
+    return true;
+  }
+
+  private stopChannelPluginForReconfigure(
+    api: OpenClawPluginApi,
+    options: {
+      updateGatewayStatus?: boolean;
+      clearLocalAgentIntegration?: boolean;
+      registrationMode?: string;
+    } = {},
+  ): void {
+    const channelPlugin = this.channelPlugin;
+    if (!channelPlugin) return;
+    if (this.channelPluginStopInFlight) return;
+    channelPlugin.setPreDispatchReAssert(null);
+    const stopWork = Promise.resolve(channelPlugin.stop({
+      updateGatewayStatus: options.updateGatewayStatus,
+    }))
+      .then(
+        () => {
+          if (this.channelPlugin === channelPlugin) {
+            this.channelPlugin = null;
+            this.channelPluginConfigFingerprint = null;
+          }
+          if (options.clearLocalAgentIntegration) {
+            this.clearLocalAgentChannelIntegration(api, options.registrationMode);
+          }
+          return true;
+        },
+        (err: any) => {
+          api.logger.warn?.(`[dkg] Channel module reconfiguration stop failed: ${err?.message ?? err}`);
+          const memoryPlugin = this.memoryPlugin;
+          if (this.channelPlugin === channelPlugin && memoryPlugin?.isRegistered()) {
+            channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
+          }
+          return false;
+        },
+      )
+      .finally(() => {
+        if (this.channelPluginStopInFlight === stopWork) {
+          this.channelPluginStopInFlight = null;
+        }
+      });
+    this.channelPluginStopInFlight = stopWork;
+  }
+
+  private queueChannelPluginStartAfterStop(api: OpenClawPluginApi, registrationMode?: string): void {
+    this.pendingChannelStartApi = api;
+    this.pendingChannelStartRegistrationMode = registrationMode ?? null;
+    this.pendingChannelStartFingerprint = channelConfigFingerprint(this.config.channel);
+    if (this.channelPluginStartQueued) return;
+    const stopWork = this.channelPluginStopInFlight;
+    if (!stopWork) {
+      this.startChannelPlugin(api);
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      this.pendingChannelStartFingerprint = null;
+      return;
+    }
+    this.channelPluginStartQueued = true;
+    void stopWork.then((stopped) => {
+      this.channelPluginStartQueued = false;
+      const pendingApi = this.pendingChannelStartApi;
+      const pendingRegistrationMode = this.pendingChannelStartRegistrationMode;
+      const pendingFingerprint = this.pendingChannelStartFingerprint;
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      this.pendingChannelStartFingerprint = null;
+      const currentChannelFingerprint = channelConfigFingerprint(this.config.channel);
+      if (
+        !stopped ||
+        !pendingApi ||
+        !this.config.channel?.enabled ||
+        currentChannelFingerprint !== pendingFingerprint
+      ) {
+        return;
+      }
+      const registered = this.startChannelPlugin(pendingApi);
+      if (registered && pendingRegistrationMode) {
+        this.registerLocalAgentIntegration(pendingApi, pendingRegistrationMode);
+      }
+    });
+  }
+
+  private registerIntegrationModules(
+    api: OpenClawPluginApi,
+    opts?: { enableFullRuntime?: boolean; registrationMode?: string },
+  ): void {
     // T58 — Gate channel registration on `enableFullRuntime`. The
     // file header (line 432-436) explicitly documents `setup-only`
     // and `cli-metadata` as "true metadata-only modes that skip
@@ -1186,17 +1436,60 @@ export class DkgNodePlugin {
 
     // --- Channel module ---
     const channelConfig = this.config.channel;
-    if (channelConfig?.enabled) {
-      if (!this.channelPlugin) {
-        this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+    const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
+    const channelDisabled = channelConfig?.enabled !== true;
+    const hasChannelDisableSignal =
+      channelConfig !== undefined ||
+      this.channelPlugin !== null ||
+      this.channelPluginStopInFlight !== null;
+    if (channelDisabled && hasChannelDisableSignal) {
+      this.pendingChannelStartApi = null;
+      this.pendingChannelStartRegistrationMode = null;
+      this.pendingChannelStartFingerprint = null;
+      const stopInFlight = this.channelPluginStopInFlight;
+      if (stopInFlight) {
+        const stopForDisable = this.channelPlugin
+          ? Promise.resolve(this.channelPlugin.stop({ updateGatewayStatus: true })).then(() => true)
+          : stopInFlight;
+        void stopForDisable.then(
+          (stopped) => {
+            if (stopped) this.clearLocalAgentChannelIntegration(api, opts?.registrationMode);
+          },
+          (err: any) => {
+            api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
+          },
+        );
+      } else if (!this.channelPlugin) {
+        this.clearLocalAgentChannelIntegration(api, opts?.registrationMode);
       }
-      this.channelPlugin.setChatTurnWriter(this.chatTurnWriter);
-      this.channelPlugin.register(api);
-      api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
+    }
+    if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
+      this.stopChannelPluginForReconfigure(api, {
+        updateGatewayStatus: !channelConfig?.enabled,
+        clearLocalAgentIntegration: !channelConfig?.enabled,
+        registrationMode: opts?.registrationMode,
+      });
+    }
+    if (channelConfig?.enabled) {
+      if (this.channelPluginStopInFlight) {
+        this.queueChannelPluginStartAfterStop(api, opts?.registrationMode);
+      } else {
+        this.startChannelPlugin(api);
+      }
     }
 
     // --- Memory module ---
     const memoryConfig = this.config.memory;
+    if (!memoryConfig?.enabled && this.memoryPlugin) {
+      this.channelPlugin?.setPreDispatchReAssert(null);
+      const disabledCapabilityRegistered = this.memoryPlugin.disable(api);
+      void this.memoryPlugin.close();
+      this.memoryPlugin = null;
+      this.memoryResolverApi = null;
+      if (disabledCapabilityRegistered) {
+        api.logger.info?.('[dkg] Memory module disabled — registered inactive memory capability to clear the previous DKG runtime');
+      }
+    }
     if (memoryConfig?.enabled) {
       if (!this.memoryPlugin) {
         this.memoryPlugin = new DkgMemoryPlugin(this.client, memoryConfig, this.memorySessionResolver);
@@ -1240,7 +1533,7 @@ export class DkgNodePlugin {
       // never reach the W3 (`before_prompt_build`) or `memory_search`
       // anchors, so a different plugin reclaiming the slot mid-session
       // gets bounced back before our recall/persist runs.
-      if (memoryPlugin && this.channelPlugin) {
+      if (memoryPlugin && this.channelPlugin && !this.channelPluginStopInFlight) {
         this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
       }
     }
@@ -1252,7 +1545,96 @@ export class DkgNodePlugin {
     }
 
     this.clearLocalAgentIntegrationRetry();
-    void this.syncLocalAgentIntegrationState(api, registrationMode);
+    if (this.channelPluginStopInFlight) {
+      return;
+    }
+    void this.syncLocalAgentIntegrationState(api, registrationMode, this.daemonClientGeneration);
+  }
+
+  private clearLocalAgentChannelIntegration(api: OpenClawPluginApi, registrationMode = 'full'): void {
+    this.clearLocalAgentIntegrationRetry();
+    const generation = this.daemonClientGeneration;
+    const client = this.client;
+    const disabledChannelCapabilities = (): Record<keyof typeof OPENCLAW_LOCAL_AGENT_CAPABILITIES, boolean> => {
+      const memoryActive = this.config.memory?.enabled === true && this.memoryPlugin?.isRegistered() === true;
+      return {
+        ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+        localChat: false,
+        chatAttachments: false,
+        connectFromUi: false,
+        dkgPrimaryMemory: memoryActive,
+        wmImportPipeline: memoryActive,
+      };
+    };
+    const channelEnabled = () => this.config.channel?.enabled === true;
+    void Promise.resolve().then(async () => {
+      if (generation !== this.daemonClientGeneration) return;
+      if (channelEnabled()) return;
+      const existing = await this.loadStoredOpenClawIntegration(api, generation, client);
+      if (generation !== this.daemonClientGeneration) return;
+      if (channelEnabled()) return;
+      if (existing === undefined) {
+        const reason = this.lastLocalAgentIntegrationLoadError ?? 'fetch failed';
+        const retryMessage =
+          '[dkg] Stored OpenClaw integration state could not be loaded; retrying disabled-channel status update to preserve any persisted disconnect state' +
+          ` (reason: ${reason})`;
+        if (this.lastLocalAgentIntegrationWarnReason !== reason) {
+          api.logger.warn?.(retryMessage);
+          this.lastLocalAgentIntegrationWarnReason = reason;
+        } else {
+          api.logger.debug?.(retryMessage);
+        }
+        this.scheduleLocalAgentIntegrationRetry(api, registrationMode, generation, 'clear-disabled-channel');
+        return;
+      }
+      this.clearLocalAgentIntegrationRetry();
+      const retryAttempt = this.localAgentIntegrationRetryAttempt;
+      if (existing === null) {
+        if (retryAttempt > 0) {
+          api.logger.info?.(
+            `[dkg] No stored OpenClaw integration state found for disabled-channel cleanup after ${retryAttempt} retry attempt(s); nothing to clear`,
+          );
+        } else {
+          api.logger.debug?.('[dkg] No stored OpenClaw integration state found for disabled-channel cleanup; nothing to clear');
+        }
+        this.localAgentIntegrationRetryAttempt = 0;
+        this.lastLocalAgentIntegrationWarnReason = null;
+        this.lastLocalAgentIntegrationLoadError = null;
+        return;
+      }
+      if (retryAttempt > 0) {
+        api.logger.info?.(
+          `[dkg] Stored OpenClaw integration state loaded for disabled-channel cleanup after ${retryAttempt} retry attempt(s)`,
+        );
+      }
+      this.localAgentIntegrationRetryAttempt = 0;
+      this.lastLocalAgentIntegrationWarnReason = null;
+      this.lastLocalAgentIntegrationLoadError = null;
+      if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+        api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping disabled-channel status update');
+        return;
+      }
+      await client.updateLocalAgentIntegration('openclaw', {
+        enabled: false,
+        description: 'Connect a local OpenClaw agent through the DKG node.',
+        transport: { kind: 'openclaw-channel' },
+        capabilities: disabledChannelCapabilities(),
+        manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
+        setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
+        metadata: {
+          channelId: 'dkg-ui',
+          registrationMode,
+          transportMode: 'disabled',
+        },
+        runtime: {
+          status: 'configured',
+          ready: false,
+          lastError: 'DKG UI channel disabled by adapter config',
+        },
+      });
+    }).catch((err: any) => {
+      api.logger.warn?.(`[dkg] Local agent channel disable status update failed: ${err?.message ?? err}`);
+    });
   }
 
   private clearLocalAgentIntegrationRetry(): void {
@@ -1261,7 +1643,12 @@ export class DkgNodePlugin {
     this.localAgentIntegrationRetryTimer = null;
   }
 
-  private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
+  private scheduleLocalAgentIntegrationRetry(
+    api: OpenClawPluginApi,
+    registrationMode: string,
+    generation = this.daemonClientGeneration,
+    retryAction: 'sync' | 'clear-disabled-channel' = 'sync',
+  ): void {
     if (this.localAgentIntegrationRetryTimer) return;
     // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped). On every
     // successful sync `localAgentIntegrationRetryAttempt` resets to 0
@@ -1275,7 +1662,12 @@ export class DkgNodePlugin {
     this.localAgentIntegrationRetryAttempt = attempt + 1;
     this.localAgentIntegrationRetryTimer = setTimeout(() => {
       this.localAgentIntegrationRetryTimer = null;
-      void this.syncLocalAgentIntegrationState(api, registrationMode);
+      if (generation !== this.daemonClientGeneration) return;
+      if (retryAction === 'clear-disabled-channel') {
+        this.clearLocalAgentChannelIntegration(api, registrationMode);
+        return;
+      }
+      void this.syncLocalAgentIntegrationState(api, registrationMode, generation);
     }, delay);
   }
 
@@ -1290,7 +1682,13 @@ export class DkgNodePlugin {
     }
   }
 
-  private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+  private async syncLocalAgentIntegrationState(
+    api: OpenClawPluginApi,
+    registrationMode: string,
+    generation = this.daemonClientGeneration,
+  ): Promise<void> {
+    if (generation !== this.daemonClientGeneration) return;
+    const client = this.client;
     // Skip the retry loop entirely when the adapter has no runtime
     // integrations to sync. The stored-integration fetch is a no-op for
     // metadata-only loads and used to burn a 1 Hz warn loop on cold
@@ -1301,7 +1699,8 @@ export class DkgNodePlugin {
       return;
     }
 
-    const existing = await this.loadStoredOpenClawIntegration(api);
+    const existing = await this.loadStoredOpenClawIntegration(api, generation, client);
+    if (generation !== this.daemonClientGeneration) return;
     if (existing === undefined) {
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
@@ -1318,7 +1717,7 @@ export class DkgNodePlugin {
       } else {
         api.logger.debug?.(retryMessage);
       }
-      this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
+      this.scheduleLocalAgentIntegrationRetry(api, registrationMode, generation);
       return;
     }
     // Successful load — reset dedup + retry counter and log recovery once
@@ -1361,6 +1760,7 @@ export class DkgNodePlugin {
         api.logger.warn?.(`[dkg] OpenClaw channel bridge failed to start: ${startError.message}`);
       }
     }
+    if (generation !== this.daemonClientGeneration) return;
 
     const bridgeReady = this.channelPlugin?.isListening === true && !startError;
     // T30 — Derive memory-related capability flags from actual
@@ -1391,7 +1791,7 @@ export class DkgNodePlugin {
     };
 
     try {
-      await this.client.connectLocalAgentIntegration({
+      await client.connectLocalAgentIntegration({
         ...basePayload,
         runtime: {
           status: startError ? 'error' : bridgeReady ? 'ready' : 'connecting',
@@ -1405,15 +1805,21 @@ export class DkgNodePlugin {
     }
   }
 
-  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
+  private async loadStoredOpenClawIntegration(
+    api: OpenClawPluginApi,
+    generation = this.daemonClientGeneration,
+    client = this.client,
+  ): Promise<LocalAgentIntegrationRecord | null | undefined> {
     try {
-      const result = await this.client.getLocalAgentIntegration('openclaw');
+      const result = await client.getLocalAgentIntegration('openclaw');
+      if (generation !== this.daemonClientGeneration) return undefined;
       // Clear any stale error from an earlier failed attempt so the
       // retry dedup logic in `syncLocalAgentIntegrationState` can
       // distinguish a fresh failure reason from the previous one.
       this.lastLocalAgentIntegrationLoadError = null;
       return result;
     } catch (err: any) {
+      if (generation !== this.daemonClientGeneration) return undefined;
       const reason = typeof err?.message === 'string' && err.message.length > 0 ? err.message : String(err);
       this.lastLocalAgentIntegrationLoadError = reason;
       // Emit the underlying fetch error at `debug` level on every
@@ -1587,11 +1993,17 @@ export class DkgNodePlugin {
     // flight and the turn is silently lost.
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
+    this.pendingChannelStartApi = null;
+    this.pendingChannelStartRegistrationMode = null;
+    this.pendingChannelStartFingerprint = null;
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
     }
+    await this.channelPluginStopInFlight;
     await this.channelPlugin?.stop();
+    this.channelPlugin = null;
+    this.channelPluginConfigFingerprint = null;
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
   }
 
@@ -1624,6 +2036,7 @@ export class DkgNodePlugin {
       return this.refreshStateInFlight;
     }
 
+    const generation = this.daemonClientGeneration;
     const run = async (): Promise<void> => {
       try {
         // Route through `ensureNodePeerId` so the in-flight promise
@@ -1640,8 +2053,10 @@ export class DkgNodePlugin {
         // cache is warm by the time the first slot-backed search /
         // dkg_query / before_prompt_build hook fires.
         await this.ensureNodeAgentAddress();
+        if (generation !== this.daemonClientGeneration) return;
         try {
           const result = await this.client.listContextGraphs();
+          if (generation !== this.daemonClientGeneration) return;
           const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
           const ids: string[] = [];
           for (const entry of graphs) {
@@ -1711,7 +2126,7 @@ export class DkgNodePlugin {
         // caller (including the one that triggered the refresh and any
         // concurrent awaiters) observes the retry scheduling through
         // the shared finally chain.
-        if (this.nodePeerId === undefined) {
+        if (generation === this.daemonClientGeneration && this.nodePeerId === undefined) {
           this.schedulePeerIdDeferredRetry(api);
         }
       }
@@ -1721,7 +2136,7 @@ export class DkgNodePlugin {
       // Clear the slot only if we're still the tracked promise — a
       // concurrent caller that started after us would have taken
       // over, though the guard above prevents that in practice.
-      if (this.refreshStateInFlight === tracked) {
+      if (generation === this.daemonClientGeneration && this.refreshStateInFlight === tracked) {
         this.refreshStateInFlight = null;
       }
     });
@@ -1737,9 +2152,13 @@ export class DkgNodePlugin {
    * preventing concurrent calls (see `ensureNodePeerId`'s in-flight
    * promise guard).
    */
-  private async probeNodePeerIdOnce(api: OpenClawPluginApi): Promise<void> {
+  private async probeNodePeerIdOnce(
+    api: OpenClawPluginApi,
+    generation = this.daemonClientGeneration,
+  ): Promise<void> {
     try {
       const status = await this.client.getStatus();
+      if (generation !== this.daemonClientGeneration) return;
       if (status.ok && status.peerId) {
         this.nodePeerId = status.peerId;
         return;
@@ -1799,8 +2218,11 @@ export class DkgNodePlugin {
     if (!api) return Promise.resolve();
     if (this.peerIdProbeInFlight) return this.peerIdProbeInFlight;
 
-    const probe = this.probeNodePeerIdOnce(api).finally(() => {
-      this.peerIdProbeInFlight = null;
+    const generation = this.daemonClientGeneration;
+    const probe = this.probeNodePeerIdOnce(api, generation).finally(() => {
+      if (generation === this.daemonClientGeneration) {
+        this.peerIdProbeInFlight = null;
+      }
     });
     this.peerIdProbeInFlight = probe;
     return probe;
@@ -1816,8 +2238,12 @@ export class DkgNodePlugin {
    * Does NOT debounce; caller (`ensureNodeAgentAddress`) handles concurrent
    * call dedup via the in-flight promise guard.
    */
-  private async probeNodeAgentAddressOnce(api: OpenClawPluginApi): Promise<void> {
+  private async probeNodeAgentAddressOnce(
+    api: OpenClawPluginApi,
+    generation = this.daemonClientGeneration,
+  ): Promise<void> {
     const httpResult = await this.client.getAgentIdentity();
+    if (generation !== this.daemonClientGeneration) return;
     if (httpResult.ok && httpResult.identity?.agentAddress) {
       this.nodeAgentAddress = httpResult.identity.agentAddress;
       return;
@@ -1844,8 +2270,11 @@ export class DkgNodePlugin {
     if (!api) return Promise.resolve();
     if (this.agentAddressProbeInFlight) return this.agentAddressProbeInFlight;
 
-    const probe = this.probeNodeAgentAddressOnce(api).finally(() => {
-      this.agentAddressProbeInFlight = null;
+    const generation = this.daemonClientGeneration;
+    const probe = this.probeNodeAgentAddressOnce(api, generation).finally(() => {
+      if (generation === this.daemonClientGeneration) {
+        this.agentAddressProbeInFlight = null;
+      }
     });
     this.agentAddressProbeInFlight = probe;
     return probe;
@@ -1861,10 +2290,12 @@ export class DkgNodePlugin {
    */
   private schedulePeerIdDeferredRetry(api: OpenClawPluginApi): void {
     if (this.peerIdDeferredRetryTimer) return;
+    const generation = this.daemonClientGeneration;
     this.peerIdDeferredRetryTimer = setTimeout(() => {
       this.peerIdDeferredRetryTimer = null;
+      if (generation !== this.daemonClientGeneration) return;
       if (this.nodePeerId !== undefined) return;
-      void this.probeNodePeerIdOnce(api);
+      void this.probeNodePeerIdOnce(api, generation);
     }, NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS);
     // Node's `Timer.unref()` keeps the deferred retry from holding the
     // event loop open past shutdown. Missing on some non-Node runtimes

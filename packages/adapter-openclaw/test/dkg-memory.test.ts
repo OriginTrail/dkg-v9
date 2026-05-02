@@ -105,6 +105,464 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
+  it('rebuilds the registered memory runtime when the daemon client changes', async () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    const firstCapability = api.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const nextClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9300' });
+
+    plugin.setClient(nextClient);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const secondCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    expect(secondCapability).not.toBe(firstCapability);
+
+    const result = await secondCapability.runtime!.getMemorySearchManager({ sessionKey: 'after-refresh' });
+    expect(((result.manager as DkgMemorySearchManager) as any).deps.client.baseUrl).toBe('http://localhost:9300');
+  });
+
+  it('does not rebuild the memory runtime when the slot moved before client refresh', () => {
+    const api = makeApi();
+    plugin.register(api);
+    const nextClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9300' });
+    (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+
+    plugin.setClient(nextClient);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers an inactive capability when disabled after owning the slot', async () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    expect(disabledCapability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined })).toEqual([]);
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not stamp an inactive capability when the owning api no longer proves slot ownership', () => {
+    const api = makeApi();
+    plugin.register(api);
+    api.config = {
+      daemonUrl: 'http://localhost:9200',
+    } as any;
+
+    expect(plugin.disable(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers and disables memory for direct-plugin-config-only gateways', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
+  it('stamps disabled direct memory capability on the current api after re-registration', async () => {
+    const initialApi = makeApi();
+    initialApi.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(initialApi)).toBe(true);
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    const currentApi = makeApi();
+    currentApi.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(currentApi)).toBe(true);
+
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(currentApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    const disabledCapability = currentApi.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
+  it('warns about direct memory disable without setup guidance', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('dkg setup'));
+  });
+
+  it('prefers refreshed direct api.cfg over stale api.pluginConfig for memory ownership', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      session: { id: 'bootstrap' },
+    } as any;
+    (api as any).cfg = {
+      memory: { enabled: false },
+    };
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
+  it('prefers refreshed direct api.config over stale api.pluginConfig for memory ownership', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.disable(api)).toBe(true);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
+  it('does not stamp disabled memory for a channel-only direct refresh', async () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+  });
+
+  it('does not treat module-shaped direct config without enabled as memory disable intent', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { port: 9801 },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat daemon/home-only direct config as memory disable intent', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      daemonUrl: 'http://localhost:9300',
+      dkgHome: '/current-daemon-home',
+    } as any;
+
+    expect(plugin.disable(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat state metadata-only direct config as memory disable intent', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      stateDir: '/work/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/work',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        daemonUrl: 'http://localhost:9400',
+      },
+    };
+
+    expect(plugin.disable(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves direct memory ownership across partial direct config overlays', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      stateDir: '/work/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/work',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        daemonUrl: 'http://localhost:9400',
+      },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+    api.config = {
+      memory: { memoryDir: '/work/.dkg-adapter/memory' },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves direct memory ownership across channel-only direct config refreshes', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { enabled: true, port: 9401 },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not treat channel-only direct config as an explicit memory disable', () => {
+    const api = makeApi();
+    api.config = {
+      channel: { enabled: true, port: 9402 },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
+  });
+
+  it('does not let stale runtime memory disable override state metadata-only current config', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      stateDir: '/work/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/work',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        memory: { enabled: false },
+      },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(plugin.isRegistered()).toBe(true);
+  });
+
+  it('does not use stale runtime memory enable behind daemon-only current config', () => {
+    const api = makeApi();
+    api.config = {
+      daemonUrl: 'http://localhost:9500',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        memory: { enabled: true },
+      },
+    };
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
+  });
+
+  it('does not revive direct memory ownership after an explicit direct disable', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    api.config = {
+      stateDir: '/disabled/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/disabled',
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+  });
+
+  it('uses direct memory fallback when merged config only carries route metadata', () => {
+    const api = makeApi();
+    api.config = {
+      session: { id: 'bootstrap' },
+    } as any;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not use direct memory fallback when merged config explicitly exposes an unset memory slot', () => {
+    const api = makeApi();
+    (api.config as any).plugins.slots.memory = undefined;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+  });
+
+  it('uses direct memory fallback when merged config omits the memory slot', () => {
+    const api = makeApi();
+    api.config = {
+      plugins: {
+        slots: {},
+        entries: {
+          'adapter-openclaw': { config: { memory: { enabled: true } } },
+        },
+      },
+    } as any;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stamp the inactive capability when another plugin owns the memory slot', () => {
+    const api = makeApi();
+    plugin.register(api);
+    (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+
+    expect(plugin.disable(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the previous registry without stamping through a stale registered api', () => {
+    const initialApi = makeApi();
+    plugin.register(initialApi);
+    const currentApi = {
+      config: {
+        memory: { enabled: false },
+      },
+      registerTool: vi.fn(),
+      registerHook: vi.fn(),
+      on: vi.fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryCapability: vi.fn(),
+    } as unknown as MockApi;
+
+    expect(plugin.disable(currentApi)).toBe(false);
+
+    expect(currentApi.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+    plugin.reAssertCapability();
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('registers a prompt builder that teaches WM identity selection', () => {
     const api = makeApi();
     plugin.register(api);

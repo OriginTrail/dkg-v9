@@ -2703,29 +2703,34 @@ export class EVMChainAdapter implements ChainAdapter {
     // If a governance change shortens the duration mid-flight, off-chain
     // staleness checks against the cached duration would underestimate
     // expiry and re-deadlock at the rollover boundary. Pull the live
-    // duration in parallel with the status read so the prover can compare
+    // duration alongside the status read so the prover can compare
     // wall-clock against the same value the contract uses for rollover.
     //
-    // Codex round 3 — keep the live-duration read STRICTLY best-effort:
-    // a transient RPC blip, partial rollout, or older RS deployment that
-    // doesn't expose `getActiveProofingPeriodDurationInBlocks` must NOT
-    // make the whole `getActiveProofPeriodStatus()` reject. Use
-    // `Promise.allSettled` so we keep the (already-correct) status read
-    // and let the duration silently fall back to `undefined`, which the
-    // prover treats as "use the cached challenge duration" — the
-    // pre-fix behaviour. The tradeoff: during such an outage the
-    // governance-shortens-duration edge case temporarily regresses to
-    // the cached value; that's strictly better than the alternative,
-    // which would surface the duration RPC failure as a `rs.loop.tick-threw`
-    // and gate every other prover read on a non-essential field.
-    const [statusResult, durationResult] = await Promise.allSettled([
+    // Codex round 3 + 4 — keep the live-duration read STRICTLY best-effort:
+    // a transient RPC blip, partial rollout, or an older RS deployment
+    // that omits the method from its ABI must NOT make the whole
+    // `getActiveProofPeriodStatus()` reject. Naive `Promise.allSettled`
+    // is NOT enough — `rs.getActiveProofingPeriodDurationInBlocks()`
+    // would throw synchronously (`TypeError: ... is not a function`)
+    // before `allSettled` can wrap it when the method is missing
+    // entirely. Wrap the lookup + call in a never-rejecting helper
+    // that resolves to `undefined` for any failure mode (missing fn,
+    // sync throw, async revert, RPC outage, decode error).
+    const readDurationBestEffort = async (): Promise<bigint | undefined> => {
+      try {
+        const fn = (rs as unknown as { getActiveProofingPeriodDurationInBlocks?: () => Promise<unknown> })
+          .getActiveProofingPeriodDurationInBlocks;
+        if (typeof fn !== 'function') return undefined;
+        const v = await fn.call(rs);
+        return BigInt(v as never);
+      } catch {
+        return undefined;
+      }
+    };
+    const [raw, proofingPeriodDurationInBlocks] = await Promise.all([
       rs.getActiveProofPeriodStatus(),
-      rs.getActiveProofingPeriodDurationInBlocks(),
+      readDurationBestEffort(),
     ]);
-    if (statusResult.status === 'rejected') throw statusResult.reason;
-    const raw = statusResult.value;
-    const proofingPeriodDurationInBlocks =
-      durationResult.status === 'fulfilled' ? BigInt(durationResult.value) : undefined;
     return {
       activeProofPeriodStartBlock: BigInt(raw.activeProofPeriodStartBlock ?? raw[0]),
       isValid: Boolean(raw.isValid ?? raw[1]),

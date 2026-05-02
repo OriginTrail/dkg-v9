@@ -496,6 +496,76 @@ describe('RandomSamplingProver — short-circuits', () => {
     await prover.close();
   });
 
+  it('forces createChallenge from the SOLVED branch when wallclock is past live duration (Codex round 4)', async () => {
+    // Codex round 4 on PR #369 — round 2 made the solved branch
+    // consume `status.proofingPeriodDurationInBlocks` for staleness too,
+    // but only the unsolved branch had a wall-clock regression test.
+    // Without symmetric solved-branch coverage, a regression that
+    // reverts `isCachedChallengeStale` to ignoring the live duration
+    // would re-introduce the post-submit deadlock (poll-after-success
+    // while period actually rotated → short-circuit on `already-solved`
+    // → never advance) without failing this suite.
+    //
+    // Setup: cached challenge is SOLVED at FROZEN_PERIOD with a
+    // CACHED_DURATION that would say "still in period" at CURRENT_BLOCK
+    // (cached: 1000+10000 > 5000), but the live duration says "expired"
+    // (live: 1000+50 < 5000). The prover must consult the live duration
+    // and force createChallenge.
+    const fixture: KCFixture = {
+      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const FROZEN_PERIOD = 1000n;
+    const CACHED_DURATION = 10000n;
+    const LIVE_DURATION = 50n;
+    const CURRENT_BLOCK = 5000;
+    const ROTATED_PERIOD = 5000n;
+
+    const submitProof = vi.fn(async () => ({ hash: '0xnext', blockNumber: CURRENT_BLOCK, success: true }));
+    const createChallenge = vi.fn(async () => ({
+      challenge: makeChallenge({
+        knowledgeCollectionId: fixture.kcId,
+        chunkId: 0n,
+        epoch: 19n,
+        activeProofPeriodStartBlock: ROTATED_PERIOD,
+        proofingPeriodDurationInBlocks: LIVE_DURATION,
+        solved: false,
+      }),
+      contextGraphId: fixture.cgId,
+      hash: '0x', blockNumber: CURRENT_BLOCK, success: true,
+    }));
+    const chain = makeChain({
+      status: {
+        activeProofPeriodStartBlock: FROZEN_PERIOD,
+        isValid: false,
+        proofingPeriodDurationInBlocks: LIVE_DURATION,
+      },
+      challengeForNode: makeChallenge({
+        knowledgeCollectionId: fixture.kcId,
+        activeProofPeriodStartBlock: FROZEN_PERIOD,
+        proofingPeriodDurationInBlocks: CACHED_DURATION,
+        solved: true,
+      }),
+      blockNumber: CURRENT_BLOCK,
+      createChallenge,
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+    const outcome = await prover.tick();
+    // Did NOT short-circuit on `already-solved`; the live-duration
+    // wall-clock check fired and the prover rotated to the new period.
+    expect(outcome.kind).toBe('submitted');
+    expect(createChallenge).toHaveBeenCalledTimes(1);
+    expect(submitProof).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
   it('returns cg-not-found when getKCContextGraphId returns 0', async () => {
     const chain = makeChain({
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },

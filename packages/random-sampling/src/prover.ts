@@ -135,26 +135,50 @@ export class RandomSamplingProver {
   }
 
   /**
-   * Detect "the cached challenge says solved, but its proof period has
-   * already elapsed in wall-clock terms even though no on-chain tx has
-   * advanced the storage cursor yet". Returns true when we should force
-   * a `createChallenge` to make the chain rotate.
+   * Detect "the cached challenge's proof period has already elapsed in
+   * wall-clock terms, even though no on-chain tx has advanced the
+   * `activeProofPeriodStartBlock` storage cursor yet". Returns true
+   * when we should force a `createChallenge` to make the chain rotate.
    *
-   * Robust to chain adapters that don't expose `getBlockNumber` (mock /
-   * test): falls back to "not stale" so the existing short-circuit
+   * Applies to BOTH solved-and-stale (poll-after-success while period
+   * actually rotated) AND unsolved-and-stale (testnet 2026-05-01: an
+   * RS-contract Hub rotation left every node holding an unsolvable
+   * challenge from a long-expired period; with no tx ever calling
+   * submitProof / createChallenge the cursor froze, so
+   * `existingIsCurrent` stayed truthy forever and the prover never
+   * tried to rotate. Wall-clock comparison breaks the deadlock.)
+   *
+   * Codex round 2 on PR #369 — the on-chain
+   * `updateAndGetActiveProofPeriodStartBlock()` rolls forward using
+   * the CURRENT epoch's
+   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()`, NOT
+   * whatever duration was baked into a cached `NodeChallenge` at
+   * creation time. If governance shortens the proofing duration
+   * mid-flight, the cached duration overstates expiry and the same
+   * `kc-not-synced` deadlock reappears at the rollover. So when the
+   * adapter exposes the live duration on `ProofPeriodStatus`
+   * (modern EVM/mock adapters), prefer it; fall back to
+   * `existing.proofingPeriodDurationInBlocks` only for legacy adapters
+   * that don't yet populate the field.
+   *
+   * Robust to chain adapters that don't expose `getBlockNumber` (mock
+   * / test): falls back to "not stale" so the existing short-circuit
    * behaviour is preserved.
    */
-  private async isCachedSolvedStale(existing: NodeChallenge): Promise<boolean> {
+  private async isCachedChallengeStale(
+    existing: NodeChallenge,
+    liveDurationInBlocks?: bigint,
+  ): Promise<boolean> {
     if (!this.chain.getBlockNumber) return false;
-    if (existing.proofingPeriodDurationInBlocks <= 0n) return false;
+    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
+    if (duration <= 0n) return false;
     let currentBlock: number;
     try {
       currentBlock = await this.chain.getBlockNumber();
     } catch {
       return false;
     }
-    const periodEndBlock =
-      existing.activeProofPeriodStartBlock + existing.proofingPeriodDurationInBlocks;
+    const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
     return BigInt(currentBlock) >= periodEndBlock;
   }
 
@@ -212,7 +236,10 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
-      const isStale = await this.isCachedSolvedStale(existing);
+      const isStale = await this.isCachedChallengeStale(
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      );
       if (!isStale) {
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
@@ -227,6 +254,7 @@ export class RandomSamplingProver {
       this.log.info('rs.tick.forcing-rotation', {
         cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
         statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
+        reason: 'solved-stale',
       });
     }
 
@@ -238,7 +266,26 @@ export class RandomSamplingProver {
 
     let challenge: NodeChallenge;
     let cgId: bigint;
-    if (existingIsCurrent && !existing.solved) {
+    // Same wall-clock stale check as the solved branch above. Without
+    // it, an unsolved challenge whose period has expired (but whose
+    // on-chain cursor never advanced because no submit/create tx
+    // landed) would be reused forever and starve every subsequent
+    // rotation. This is exactly what bricked Base Sepolia testnet
+    // after the 2026-05-01 RS-contract Hub rotation.
+    const unsolvedStale = existingIsCurrent
+      && !existing.solved
+      && (await this.isCachedChallengeStale(
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      ));
+    if (unsolvedStale) {
+      this.log.info('rs.tick.forcing-rotation', {
+        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
+        reason: 'unsolved-stale',
+      });
+    }
+    if (existingIsCurrent && !existing.solved && !unsolvedStale) {
       challenge = existing;
       cgId = await this.chain.getKCContextGraphId(challenge.knowledgeCollectionId);
     } else {

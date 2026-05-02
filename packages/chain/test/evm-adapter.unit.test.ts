@@ -247,6 +247,112 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).isContractMissingRevert('not an error')).toBe(false);
   });
 
+  it('getActiveProofPeriodStatus stays best-effort when getActiveProofingPeriodDurationInBlocks rejects (Codex round 3)', async () => {
+    // Codex round 3 on PR #369 — pulling the live duration alongside
+    // status must NOT promote the duration RPC to a hard prerequisite.
+    // If a transient RPC error hits only the second leg, the status
+    // read should still succeed with `proofingPeriodDurationInBlocks:
+    // undefined` and the prover falls back to the cached challenge
+    // duration.
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeRs = {
+      getActiveProofPeriodStatus: async () => ({
+        activeProofPeriodStartBlock: 1234n,
+        isValid: true,
+      }),
+      getActiveProofingPeriodDurationInBlocks: async () => {
+        throw new Error('TransientRpc502BadGateway');
+      },
+    };
+    (a as any).init = async () => undefined;
+    (a as any).getRandomSampling = async () => ({ rs: fakeRs, rss: {} });
+    const status = await a.getActiveProofPeriodStatus();
+    expect(status.activeProofPeriodStartBlock).toBe(1234n);
+    expect(status.isValid).toBe(true);
+    expect(status.proofingPeriodDurationInBlocks).toBeUndefined();
+  });
+
+  it('getActiveProofPeriodStatus stays best-effort when getActiveProofingPeriodDurationInBlocks is missing entirely (Codex round 4)', async () => {
+    // Codex round 4 on PR #369 — `Promise.allSettled([..., rs.getX()])`
+    // is NOT enough. If older RS deployments omit the method from their
+    // ABI entirely, `rs.getActiveProofingPeriodDurationInBlocks()`
+    // throws SYNCHRONOUSLY (TypeError: ... is not a function) while
+    // building the allSettled input array, before allSettled can wrap
+    // the rejection. Verify the wrapper handles "method literally
+    // doesn't exist" cleanly.
+    const a = new EVMChainAdapter(minimalConfig());
+    // Note: getActiveProofingPeriodDurationInBlocks is NOT defined.
+    const fakeRs = {
+      getActiveProofPeriodStatus: async () => ({
+        activeProofPeriodStartBlock: 7n,
+        isValid: true,
+      }),
+    };
+    (a as any).init = async () => undefined;
+    (a as any).getRandomSampling = async () => ({ rs: fakeRs, rss: {} });
+    const status = await a.getActiveProofPeriodStatus();
+    expect(status.activeProofPeriodStartBlock).toBe(7n);
+    expect(status.isValid).toBe(true);
+    expect(status.proofingPeriodDurationInBlocks).toBeUndefined();
+  });
+
+  it('getActiveProofPeriodStatus stays best-effort when getActiveProofingPeriodDurationInBlocks throws synchronously (Codex round 4)', async () => {
+    // Defence-in-depth for ethers Contract proxies that resolve the
+    // missing-fn into a throw at call-time rather than returning a
+    // rejected promise.
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeRs = {
+      getActiveProofPeriodStatus: async () => ({
+        activeProofPeriodStartBlock: 42n,
+        isValid: false,
+      }),
+      getActiveProofingPeriodDurationInBlocks: () => {
+        throw new TypeError('this.constructor.getFunction is not a function');
+      },
+    };
+    (a as any).init = async () => undefined;
+    (a as any).getRandomSampling = async () => ({ rs: fakeRs, rss: {} });
+    const status = await a.getActiveProofPeriodStatus();
+    expect(status.activeProofPeriodStartBlock).toBe(42n);
+    expect(status.isValid).toBe(false);
+    expect(status.proofingPeriodDurationInBlocks).toBeUndefined();
+  });
+
+  it('getActiveProofPeriodStatus surfaces the real status read failure (does not swallow the primary leg)', async () => {
+    // The best-effort behaviour from the previous test must NOT extend
+    // to the primary status read — if `getActiveProofPeriodStatus` itself
+    // fails, the prover MUST hear about it (otherwise we'd silently
+    // pin to a fabricated default and the prover's wall-clock check
+    // would compare against a nonsense activeProofPeriodStartBlock).
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeRs = {
+      getActiveProofPeriodStatus: async () => {
+        throw new Error('UpstreamRPCBadGateway');
+      },
+      getActiveProofingPeriodDurationInBlocks: async () => 600n,
+    };
+    (a as any).init = async () => undefined;
+    (a as any).getRandomSampling = async () => ({ rs: fakeRs, rss: {} });
+    await expect(a.getActiveProofPeriodStatus()).rejects.toThrow('UpstreamRPCBadGateway');
+  });
+
+  it('getActiveProofPeriodStatus populates proofingPeriodDurationInBlocks when both reads succeed', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeRs = {
+      getActiveProofPeriodStatus: async () => ({
+        activeProofPeriodStartBlock: 9000n,
+        isValid: false,
+      }),
+      getActiveProofingPeriodDurationInBlocks: async () => 50n,
+    };
+    (a as any).init = async () => undefined;
+    (a as any).getRandomSampling = async () => ({ rs: fakeRs, rss: {} });
+    const status = await a.getActiveProofPeriodStatus();
+    expect(status.activeProofPeriodStartBlock).toBe(9000n);
+    expect(status.isValid).toBe(false);
+    expect(status.proofingPeriodDurationInBlocks).toBe(50n);
+  });
+
   it('coerces randomSamplingHubRefreshMs<=0 to the default TTL (no "disable refresh" mode)', () => {
     // The "disable refresh entirely" mode is intentionally not
     // supported — without a TTL backstop, a missed Hub event on a

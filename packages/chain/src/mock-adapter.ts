@@ -1031,6 +1031,20 @@ export class MockChainAdapter implements ChainAdapter {
   // can reach them via concrete-typed instance access.
   // =====================================================================
 
+  /**
+   * Mock proof period length in blocks. Single source of truth for:
+   *   - `__advanceProofPeriod()` cursor step
+   *   - `createChallenge()` `NodeChallenge.proofingPeriodDurationInBlocks`
+   *   - `getActiveProofPeriodStatus()` `proofingPeriodDurationInBlocks`
+   *
+   * Codex round 3 on PR #369 — these were three separate `100n` literals.
+   * If one drifted the mock would report a self-inconsistent
+   * (status, challenge, cursor) tuple and the prover's wall-clock
+   * staleness logic could be tested against behaviour the mock never
+   * actually simulates. Centralising removes that footgun.
+   */
+  private static readonly RS_MOCK_PERIOD_DURATION_IN_BLOCKS = 100n;
+
   private rsPeriodCursor = 1n;            // activeProofPeriodStartBlock
   private rsEpoch = 1n;
   private rsPeriodIsValid = true;
@@ -1052,7 +1066,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** Test helper: advance to a fresh proof period (mirrors a chain rollover). */
   __advanceProofPeriod(): bigint {
-    this.rsPeriodCursor += 100n;
+    this.rsPeriodCursor += MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS;
     this.rsPeriodIsValid = true;
     return this.rsPeriodCursor;
   }
@@ -1156,7 +1170,7 @@ export class MockChainAdapter implements ChainAdapter {
       knowledgeCollectionStorageContract: kcEntry.kcsContract,
       epoch: this.rsEpoch,
       activeProofPeriodStartBlock: this.rsPeriodCursor,
-      proofingPeriodDurationInBlocks: 100n,
+      proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
       solved: false,
     };
     this.rsChallenges.set(identityId, challenge);
@@ -1233,6 +1247,7 @@ export class MockChainAdapter implements ChainAdapter {
     return {
       activeProofPeriodStartBlock: this.rsPeriodCursor,
       isValid: this.rsPeriodIsValid,
+      proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
     };
   }
 

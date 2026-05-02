@@ -2696,10 +2696,45 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     const { rs } = await this.getRandomSampling();
 
-    const raw = await rs.getActiveProofPeriodStatus();
+    // Codex round 2 on PR #369: the cached `NodeChallenge.proofingPeriodDurationInBlocks`
+    // is whatever the contract used at challenge-creation time. The chain's
+    // `updateAndGetActiveProofPeriodStartBlock()` rolls forward using the
+    // CURRENT epoch's duration via `getActiveProofingPeriodDurationInBlocks()`.
+    // If a governance change shortens the duration mid-flight, off-chain
+    // staleness checks against the cached duration would underestimate
+    // expiry and re-deadlock at the rollover boundary. Pull the live
+    // duration alongside the status read so the prover can compare
+    // wall-clock against the same value the contract uses for rollover.
+    //
+    // Codex round 3 + 4 — keep the live-duration read STRICTLY best-effort:
+    // a transient RPC blip, partial rollout, or an older RS deployment
+    // that omits the method from its ABI must NOT make the whole
+    // `getActiveProofPeriodStatus()` reject. Naive `Promise.allSettled`
+    // is NOT enough — `rs.getActiveProofingPeriodDurationInBlocks()`
+    // would throw synchronously (`TypeError: ... is not a function`)
+    // before `allSettled` can wrap it when the method is missing
+    // entirely. Wrap the lookup + call in a never-rejecting helper
+    // that resolves to `undefined` for any failure mode (missing fn,
+    // sync throw, async revert, RPC outage, decode error).
+    const readDurationBestEffort = async (): Promise<bigint | undefined> => {
+      try {
+        const fn = (rs as unknown as { getActiveProofingPeriodDurationInBlocks?: () => Promise<unknown> })
+          .getActiveProofingPeriodDurationInBlocks;
+        if (typeof fn !== 'function') return undefined;
+        const v = await fn.call(rs);
+        return BigInt(v as never);
+      } catch {
+        return undefined;
+      }
+    };
+    const [raw, proofingPeriodDurationInBlocks] = await Promise.all([
+      rs.getActiveProofPeriodStatus(),
+      readDurationBestEffort(),
+    ]);
     return {
       activeProofPeriodStartBlock: BigInt(raw.activeProofPeriodStartBlock ?? raw[0]),
       isValid: Boolean(raw.isValid ?? raw[1]),
+      proofingPeriodDurationInBlocks,
     };
   }
 

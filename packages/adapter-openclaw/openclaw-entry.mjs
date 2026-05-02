@@ -113,13 +113,18 @@ function resolveEntryConfig(api, options = {}) {
     : currentEntryConfigs.length === 0 || strongestCurrentEntryConfigIsMetadataOnly
       ? [currentPluginConfigForMetadataEntry].filter(isObjectRecord)
       : [];
+  const currentDirectConfigsArePartialOverlays =
+    currentDirectConfigs.length > 0 &&
+    currentDirectConfigs.every(isPartialAdapterConfigOverlay);
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
   const currentConfigSourcesForMerge =
     !hasCurrentDirectApiConfig &&
     strongestCurrentEntryConfigIsMetadataOnly &&
     currentDirectConfigs.length > 0
       ? [
-          ...currentEntryConfigs.slice(0, -1).filter(isStateMetadataOnlyAdapterConfig),
+          ...(currentDirectConfigsArePartialOverlays
+            ? currentEntryConfigs.slice(0, -1)
+            : currentEntryConfigs.slice(0, -1).filter(isStateMetadataOnlyAdapterConfig)),
           ...currentDirectConfigs,
           strongestCurrentEntryConfig,
         ].filter(isObjectRecord)

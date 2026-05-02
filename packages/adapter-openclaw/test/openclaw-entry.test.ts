@@ -771,6 +771,54 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
+  it('keeps lower full entry fields when api.pluginConfig is only a partial overlay', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({
+      channel: { port: 9766 },
+    }, {
+      config: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9665',
+                dkgHome: '/entry-dkg-home',
+                memory: { enabled: true },
+                channel: { enabled: true, port: 9666 },
+              },
+            },
+          },
+        },
+      },
+      cfg: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: '/partial-overlay-workspace/.dkg-adapter',
+                stateDirSource: 'setup-default',
+                installedWorkspace: '/partial-overlay-workspace',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9665',
+      dkgHome: '/entry-dkg-home',
+      stateDir: '/partial-overlay-workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/partial-overlay-workspace',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9766 },
+    });
+  });
+
   it('keeps metadata-only entry plus metadata-only api.pluginConfig as a partial update', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');

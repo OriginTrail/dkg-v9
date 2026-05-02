@@ -1558,6 +1558,8 @@ export class DkgNodePlugin {
     const capabilities = {
       ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
       localChat: false,
+      chatAttachments: false,
+      connectFromUi: false,
       dkgPrimaryMemory: memoryActive,
       wmImportPipeline: memoryActive,
     };
@@ -1570,7 +1572,7 @@ export class DkgNodePlugin {
         return;
       }
       await client.updateLocalAgentIntegration('openclaw', {
-        enabled: true,
+        enabled: false,
         description: 'Connect a local OpenClaw agent through the DKG node.',
         transport: { kind: 'openclaw-channel' },
         capabilities,

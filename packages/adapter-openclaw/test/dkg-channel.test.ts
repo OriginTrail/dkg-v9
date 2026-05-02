@@ -239,7 +239,7 @@ describe('DkgChannelPlugin', () => {
     expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
   });
 
-  it('uses api.pluginConfig when api.cfg only carries route/workspace metadata', async () => {
+  it('keeps route metadata while overlaying api.pluginConfig when api.cfg is not merged config', async () => {
     const { runtime } = makeMockRuntime({
       dispatchImpl: async (params) => {
         await params.dispatcherOptions.deliver({ text: 'Route metadata fallback reply' });
@@ -249,14 +249,22 @@ describe('DkgChannelPlugin', () => {
       daemonUrl: 'http://localhost:9500',
       channel: { enabled: true, port: 0 },
     };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
     const routeMetadata = {
       agents: { defaults: { workspace: '/route-workspace' } },
+      session: { ttlMs: 30_000 },
       workspace: '/route-workspace',
     };
     const api = makeApi({
       cfg: routeMetadata,
       pluginConfig: currentPluginConfig,
-      runtime,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
     } as any);
     vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
 
@@ -264,7 +272,21 @@ describe('DkgChannelPlugin', () => {
     const reply = await plugin.processInbound('Hello', 'corr-route-metadata', 'owner');
 
     expect(reply.text).toBe('Route metadata fallback reply');
-    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(routeMetadata);
+    expect(dispatchCfg).toMatchObject({
+      agents: routeMetadata.agents,
+      session: routeMetadata.session,
+      workspace: routeMetadata.workspace,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+    expect((routeMetadata as any).plugins).toBeUndefined();
   });
 
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {

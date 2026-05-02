@@ -35,6 +35,7 @@ import type { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
   isObjectRecord,
   looksLikeAdapterPluginConfig,
+  mergeAdapterPluginConfigs,
   resolveOpenClawMergedConfig,
   resolveOpenClawRouteMetadataConfig,
 } from './openclaw-config.js';
@@ -508,10 +509,7 @@ export class DkgChannelPlugin {
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg =
-      resolveOpenClawMergedConfig(api) ??
-      resolveDirectAdapterConfigFallback(api) ??
-      resolveOpenClawRouteMetadataConfig(api);
+    this.cfg = resolveChannelDispatchConfig(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {
@@ -2491,4 +2489,45 @@ function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<stri
     runtime?.config,
     runtime?.pluginConfig,
   ].find((candidate) => isObjectRecord(candidate) && looksLikeAdapterPluginConfig(candidate));
+}
+
+function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const mergedConfig = resolveOpenClawMergedConfig(api);
+  if (mergedConfig) return mergedConfig;
+
+  const directConfig = resolveDirectAdapterConfigFallback(api);
+  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
+  if (routeConfig && directConfig) {
+    return mergeRouteConfigWithAdapterConfig(routeConfig, directConfig);
+  }
+
+  return directConfig ?? routeConfig;
+}
+
+function mergeRouteConfigWithAdapterConfig(
+  routeConfig: Record<string, unknown>,
+  adapterConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(routeConfig.plugins) ? routeConfig.plugins : undefined;
+  const entries = isObjectRecord(plugins?.entries) ? plugins.entries : undefined;
+  const existingEntry = isObjectRecord(entries?.['adapter-openclaw'])
+    ? entries['adapter-openclaw'] as Record<string, unknown>
+    : undefined;
+  const existingAdapterConfig = isObjectRecord(existingEntry?.config)
+    ? existingEntry.config as Record<string, unknown>
+    : undefined;
+
+  return {
+    ...routeConfig,
+    plugins: {
+      ...(plugins ?? {}),
+      entries: {
+        ...(entries ?? {}),
+        'adapter-openclaw': {
+          ...(existingEntry ?? {}),
+          config: mergeAdapterPluginConfigs(existingAdapterConfig, adapterConfig),
+        },
+      },
+    },
+  };
 }

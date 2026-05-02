@@ -2354,9 +2354,13 @@ describe('DkgNodePlugin', () => {
       );
       const clearBody = JSON.parse(String(clearCall?.[1]?.body));
       expect(clearBody).toMatchObject({
-        enabled: true,
+        enabled: false,
         transport: { kind: 'openclaw-channel' },
-        capabilities: { localChat: false },
+        capabilities: {
+          localChat: false,
+          chatAttachments: false,
+          connectFromUi: false,
+        },
         metadata: {
           channelId: 'dkg-ui',
           registrationMode: 'full',
@@ -2405,7 +2409,12 @@ describe('DkgNodePlugin', () => {
       expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
         'openclaw',
         expect.objectContaining({
-          capabilities: expect.objectContaining({ localChat: false }),
+          enabled: false,
+          capabilities: expect.objectContaining({
+            localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
+          }),
           metadata: expect.objectContaining({ transportMode: 'disabled' }),
           runtime: expect.objectContaining({ status: 'configured', ready: false }),
         }),
@@ -2442,7 +2451,12 @@ describe('DkgNodePlugin', () => {
       expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
         'openclaw',
         expect.objectContaining({
-          capabilities: expect.objectContaining({ localChat: false }),
+          enabled: false,
+          capabilities: expect.objectContaining({
+            localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
+          }),
           metadata: expect.objectContaining({ transportMode: 'disabled' }),
           runtime: expect.objectContaining({ status: 'configured', ready: false }),
         }),
@@ -2521,6 +2535,8 @@ describe('DkgNodePlugin', () => {
         expect.objectContaining({
           capabilities: expect.objectContaining({
             localChat: false,
+            chatAttachments: false,
+            connectFromUi: false,
             dkgPrimaryMemory: false,
             wmImportPipeline: false,
           }),

@@ -1276,6 +1276,31 @@ describe('openclaw-entry', () => {
     expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/live-runtime-workspace']);
   });
 
+  it('keeps fresh direct installedWorkspace ahead of stale route workspace metadata', async () => {
+    const freshWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-fresh-workspace-'));
+    const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-route-workspace-'));
+    tempRoots.push(freshWorkspace, staleWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh skill' });
+    const api = makeDirectPluginConfigApi({
+      stateDir: join(freshWorkspace, '.dkg-adapter'),
+      stateDirSource: 'setup-default',
+      installedWorkspace: freshWorkspace,
+    }, {
+      cfg: {
+        agents: { defaults: { workspace: staleWorkspace } },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBeUndefined();
+    expect(instance.config.installedWorkspace).toBe(freshWorkspace);
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined]);
+    expect(readFileSync(join(freshWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('fresh skill');
+    expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
   it('does not reuse a workspaceDir written by an earlier same-api registration', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

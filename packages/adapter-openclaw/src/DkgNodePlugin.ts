@@ -1441,9 +1441,15 @@ export class DkgNodePlugin {
       this.pendingChannelStartApi = null;
       this.pendingChannelStartRegistrationMode = null;
       this.pendingChannelStartFingerprint = null;
-      if (this.channelPluginStopInFlight && this.channelPlugin) {
-        void this.channelPlugin.stop({ updateGatewayStatus: true }).then(
-          () => this.clearLocalAgentChannelIntegration(api, opts?.registrationMode),
+      const stopInFlight = this.channelPluginStopInFlight;
+      if (stopInFlight) {
+        const stopForDisable = this.channelPlugin
+          ? Promise.resolve(this.channelPlugin.stop({ updateGatewayStatus: true })).then(() => true)
+          : stopInFlight;
+        void stopForDisable.then(
+          (stopped) => {
+            if (stopped) this.clearLocalAgentChannelIntegration(api, opts?.registrationMode);
+          },
           (err: any) => {
             api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
           },

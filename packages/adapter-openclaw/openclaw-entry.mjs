@@ -73,29 +73,24 @@ export default function (api) {
 function resolveEntryConfig(api, options = {}) {
   const anyApi = api;
   const runtime = anyApi?.runtime;
-  const fullConfigCandidatesMostToLeast = [
+  const currentFullConfigCandidatesMostToLeast = [
     anyApi?.cfg,
     anyApi?.config,
-    runtime?.cfg,
-    runtime?.config,
   ].filter(isObjectRecord);
   const currentFullConfigCandidatesLeastToMost = [
     anyApi?.config,
     anyApi?.cfg,
   ].filter(isObjectRecord);
+  const fallbackFullConfigCandidatesMostToLeast = [
+    runtime?.cfg,
+    runtime?.config,
+  ].filter(isObjectRecord);
   const fallbackFullConfigCandidatesLeastToMost = [
     runtime?.config,
     runtime?.cfg,
   ].filter(isObjectRecord);
-  const mergedConfig =
-    fullConfigCandidatesMostToLeast.find((candidate) => isObjectRecord(candidate.plugins) || isObjectRecord(candidate.agents)) ??
-    {};
-  const workspaceConfig =
-    fullConfigCandidatesMostToLeast.find((candidate) =>
-      typeof candidate?.agents?.defaults?.workspace === 'string' ||
-      typeof candidate?.workspace === 'string'
-    ) ??
-    {};
+  const currentWorkspaceConfig = currentFullConfigCandidatesMostToLeast.find(hasWorkspaceConfig);
+  const fallbackWorkspaceConfig = fallbackFullConfigCandidatesMostToLeast.find(hasWorkspaceConfig);
   const currentEntryConfigs = currentFullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObjectRecord);
@@ -163,15 +158,19 @@ function resolveEntryConfig(api, options = {}) {
     ? mergeAdapterPluginConfigs(fallbackConfig, config)
     : config;
 
-  const configWorkspaceDir =
-    workspaceConfig?.agents?.defaults?.workspace ??
-    workspaceConfig?.workspace ??
-    mergedConfig?.agents?.defaults?.workspace ??
-    mergedConfig?.workspace;
   const apiWorkspaceDir = apiWorkspaceDirFrom(anyApi);
   const installedWorkspaceDir = typeof config.installedWorkspace === 'string'
     ? config.installedWorkspace
     : undefined;
+  const currentWorkspaceDir = workspaceDirFromConfig(currentWorkspaceConfig);
+  const fallbackWorkspaceDir = workspaceDirFromConfig(fallbackWorkspaceConfig);
+  const currentRouteWorkspaceIsStale =
+    currentDirectConfigs.length > 0 &&
+    !!installedWorkspaceDir &&
+    !!currentWorkspaceDir;
+  const configWorkspaceDir = currentRouteWorkspaceIsStale
+    ? undefined
+    : currentWorkspaceDir ?? fallbackWorkspaceDir;
   const workspaceDir = apiWorkspaceDir ?? configWorkspaceDir ?? installedWorkspaceDir;
   const apiWorkspaceDirToAssign = apiWorkspaceDir ? undefined : configWorkspaceDir;
   return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: apiWorkspaceDirToAssign, configIsPartial };
@@ -180,6 +179,17 @@ function resolveEntryConfig(api, options = {}) {
 function apiWorkspaceDirFrom(api) {
   if (typeof api?.workspaceDir !== 'string') return undefined;
   return entryAssignedWorkspaceDirMarkers.has(api) ? undefined : api.workspaceDir;
+}
+
+function hasWorkspaceConfig(config) {
+  return (
+    typeof config?.agents?.defaults?.workspace === 'string' ||
+    typeof config?.workspace === 'string'
+  );
+}
+
+function workspaceDirFromConfig(config) {
+  return config?.agents?.defaults?.workspace ?? config?.workspace;
 }
 
 function setEntryAssignedWorkspaceDir(api, workspaceDir) {

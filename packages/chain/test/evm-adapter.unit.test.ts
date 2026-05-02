@@ -152,4 +152,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(sig.r).toHaveLength(32);
     expect(sig.vs).toHaveLength(32);
   });
+
+  it('accepts randomSamplingHubRefreshMs override without RPC contact', () => {
+    const a = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 60_000 }));
+    expect(a.chainType).toBe('evm');
+  });
+
+  it('accepts randomSamplingHubRefreshMs=0 (event-/error-driven only) without RPC contact', () => {
+    const a = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 0 }));
+    expect(a.chainType).toBe('evm');
+  });
 });

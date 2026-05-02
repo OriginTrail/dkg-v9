@@ -1335,7 +1335,11 @@ export class DkgNodePlugin {
 
   private stopChannelPluginForReconfigure(
     api: OpenClawPluginApi,
-    options: { updateGatewayStatus?: boolean } = {},
+    options: {
+      updateGatewayStatus?: boolean;
+      clearLocalAgentIntegration?: boolean;
+      registrationMode?: string;
+    } = {},
   ): void {
     const channelPlugin = this.channelPlugin;
     if (!channelPlugin) return;
@@ -1349,6 +1353,9 @@ export class DkgNodePlugin {
           if (this.channelPlugin === channelPlugin) {
             this.channelPlugin = null;
             this.channelPluginConfigFingerprint = null;
+          }
+          if (options.clearLocalAgentIntegration) {
+            this.clearLocalAgentChannelIntegration(api, options.registrationMode);
           }
           return true;
         },
@@ -1435,14 +1442,19 @@ export class DkgNodePlugin {
       this.pendingChannelStartRegistrationMode = null;
       this.pendingChannelStartFingerprint = null;
       if (this.channelPluginStopInFlight && this.channelPlugin) {
-        void this.channelPlugin.stop({ updateGatewayStatus: true }).catch((err: any) => {
-          api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
-        });
+        void this.channelPlugin.stop({ updateGatewayStatus: true }).then(
+          () => this.clearLocalAgentChannelIntegration(api, opts?.registrationMode),
+          (err: any) => {
+            api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
+          },
+        );
       }
     }
     if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {
       this.stopChannelPluginForReconfigure(api, {
         updateGatewayStatus: !channelConfig?.enabled,
+        clearLocalAgentIntegration: !channelConfig?.enabled,
+        registrationMode: opts?.registrationMode,
       });
     }
     if (channelConfig?.enabled) {
@@ -1524,6 +1536,41 @@ export class DkgNodePlugin {
       return;
     }
     void this.syncLocalAgentIntegrationState(api, registrationMode, this.daemonClientGeneration);
+  }
+
+  private clearLocalAgentChannelIntegration(api: OpenClawPluginApi, registrationMode = 'full'): void {
+    const generation = this.daemonClientGeneration;
+    const client = this.client;
+    const memoryActive = this.memoryPlugin?.isRegistered() === true;
+    const capabilities = {
+      ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      localChat: false,
+      dkgPrimaryMemory: memoryActive,
+      wmImportPipeline: memoryActive,
+    };
+    void Promise.resolve().then(async () => {
+      if (generation !== this.daemonClientGeneration) return;
+      await client.updateLocalAgentIntegration('openclaw', {
+        enabled: true,
+        description: 'Connect a local OpenClaw agent through the DKG node.',
+        transport: { kind: 'openclaw-channel' },
+        capabilities,
+        manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
+        setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
+        metadata: {
+          channelId: 'dkg-ui',
+          registrationMode,
+          transportMode: 'disabled',
+        },
+        runtime: {
+          status: 'configured',
+          ready: false,
+          lastError: 'DKG UI channel disabled by adapter config',
+        },
+      });
+    }).catch((err: any) => {
+      api.logger.warn?.(`[dkg] Local agent channel disable status update failed: ${err?.message ?? err}`);
+    });
   }
 
   private clearLocalAgentIntegrationRetry(): void {

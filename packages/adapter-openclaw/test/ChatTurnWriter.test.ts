@@ -152,6 +152,58 @@ describe("ChatTurnWriter", () => {
     }
   });
 
+  it("ignores legacy migration markers when the direct watermark file is missing or corrupt", () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-legacy-recovery-"));
+    const legacyStateDir = path.join(workspace, ".openclaw");
+    const newStateDir = path.join(workspace, ".dkg-adapter");
+    const legacyFile = path.join(legacyStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    const newFile = path.join(newStateDir, "chat-turn-watermarks.json");
+    const sameDirNestedFile = path.join(newStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        "openclaw:tg:::legacy-recovery": { w: 6, b: 2 },
+      }));
+      new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      }).flushSync();
+      expect(fs.existsSync(`${newFile}.legacy-migrated.json`)).toBe(true);
+
+      fs.unlinkSync(newFile);
+      new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      }).flushSync();
+      let persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted["openclaw:tg:::legacy-recovery"]).toEqual({ w: 6, b: 2 });
+
+      fs.writeFileSync(newFile, "{not-json");
+      fs.mkdirSync(path.dirname(sameDirNestedFile), { recursive: true });
+      fs.writeFileSync(sameDirNestedFile, JSON.stringify({
+        "openclaw:tg:::same-dir-recovery": { w: 3, b: 1 },
+      }));
+      new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      }).flushSync();
+      persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted["openclaw:tg:::legacy-recovery"]).toEqual({ w: 6, b: 2 });
+      expect(persisted["openclaw:tg:::same-dir-recovery"]).toEqual({ w: 3, b: 1 });
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("migrates a same-dir nested legacy watermark only before a direct file exists", () => {
     const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-direct-legacy-"));
     const directFile = path.join(directStateDir, "chat-turn-watermarks.json");

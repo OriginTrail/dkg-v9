@@ -233,8 +233,16 @@ export class ChatTurnWriter {
     this.stateDir = options.stateDir;
     this.stateLayout = options.stateLayout ?? "nested";
     this.watermarkFilePath = watermarkPathForStateDir(this.stateDir, this.stateLayout);
-    this.initFromFile();
-    this.migrateLegacyStateDirs(this.legacyStateDirsForLayout(this.stateDir, this.stateLayout, options.legacyStateDirs ?? []));
+    const activeWatermarkFileLoaded = this.initFromFile();
+    this.migrateLegacyStateDirs(
+      this.legacyStateDirsForLayout(
+        this.stateDir,
+        this.stateLayout,
+        options.legacyStateDirs ?? [],
+        { includeSameDirNested: !activeWatermarkFileLoaded },
+      ),
+      { ignoreMigrationMarkers: !activeWatermarkFileLoaded },
+    );
   }
 
   setClient(client: any): void {
@@ -302,6 +310,7 @@ export class ChatTurnWriter {
     const mergedWm = new Map(this.cachedWatermarks);
     const mergedBc = new Map(this.w4bSessionCounts);
     const mergedMarkers = this.cloneExternalTurnMarkers(this.externalTurnMarkers);
+    let destinationFileLoaded = !destinationFileExisted ? false : true;
     try {
       if (destinationFileExisted) {
         this.mergeWatermarkFileInto(
@@ -315,14 +324,21 @@ export class ChatTurnWriter {
         );
       }
     } catch (err) {
+      destinationFileLoaded = false;
       this.logger.warn?.("[ChatTurnWriter.setStateDir] Failed to merge destination file; proceeding with current state", { err });
     }
     const legacyMergeSources = this.mergeLegacyStateDirsInto(
-      this.legacyStateDirsForLayout(newStateDir, newStateLayout, options.legacyStateDirs ?? []),
+      this.legacyStateDirsForLayout(
+        newStateDir,
+        newStateLayout,
+        options.legacyStateDirs ?? [],
+        { includeSameDirNested: !destinationFileLoaded },
+      ),
       newWatermarkFilePath,
       mergedWm,
       mergedBc,
       mergedMarkers,
+      { ignoreMigrationMarkers: !destinationFileLoaded },
     );
     // T27 — Write to the NEW path FIRST; only swap internal state on
     // confirmed success. Pre-fix the swap happened pre-write, so a
@@ -434,12 +450,13 @@ export class ChatTurnWriter {
     }
   }
 
-  private initFromFile(): void {
+  private initFromFile(): boolean {
     try {
       const dir = path.dirname(this.watermarkFilePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
+      if (!fs.existsSync(this.watermarkFilePath)) return false;
       if (fs.existsSync(this.watermarkFilePath)) {
         const content = fs.readFileSync(this.watermarkFilePath, "utf-8");
         const data = JSON.parse(content);
@@ -479,18 +496,24 @@ export class ChatTurnWriter {
           }
         }
       }
+      return true;
     } catch (err) {
       this.logger.warn?.("[ChatTurnWriter] Failed to load watermarks, starting fresh", { err });
+      return false;
     }
   }
 
-  private migrateLegacyStateDirs(legacyStateDirs: string[]): void {
+  private migrateLegacyStateDirs(
+    legacyStateDirs: string[],
+    options: { ignoreMigrationMarkers?: boolean } = {},
+  ): void {
     const mergedSources = this.mergeLegacyStateDirsInto(
       legacyStateDirs,
       this.watermarkFilePath,
       this.cachedWatermarks,
       this.w4bSessionCounts,
       this.externalTurnMarkers,
+      options,
     );
     if (mergedSources.length === 0) return;
     if (this.writeWatermarkFile()) {
@@ -511,10 +534,11 @@ export class ChatTurnWriter {
     stateDir: string,
     stateLayout: ChatTurnWriterStateLayout,
     legacyStateDirs: string[],
+    options: { includeSameDirNested?: boolean } = {},
   ): string[] {
     if (stateLayout !== "direct") return legacyStateDirs;
     const directWatermarkFilePath = watermarkPathForStateDir(stateDir, stateLayout);
-    return fs.existsSync(directWatermarkFilePath)
+    return fs.existsSync(directWatermarkFilePath) && !options.includeSameDirNested
       ? legacyStateDirs
       : [stateDir, ...legacyStateDirs];
   }
@@ -525,9 +549,12 @@ export class ChatTurnWriter {
     targetWm: Map<string, number>,
     targetBc: Map<string, number>,
     targetMarkers: Map<string, Map<string, number>>,
+    options: { ignoreMigrationMarkers?: boolean } = {},
   ): LegacyMergeSource[] {
     const targetCanonical = canonicalPathForCompare(targetWatermarkFilePath);
-    const migratedLegacySources = this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
+    const migratedLegacySources = options.ignoreMigrationMarkers
+      ? new Map<string, string>()
+      : this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
     const seen = new Set<string>();
     const mergedSources: LegacyMergeSource[] = [];
     for (const legacyStateDir of legacyStateDirs) {

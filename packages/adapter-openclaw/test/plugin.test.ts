@@ -2281,6 +2281,101 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('clears the stored local-agent bridge state when the channel is hot-disabled', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              enabled: true,
+              transport: {
+                kind: 'openclaw-channel',
+                bridgeUrl: 'http://127.0.0.1:9201',
+                healthUrl: 'http://127.0.0.1:9201/health',
+              },
+              runtime: { status: 'ready', ready: true, lastError: null },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      };
+
+      plugin.register(mockApi);
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
+
+      plugin.updateConfig({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      });
+      plugin.register(mockApi);
+
+      await vi.waitFor(() => {
+        const clearCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/openclaw') &&
+          call[1]?.method === 'PUT',
+        );
+        expect(clearCall).toBeTruthy();
+      });
+      const clearCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw') &&
+        call[1]?.method === 'PUT',
+      );
+      const clearBody = JSON.parse(String(clearCall?.[1]?.body));
+      expect(clearBody).toMatchObject({
+        enabled: true,
+        transport: { kind: 'openclaw-channel' },
+        capabilities: { localChat: false },
+        metadata: {
+          channelId: 'dkg-ui',
+          registrationMode: 'full',
+          transportMode: 'disabled',
+        },
+        runtime: {
+          status: 'configured',
+          ready: false,
+          lastError: 'DKG UI channel disabled by adapter config',
+        },
+      });
+      expect(clearBody.transport.bridgeUrl).toBeUndefined();
+      expect(clearBody.transport.healthUrl).toBeUndefined();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('recomputes gatewayUrl from current gateway config even when the port stays at the default', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];

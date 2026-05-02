@@ -1206,14 +1206,23 @@ describe('openclaw-entry', () => {
       stateDir: '/setup/.dkg-adapter',
       stateDirSource: 'setup-default',
       installedWorkspace: '/setup',
+    }, {
+      runtime: {
+        config: {
+          agents: {
+            defaults: {
+              workspace: '/setup',
+            },
+          },
+        },
+      },
     });
 
     entry(api);
-    expect((api as any).workspaceDir).toBeUndefined();
+    expect((api as any).workspaceDir).toBe('/setup');
 
-    // Simulate a stale api.workspaceDir left by an older entry wrapper or
-    // caller, then prove a higher-priority runtime workspace replaces it.
-    (api as any).workspaceDir = '/setup';
+    // The first value was assigned by this entry wrapper, so a later runtime
+    // workspace from config should still replace it.
     (api as any).runtime = {
       config: {
         agents: {
@@ -1228,7 +1237,36 @@ describe('openclaw-entry', () => {
 
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((api as any).workspaceDir).toBe('/runtime-workspace');
-    expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/runtime-workspace']);
+    expect(instance.workspaceDirsAtRegister).toEqual(['/setup', '/runtime-workspace']);
+  });
+
+  it('keeps caller workspaceDir ahead of stale merged config workspace', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({}, {
+      cfg: {
+        agents: { defaults: { workspace: '/stale-config-workspace' } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: '/stale-config-workspace/.dkg-adapter',
+                stateDirSource: 'setup-default',
+                installedWorkspace: '/stale-config-workspace',
+              },
+            },
+          },
+        },
+      },
+    });
+    (secondApi as any).workspaceDir = '/live-runtime-workspace';
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((secondApi as any).workspaceDir).toBe('/live-runtime-workspace');
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined, '/live-runtime-workspace']);
   });
 
   it('does not reuse a workspaceDir written by an earlier same-api registration', async () => {

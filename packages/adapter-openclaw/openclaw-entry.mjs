@@ -182,8 +182,9 @@ function resolveEntryConfig(api, options = {}) {
   const installedWorkspaceDir = typeof config.installedWorkspace === 'string'
     ? config.installedWorkspace
     : undefined;
-  const workspaceDir = configWorkspaceDir ?? apiWorkspaceDir ?? installedWorkspaceDir;
-  return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: configWorkspaceDir, configIsPartial };
+  const workspaceDir = apiWorkspaceDir ?? configWorkspaceDir ?? installedWorkspaceDir;
+  const apiWorkspaceDirToAssign = apiWorkspaceDir ? undefined : configWorkspaceDir;
+  return { config, bootstrapConfig, workspaceDir, apiWorkspaceDir: apiWorkspaceDirToAssign, configIsPartial };
 }
 
 function apiWorkspaceDirFrom(api) {

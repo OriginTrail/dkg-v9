@@ -44,6 +44,10 @@ interface FakeChainState {
   expectedLeafCount: number;
   cgIdForKc: bigint;
   submitProof: (leaf: Uint8Array, proof: Uint8Array[]) => Promise<TxResult>;
+  /** When set, exposes `chain.getBlockNumber` so the wall-clock stale
+   *  check inside the prover engages. Tests that omit this fall back
+   *  to "stale check always false" (the production-safe default). */
+  blockNumber?: number;
 }
 
 function makeChain(state: FakeChainState): ChainAdapter {
@@ -59,6 +63,9 @@ function makeChain(state: FakeChainState): ChainAdapter {
     getKCContextGraphId: vi.fn(async () => state.cgIdForKc),
     submitProof: vi.fn(state.submitProof),
   };
+  if (state.blockNumber !== undefined) {
+    partial.getBlockNumber = vi.fn(async () => state.blockNumber!);
+  }
   return partial as ChainAdapter;
 }
 
@@ -248,6 +255,68 @@ describe('RandomSamplingProver — short-circuits', () => {
     const outcome = await prover.tick();
     expect(outcome.kind).toBe('submitted');
     expect(createChallenge).toHaveBeenCalledTimes(1); // forced fresh
+    expect(submitProof).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('forces createChallenge when existing unsolved challenge is past its on-chain period boundary by wall-clock', async () => {
+    // Reproduces the Base Sepolia testnet deadlock from 2026-05-01:
+    // After an RS-contract Hub rotation, every staked node held an
+    // unsolved challenge for proof period P. With no submit/create
+    // tx landing post-rotation, the contract's
+    // `activeProofPeriodStartBlock` cursor stayed frozen at P, so
+    // `existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock`
+    // remained true forever and the prover happily reused the
+    // unsolvable stale challenge on every tick (kc-not-synced loop)
+    // — never calling createChallenge to advance the period.
+    //
+    // Fix: mirror the wall-clock stale check that already protected
+    // the solved branch. If wallclock is past the cached period's
+    // boundary, force a rotation regardless of solved/unsolved.
+    const fixture: KCFixture = {
+      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const submitProof = vi.fn(async () => ({ hash: '0xfresh', blockNumber: 9000, success: true }));
+    const createChallenge = vi.fn(async () => ({
+      challenge: makeChallenge({
+        knowledgeCollectionId: fixture.kcId,
+        chunkId: 0n,
+        // The chain's createChallenge auto-rotates the period internally;
+        // the returned challenge points at the now-current period.
+        activeProofPeriodStartBlock: 1000n,
+        proofingPeriodDurationInBlocks: 50n,
+      }),
+      contextGraphId: fixture.cgId,
+      hash: '0x', blockNumber: 9000, success: true,
+    }));
+    const chain = makeChain({
+      // Status read still reflects the FROZEN cursor — both the
+      // status and the stored challenge agree on period 1000, so
+      // `existingIsCurrent` is truthy. Only the wall-clock check
+      // can detect that the period actually expired.
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: makeChallenge({
+        knowledgeCollectionId: fixture.kcId,
+        activeProofPeriodStartBlock: 1000n,
+        proofingPeriodDurationInBlocks: 50n,
+        solved: false,
+      }),
+      // Wallclock is far past period boundary (1000 + 50 = 1050).
+      blockNumber: 9000,
+      createChallenge,
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+    const outcome = await prover.tick();
+    expect(outcome.kind).toBe('submitted');
+    expect(createChallenge).toHaveBeenCalledTimes(1);
     expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
   });

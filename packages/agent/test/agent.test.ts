@@ -780,10 +780,10 @@ describe('PeerId key extraction', () => {
 });
 
 describe('DKGAgent ACK signer gating', () => {
-  it('rejects core chainConfig without a profile admin key', async () => {
+  it('allows core chainConfig without a profile admin key for existing no-admin identities', async () => {
     const operational = ethers.Wallet.createRandom();
 
-    await expect(DKGAgent.create({
+    const agent = await DKGAgent.create({
       name: 'CoreMissingAdminKey',
       listenHost: '127.0.0.1',
       listenPort: 0,
@@ -793,7 +793,9 @@ describe('DKGAgent ACK signer gating', () => {
         operationalKeys: [operational.privateKey],
       },
       nodeRole: 'core',
-    })).rejects.toThrow(/adminPrivateKey is required for core nodes/);
+    });
+
+    expect(agent).toBeInstanceOf(DKGAgent);
   });
 
   it('auto-registers an ACK signer before registering the StorageACK handler', async () => {

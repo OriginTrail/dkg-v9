@@ -6,6 +6,8 @@ export interface FaucetResult {
   error?: string;
 }
 
+const EXPECTED_FAUCET_TRANSFERS_PER_WALLET = 2;
+
 export async function requestFaucetFunding(
   faucetUrl: string,
   mode: string,
@@ -54,6 +56,10 @@ export async function requestFaucetFunding(
     const batchSuccess = (typeof summary?.success === 'number' && summary.success > 0) || amounts.length > 0;
     sawSuccess ||= batchSuccess;
     funded.push(...amounts);
+    const summarySuccessCount = typeof summary?.success === 'number' ? summary.success : 0;
+    const successfulTransferCount = Math.max(summarySuccessCount, amounts.length);
+    const expectedTransferCount = batch.length * EXPECTED_FAUCET_TRANSFERS_PER_WALLET;
+    const batchFullyFunded = successfulTransferCount >= expectedTransferCount;
 
     const resultStatusesByAddress = new Map<string, string[]>();
     for (const result of results) {
@@ -69,7 +75,10 @@ export async function requestFaucetFunding(
     if (resultStatusesByAddress.size > 0) {
       for (const wallet of batch) {
         const statuses = resultStatusesByAddress.get(wallet.toLowerCase()) ?? [];
-        if (statuses.length > 0 && statuses.every((status) => status === 'success')) {
+        if (
+          statuses.length >= EXPECTED_FAUCET_TRANSFERS_PER_WALLET &&
+          statuses.every((status) => status === 'success')
+        ) {
           fundedWallets.add(wallet);
           failedWallets.delete(wallet);
         } else {
@@ -77,7 +86,7 @@ export async function requestFaucetFunding(
           fundedWallets.delete(wallet);
         }
       }
-    } else if (batchSuccess) {
+    } else if (batchFullyFunded) {
       for (const wallet of batch) {
         fundedWallets.add(wallet);
         failedWallets.delete(wallet);

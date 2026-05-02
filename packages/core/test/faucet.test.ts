@@ -25,10 +25,12 @@ function createTrackingFetch(status: number, body: unknown): { fetch: typeof glo
 describe('requestFaucetFunding', () => {
   it('returns funded amounts on success', async () => {
     const { fetch, calls } = createTrackingFetch(200, {
-      summary: { success: 2, failed: 0 },
+      summary: { success: 4, failed: 0 },
       results: [
-        { chainId: 'eth-sepolia', amount: '0.01', status: 'success' },
-        { chainId: 'trac-base', amount: '1000', status: 'success' },
+        { chainId: 'eth-sepolia', address: '0xAAA', amount: '0.01', status: 'success' },
+        { chainId: 'trac-base', address: '0xAAA', amount: '1000', status: 'success' },
+        { chainId: 'eth-sepolia', address: '0xBBB', amount: '0.01', status: 'success' },
+        { chainId: 'trac-base', address: '0xBBB', amount: '1000', status: 'success' },
       ],
     });
     const result = await requestFaucetFunding(
@@ -36,7 +38,7 @@ describe('requestFaucetFunding', () => {
       ['0xAAA', '0xBBB'], 'test-node', fetch,
     );
     expect(result.success).toBe(true);
-    expect(result.funded).toEqual(['0.01 ETH', '1000 TRAC']);
+    expect(result.funded).toEqual(['0.01 ETH', '1000 TRAC', '0.01 ETH', '1000 TRAC']);
     expect(result.fundedWallets).toEqual(['0xAAA', '0xBBB']);
     expect(result.failedWallets).toEqual([]);
     expect(calls).toHaveLength(1);
@@ -76,7 +78,7 @@ describe('requestFaucetFunding', () => {
       calls.push({ url: url as any, init: init as RequestInit });
       if (calls.length === 1) {
         return new Response(JSON.stringify({
-          summary: { success: 1 },
+          summary: { success: 6 },
           results: [{ chainId: 'eth-sepolia', amount: '0.01', status: 'success' }],
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -94,6 +96,24 @@ describe('requestFaucetFunding', () => {
     expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3']);
     expect(result.failedWallets).toEqual(['0x4']);
     expect(result.error).toContain('429');
+  });
+
+  it('keeps wallets failed when address-less summaries show only partial transfer success', async () => {
+    const { fetch } = createTrackingFetch(200, {
+      summary: { success: 1, failed: 3 },
+      results: [
+        { chainId: 'eth-sepolia', amount: '0.01', status: 'success' },
+      ],
+    });
+    const result = await requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test', ['0x1', '0x2'], 'partial-summary-node', fetch,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.fundedWallets).toEqual([]);
+    expect(result.failedWallets).toEqual(['0x1', '0x2']);
+    expect(result.error).toContain('0x1');
+    expect(result.error).toContain('0x2');
   });
 
   it('uses per-wallet result addresses to report remaining failed wallets', async () => {

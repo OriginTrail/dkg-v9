@@ -352,9 +352,10 @@ export interface DKGAgentConfig {
   /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
    * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Core nodes using chainConfig
-   * must provide it; edge nodes may omit it and run without profile
-   * creation/key-repair privileges.
+   * only for profile/key-management transactions. Nodes may omit it when they
+   * already have an on-chain identity and do not need profile creation/key-repair
+   * privileges; profile mutation paths will fail fast if admin authority is
+   * required but unavailable.
    * `operationalKeys` are the private keys for operational wallets.
    * The first key is the primary signer (identity, staking); all are used
    * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
@@ -549,12 +550,6 @@ export class DKGAgent {
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
       } else {
-        if (nodeRole === 'core') {
-          throw new Error(
-            'EVM adminPrivateKey is required for core nodes using chainConfig. ' +
-            'Provide the persisted profile admin key, or pass a pre-built chainAdapter for explicit no-admin mode.',
-          );
-        }
         chain = new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
       }
     } else {

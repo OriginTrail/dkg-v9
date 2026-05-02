@@ -2906,6 +2906,48 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toBe("It's rainy today.");
   });
 
+  it("T359 - cold-start W4a persists only the final user-visible reply from tool scaffolding", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "assistant", content: "startup greeting" },
+        { role: "user", content: "What do we know about OriginTrail?" },
+        { role: "assistant", content: "I'll inspect memory first." },
+        { role: "user", content: "memory_search raw_hits=0", tool_call_id: "call-memory-1" } as any,
+        { role: "assistant", content: "No memory hits; I'll query the graph." },
+        { role: "function" as any, name: "dkg_query", content: "query result rows" },
+        { role: "assistant", content: "OriginTrail is a decentralized knowledge graph project." },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("What do we know about OriginTrail?");
+    expect(call[2]).toBe("OriginTrail is a decentralized knowledge graph project.");
+  });
+
+  it("T359 - delayed W4a flushing still preserves ordinary multi-pair backfill", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "a2" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls.map((call) => [call[1], call[2]])).toEqual([
+      ["q1", "a1"],
+      ["q2", "a2"],
+    ]);
+  });
+
   it("T5 — cross-path stamps live on a SHORTER TTL than the in-flight turnIds (<=10s)", () => {
     // Regression for T5: pre-fix, content-only `w4aOriginKey` /
     // `w4bOriginKey` lived on the 60s `TURNID_TTL_MS` map. Two

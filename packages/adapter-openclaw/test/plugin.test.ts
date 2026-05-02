@@ -2687,7 +2687,6 @@ describe('DkgNodePlugin', () => {
     const events = onSpy.mock.calls.map((c: any) => c[0]);
     expect(events).toContain('before_prompt_build');
     expect(events).toContain('agent_end');
-    expect(events).toContain('agent.end');
     expect(events).toContain('before_compaction');
     expect(events).toContain('before_reset');
   });
@@ -2734,7 +2733,6 @@ describe('DkgNodePlugin', () => {
     const events1 = onSpy1.mock.calls.map((c: any) => c[0]);
     expect(events1).toContain('before_prompt_build');
     expect(events1).toContain('agent_end');
-    expect(events1).toContain('agent.end');
 
     // Multi-phase init: gateway hands a NEW api on the next register.
     plugin.register(api2);
@@ -2744,7 +2742,6 @@ describe('DkgNodePlugin', () => {
     const events2 = onSpy2.mock.calls.map((c: any) => c[0]);
     expect(events2).toContain('before_prompt_build');
     expect(events2).toContain('agent_end');
-    expect(events2).toContain('agent.end');
 
     // Critically: api1's handlers were NOT torn down. The `allHookSurfaces`
     // set tracks both surfaces; a future emit against api1 would still
@@ -3395,10 +3392,9 @@ describe('DkgNodePlugin', () => {
     const typedHookEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
     expect(typedHookEvents).toContain('before_prompt_build');
     expect(typedHookEvents).toContain('agent_end');
-    expect(typedHookEvents).toContain('agent.end');
   });
 
-  it('T359 - typed message hooks and agent_end are wired to ChatTurnWriter', async () => {
+  it('T359 - only supported typed agent_end plus internal message hooks are wired to ChatTurnWriter', async () => {
     const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
     (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map<string, any[]>([
       ['message:received', []],
@@ -3429,31 +3425,32 @@ describe('DkgNodePlugin', () => {
       client.storeChatTurn = vi.fn().mockResolvedValue(undefined);
 
       expect(typedHandlers.has('agent_end')).toBe(true);
-      expect(typedHandlers.has('agent.end')).toBe(true);
-      expect(typedHandlers.has('message_received')).toBe(true);
-      expect(typedHandlers.has('message_sent')).toBe(true);
-      expect(typedHandlers.has('message.received')).toBe(true);
-      expect(typedHandlers.has('message.sent')).toBe(true);
+      expect(typedHandlers.has('agent.end')).toBe(false);
+      expect(typedHandlers.has('message_received')).toBe(false);
+      expect(typedHandlers.has('message_sent')).toBe(false);
+      expect(typedHandlers.has('message.received')).toBe(false);
+      expect(typedHandlers.has('message.sent')).toBe(false);
 
-      typedHandlers.get('agent.end')!(
+      typedHandlers.get('agent_end')!(
         { messages: [{ role: 'user', content: 'healthy q' }, { role: 'assistant', content: 'healthy a' }] },
         { channelId: 'telegram', sessionKey: 'healthy-sk' },
       );
       await (plugin as any).chatTurnWriter.flush();
       expect(client.storeChatTurn).toHaveBeenCalledTimes(1);
 
-      typedHandlers.get('message.received')!(
-        { from: 'user-1', content: 'typed q', metadata: { messageId: 'typed-in-1' } },
-        { channelId: 'telegram', accountId: 'bot', conversationId: 'chat-1' },
-      );
-      await typedHandlers.get('message.sent')!(
-        { to: 'user-1', content: 'typed a', success: true },
-        { channelId: 'telegram', accountId: 'bot', conversationId: 'chat-1' },
-      );
+      const hookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL] as Map<string, any[]>;
+      hookMap.get('message:received')![0]({
+        sessionKey: 'internal-sk',
+        context: { channelId: 'telegram', conversationId: 'chat-1', content: 'internal q' },
+      });
+      await hookMap.get('message:sent')![0]({
+        sessionKey: 'internal-sk',
+        context: { channelId: 'telegram', conversationId: 'chat-1', content: 'internal a', success: true },
+      });
       await (plugin as any).chatTurnWriter.flush();
       expect(client.storeChatTurn).toHaveBeenCalledTimes(2);
-      expect(client.storeChatTurn.mock.calls[1][1]).toBe('typed q');
-      expect(client.storeChatTurn.mock.calls[1][2]).toBe('typed a');
+      expect(client.storeChatTurn.mock.calls[1][1]).toBe('internal q');
+      expect(client.storeChatTurn.mock.calls[1][2]).toBe('internal a');
     } finally {
       await plugin.stop();
       fs.rmSync(workspaceDir, { recursive: true, force: true });
@@ -3616,7 +3613,6 @@ describe('DkgNodePlugin', () => {
     const typedEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
     expect(typedEvents).toContain('before_prompt_build');
     expect(typedEvents).toContain('agent_end');
-    expect(typedEvents).toContain('agent.end');
     expect(typedEvents).toContain('before_compaction');
     expect(typedEvents).toContain('before_reset');
   });
@@ -3656,7 +3652,8 @@ describe('DkgNodePlugin', () => {
       expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("typed:before_compaction"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("typed:before_reset"))).toBe(false);
-      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
+      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(false);
+      expect(debugMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
     } finally {
       await plugin.stop();
       if (previousHookMap === undefined) {

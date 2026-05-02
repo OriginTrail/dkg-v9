@@ -332,13 +332,30 @@ describe("HookSurface", () => {
       expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
     });
 
-    it("logs non-rare commit timeouts at warn", async () => {
+    it("logs typed commit timeouts at debug because late fires can still prove liveness", async () => {
       const logger = mkLogger();
       const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 10 });
       hs.install("typed", "agent_end", vi.fn());
       await new Promise((r) => setTimeout(r, 30));
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
-      expect(logger.debug).not.toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+    });
+
+    it("late fire after timeout moves commitState to committed-by-fire", async () => {
+      const handlers = new Map<string, Array<(...args: any[]) => unknown>>();
+      const api = mkApi({
+        on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
+          handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        }) as any,
+      });
+      const hs = new HookSurface(api, mkLogger(), "auto", { commitGraceMs: 10 });
+      hs.install("typed", "agent_end", vi.fn());
+      await new Promise((r) => setTimeout(r, 30));
+      expect(hs.getDispatchStats()["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
+      handlers.get("agent_end")![0]();
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.fireCount).toBe(1);
+      expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-fire");
     });
 
     it("logs rare-fire commit timeouts at debug for infrequent hooks", async () => {

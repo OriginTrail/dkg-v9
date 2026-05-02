@@ -842,35 +842,13 @@ export class DkgNodePlugin {
               this.observedTypedOptions('before_prompt_build'),
             );
           }
-          for (const event of ['agent_end', 'agent.end']) {
-            if (typedNeedsRetry(event)) {
-              this.hookSurface.install(
-                'typed',
-                event,
-                this.observedTypedHandler(event, (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
-                this.observedTypedOptions(event),
-              );
-            }
-          }
-          for (const event of ['message_received', 'message.received']) {
-            if (typedNeedsRetry(event)) {
-              this.hookSurface.install(
-                'typed',
-                event,
-                this.observedTypedHandler(event, this.makeTypedMessageReceivedHandler()),
-                this.observedTypedOptions(event),
-              );
-            }
-          }
-          for (const event of ['message_sent', 'message.sent']) {
-            if (typedNeedsRetry(event)) {
-              this.hookSurface.install(
-                'typed',
-                event,
-                this.observedTypedHandler(event, this.makeTypedMessageSentHandler()),
-                this.observedTypedOptions(event),
-              );
-            }
+          if (typedNeedsRetry('agent_end')) {
+            this.hookSurface.install(
+              'typed',
+              'agent_end',
+              this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+              this.observedTypedOptions('agent_end'),
+            );
           }
           if (typedNeedsRetry('before_compaction')) {
             this.hookSurface.install(
@@ -962,14 +940,12 @@ export class DkgNodePlugin {
     // and `before_reset` are rare on healthy gateways; tag them so the
     // HookSurface commit-by-timeout warn downgrades to debug (otherwise
     // they false-positive within 30s of startup every time).
-    for (const event of ['agent_end', 'agent.end']) {
-      this.hookSurface.install(
-        'typed',
-        event,
-        this.observedTypedHandler(event, (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
-        this.observedTypedOptions(event),
-      );
-    }
+    this.hookSurface.install(
+      'typed',
+      'agent_end',
+      this.observedTypedHandler('agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx)),
+      this.observedTypedOptions('agent_end'),
+    );
     this.hookSurface.install(
       'typed',
       'before_compaction',
@@ -982,26 +958,6 @@ export class DkgNodePlugin {
       this.observedTypedHandler('before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx)),
       this.observedTypedOptions('before_reset', { rareFireExpected: true }),
     );
-
-    // W4b typed message hooks - OpenClaw 2026.4.15 emits these for
-    // Telegram delivery even when typed `agent_end` remains silent. W4a
-    // stays installed above as canonical backfill for gateways that emit it.
-    for (const event of ['message_received', 'message.received']) {
-      this.hookSurface.install(
-        'typed',
-        event,
-        this.observedTypedHandler(event, this.makeTypedMessageReceivedHandler()),
-        this.observedTypedOptions(event),
-      );
-    }
-    for (const event of ['message_sent', 'message.sent']) {
-      this.hookSurface.install(
-        'typed',
-        event,
-        this.observedTypedHandler(event, this.makeTypedMessageSentHandler()),
-        this.observedTypedOptions(event),
-      );
-    }
 
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism).
     // Internal hooks fire across both `full` and `setup-runtime` modes, so
@@ -1098,20 +1054,6 @@ export class DkgNodePlugin {
     return (ev: any) => {
       try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
       return this.chatTurnWriter!.onMessageSent(ev);
-    };
-  }
-
-  private makeTypedMessageReceivedHandler() {
-    return (ev: any, ctx?: any) => {
-      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
-      return this.chatTurnWriter!.onTypedMessageReceived(ev, ctx);
-    };
-  }
-
-  private makeTypedMessageSentHandler() {
-    return (ev: any, ctx?: any) => {
-      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
-      return this.chatTurnWriter!.onTypedMessageSent(ev, ctx);
     };
   }
 
@@ -3210,21 +3152,14 @@ export class DkgNodePlugin {
       };
     };
 
-    // Typed probe candidates include the installed lifecycle/message events
-    // plus a few probe-only candidates. Probe-only candidates are
-    // observability guards: if live smoke shows one firing, we promote it
-    // into the real install set in a source-backed follow-up.
+    // Typed probe candidates intentionally mirror accepted lifecycle hooks.
+    // Dotted aliases and typed message_* names were rejected or silent on
+    // OpenClaw 2026.4.15, so probing them only adds startup warning noise.
     const typedEvents = [
       'before_prompt_build',
       'agent_end',
-      'agent.end',
       'before_compaction',
       'before_reset',
-      'message_received',
-      'message_sending',
-      'message_sent',
-      'message.received',
-      'message.sent',
     ];
     // Internal-hook map (globalThis symbol) uses colon-separated names per
     // openclaw/src/infra/outbound/deliver.ts — probing the underscore form

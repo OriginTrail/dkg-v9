@@ -12,12 +12,10 @@ import { createHash } from "crypto";
  * Create failures roll back marker snapshots when `commitWatermarkStateSync`
  * fails; `setStateDir` migrates per-session `m`
  * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
- * Telegram persistence can arrive through typed `message_received/message_sent`
- * when typed `agent_end` is silent. Those events are normalized into the W4b
- * envelope and deduped against internal `message:received/message:sent` by
- * channel/account/conversation/messageId, outside the Node-UI marker space.
- * Typed W4b replay markers are retained and bound to provider message IDs so
- * repeated reset/compaction replays skip same-text occurrences safely.
+ * Telegram persistence is owned by W4a `agent_end` plus the colon-form
+ * internal W4b hooks (`message:received` / `message:sent`). W4b replay
+ * markers are retained and bound to provider message IDs so repeated
+ * reset/compaction replays skip same-text occurrences safely.
  */
 
 interface Logger {
@@ -130,8 +128,8 @@ export class ChatTurnWriter {
   // first reply are both retained; `onMessageSent` consumes the oldest so the
   // first outbound reply pairs with the first inbound, not the most recent.
   private pendingUserMessages: Map<string, string[]> = new Map();
-  // Parallel metadata queue for pending user messages. Typed `message_sent`
-  // lacks an outbound messageId in OpenClaw 2026.4.15, so we carry the inbound
+  // Parallel metadata queue for pending user messages. Some gateway
+  // `message:sent` envelopes lack an outbound messageId, so we carry the inbound
   // provider messageId forward and use it as the durable W4b turnId
   // discriminator when the outbound envelope cannot provide one.
   private pendingUserMessageMeta: Map<string, PendingUserMessageMeta[]> = new Map();
@@ -2064,20 +2062,49 @@ export class ChatTurnWriter {
     //     intermediate steps that included assistant text alongside
     //     the tool call, so the tool-call step was paired as a turn
     //     and the real final reply ended up paired with an empty user.
-    // Both shapes are handled by accumulating consecutive user messages
-    // into a queue and flushing the queue (joined) into the next
-    // non-tool-call assistant turn. Any assistant carrying tool calls
-    // is treated as intermediate regardless of whether it also has
-    // text content.
+    // Both shapes are handled by accumulating consecutive real user
+    // messages, keeping the latest textual non-tool assistant candidate,
+    // and flushing only when the next real user arrives (or the transcript
+    // ends). Any assistant carrying tool calls is treated as intermediate
+    // regardless of whether it also has text content.
     const pendingUsers: Array<{
       text: string;
       externalTurnIds: string[];
       externalDirect: boolean;
       messageIds: string[];
     }> = [];
+    let pendingAssistant: {
+      text: string;
+      assistantMessageIds: string[];
+    } | null = null;
     let pairIndex = 0;
+    const flushPair = () => {
+      if (!pendingAssistant || pendingUsers.length === 0) return;
+      const userText = pendingUsers.map((pending) => pending.text).join("\n");
+      const externalDirect = pendingUsers.length === 1 && pendingUsers[0].externalDirect;
+      const externalTurnIds = externalDirect
+        ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
+        : [];
+      const messageIds = Array.from(new Set(pendingUsers.flatMap((pending) => pending.messageIds)));
+      pendingUsers.length = 0;
+      if (pairIndex > savedUpTo) {
+        pairs.push({
+          user: userText,
+          assistant: this.stripRecalledMemory(pendingAssistant.text),
+          pairIndex,
+          externalTurnIds,
+          externalDirect,
+          messageIds,
+          assistantMessageIds: pendingAssistant.assistantMessageIds,
+        });
+      }
+      pendingAssistant = null;
+      pairIndex++;
+    };
     for (const msg of messages) {
+      if (this.isTranscriptScaffoldingMessage(msg)) continue;
       if (msg.role === "user") {
+        flushPair();
         // T28 — Skip image/attachment-only user messages whose
         // `extractText()` returns "" (the multi-modal content array
         // contained no `type === "text"` parts). W4b's
@@ -2097,15 +2124,14 @@ export class ChatTurnWriter {
         }
       } else if (msg.role === "assistant") {
         const text = this.extractText(msg.content);
-        const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
-          : Array.isArray(msg.tool_calls) ? msg.tool_calls.length > 0
-          : false;
+        const hasToolCalls = this.hasToolCalls(msg);
         if (hasToolCalls) {
           // Intermediate tool-call step — do NOT count as a pair, do NOT
           // advance pairIndex (the watermark counts user-visible turns),
           // and do NOT consume `pendingUsers`. The next non-tool-call
           // assistant is the real final reply that belongs to the
           // accumulated user side.
+          pendingAssistant = null;
           continue;
         }
         if (pendingUsers.length === 0) {
@@ -2135,30 +2161,42 @@ export class ChatTurnWriter {
           // put so a later real reply gets the same index.
           continue;
         }
-        const userText = pendingUsers.map((pending) => pending.text).join("\n");
-        const externalDirect = pendingUsers.length === 1 && pendingUsers[0].externalDirect;
-        const externalTurnIds = externalDirect
-          ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
-          : [];
-        const messageIds = Array.from(new Set(pendingUsers.flatMap((pending) => pending.messageIds)));
-        const assistantMessageIds = this.extractMessageIds(msg);
-        pendingUsers.length = 0;
-        if (pairIndex > savedUpTo) {
-          pairs.push({
-            user: userText,
-            assistant: this.stripRecalledMemory(text),
-            pairIndex,
-            externalTurnIds,
-            externalDirect,
-            messageIds,
-            assistantMessageIds,
-          });
-        }
-        pairIndex++;
+        pendingAssistant = {
+          text,
+          assistantMessageIds: this.extractMessageIds(msg),
+        };
       }
       // Skip `tool` and `system` messages — they don't form turns.
     }
+    flushPair();
     return pairs;
+  }
+
+  private hasToolCalls(msg: ChatTurnMessage): boolean {
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    return [
+      (msg as any).toolCalls,
+      (msg as any).tool_calls,
+      (context as any).toolCalls,
+      (context as any).tool_calls,
+      (metadata as any).toolCalls,
+      (metadata as any).tool_calls,
+    ].some((value) => Array.isArray(value) && value.length > 0);
+  }
+
+  private isTranscriptScaffoldingMessage(msg: ChatTurnMessage): boolean {
+    const role = (msg as any)?.role;
+    if (role === "system" || role === "tool" || role === "function") return true;
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    const values = [msg as any, context as any, metadata as any];
+    return values.some((value) =>
+      value.toolCallId !== undefined ||
+      value.tool_call_id !== undefined ||
+      value.toolResult === true ||
+      value.tool_result === true,
+    );
   }
 
   /**

@@ -42,8 +42,8 @@
  * I4 — deterministic commit timing. After first observed fire OR a 30s
  * grace period (whichever first), each event's `commitState` flips to
  * `committed-by-fire`, `committed-by-peer-fire`, or
- * `committed-by-timeout`. Callers can surface a warn if a typed-hook
- * event never fires within the grace period.
+ * `committed-by-timeout`. Timeout is diagnostic only: a hook can fire later,
+ * at which point stats move to `committed-by-fire`.
  *
  * C5 — double-registration guard. The same `(kind, event, handler)` triple
  * is a no-op on repeat install; we return the existing unsubscribe.
@@ -253,10 +253,11 @@ export class HookSurface {
           const msg =
             `[hook-surface] commit-by-timeout: ${key} never fired within ${this.commitGraceMs}ms. ` +
             `installedVia=${s.installedVia}, fireCount=0.`;
-          // Rare-fire hooks (e.g. before_compaction, before_reset) don't
-          // fire in routine traffic; surface at debug so real install
-          // failures on frequent hooks aren't drowned out by startup noise.
-          if (this.rareFireKeys.has(key)) {
+          // Startup-window timeouts are not proof a hook is dead: live
+          // Telegram smoke showed `agent_end` firing after the 30s window.
+          // Keep install failures loud, but make timeout liveness debug-only
+          // for typed hooks and explicitly rare hooks.
+          if (kind === 'typed' || this.rareFireKeys.has(key)) {
             this.logger.debug?.(msg);
           } else {
             this.logger.warn?.(msg);
@@ -502,7 +503,9 @@ export class HookSurface {
     if (!prev) return;
     const fireCount = prev.fireCount + 1;
     const nextState: CommitState =
-      prev.commitState === 'pending' || prev.commitState === 'committed-by-peer-fire'
+      prev.commitState === 'pending' ||
+      prev.commitState === 'committed-by-peer-fire' ||
+      prev.commitState === 'committed-by-timeout'
         ? 'committed-by-fire'
         : prev.commitState;
     this.stats.set(key, { ...prev, fireCount, commitState: nextState });

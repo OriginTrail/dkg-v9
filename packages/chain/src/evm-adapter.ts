@@ -165,12 +165,17 @@ interface EVMAdapterBaseConfig {
   chainId?: string;
   /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
-   * addresses from the Hub. Defaults to 5 minutes; pass `0` to disable
-   * periodic refresh. The adapter additionally listens for
-   * `Hub.ContractChanged` / `Hub.NewContract` and invalidates the
-   * cache on any RS-name event, and also self-invalidates on writes
-   * that revert with `UnauthorizedAccess(Only Contracts in Hub)` —
-   * so this TTL is a backstop, not the primary refresh mechanism.
+   * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
+   * treated as "use default" and intentionally NOT supported as a
+   * "disable periodic refresh" mode: even with the Hub event listener
+   * and the `Only Contracts in Hub` retry wrapper, a missed event on
+   * a read-only path (e.g. `getActiveProofPeriodStatus`,
+   * `getNodeChallenge`) would leave the adapter pinned to a stale
+   * address until restart, exactly the failure mode this cache exists
+   * to prevent. The TTL is a backstop, not the primary refresh
+   * mechanism — keep it short enough that a missed rotation
+   * self-heals within minutes and the steady-state RPC overhead is
+   * still effectively zero.
    */
   randomSamplingHubRefreshMs?: number;
 }
@@ -261,7 +266,13 @@ export class EVMChainAdapter implements ChainAdapter {
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
     };
 
-    const rsRefreshMs = config.randomSamplingHubRefreshMs ?? DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+    // Coerce `<=0` to the default. The "disable refresh entirely" mode
+    // is intentionally unsupported (see `randomSamplingHubRefreshMs`
+    // doc above) — without a TTL backstop, a missed Hub event on a
+    // read-only path (`getActiveProofPeriodStatus`, `getNodeChallenge`)
+    // would silently pin the adapter to a stale address until restart.
+    const rawRsRefreshMs = config.randomSamplingHubRefreshMs ?? DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+    const rsRefreshMs = rawRsRefreshMs > 0 ? rawRsRefreshMs : DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
     this.randomSamplingCache = new HubResolutionCache(
       () => this.resolveContract('RandomSampling'),
       { ttlMs: rsRefreshMs },
@@ -2373,6 +2384,15 @@ export class EVMChainAdapter implements ChainAdapter {
    * cached value is missing or has expired (TTL or invalidation),
    * which is exactly the property that makes node operators no longer
    * need a daemon restart after a Hub-side contract rotation.
+   *
+   * Failure-mode handling: only the documented "name not registered
+   * in the Hub" case (which `resolveContract` throws as
+   * `Contract "X" not found in Hub at <addr>`) is rewritten to a
+   * deployment-oriented hint. Every other failure (transient RPC,
+   * ABI mismatch, provider error, etc.) propagates with its original
+   * message preserved so the prover loop's error log points
+   * operators at the actual cause instead of misdirecting them
+   * toward a redeploy.
    */
   private async getRandomSampling(): Promise<{ rs: Contract; rss: Contract }> {
     try {
@@ -2381,11 +2401,16 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.randomSampling = rs;
       this.contracts.randomSamplingStorage = rss;
       return { rs, rss };
-    } catch {
-      throw new Error(
-        'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
-        'The deployer is responsible for shipping these alongside V10 publish.',
-      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found in Hub at')) {
+        throw new Error(
+          'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
+          'The deployer is responsible for shipping these alongside V10 publish.',
+          { cause: err },
+        );
+      }
+      throw err;
     }
   }
 

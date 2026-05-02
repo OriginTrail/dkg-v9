@@ -135,4 +135,47 @@ describe('HubResolutionCache', () => {
     expect(await cache.get()).toBe('v2');
     expect(calls).toBe(2);
   });
+
+  it('invalidate() during an in-flight resolve discards the result so it cannot write back the stale value', async () => {
+    // Simulates the race the Codex review flagged:
+    //   1. tick T0 calls get() — resolver starts, awaiting RPC
+    //   2. Hub rotates RandomSampling; listener calls invalidate()
+    //   3. tick T0's resolver finally returns the PRE-rotation address
+    //   4. without the generation guard, that pre-rotation value
+    //      would land in `cached` and the very next get() would
+    //      observe it (still stale) instead of re-resolving.
+    let calls = 0;
+    let releaseFirst!: (v: string) => void;
+    const cache = new HubResolutionCache(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<string>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return `post-rotation-v${calls}`;
+    });
+
+    const inflight = cache.get();
+    expect(calls).toBe(1);
+    expect(cache.peek()).toBeNull();
+
+    // Hub-event-listener equivalent fires while the first resolve is
+    // still suspended.
+    cache.invalidate();
+    expect(cache.peek()).toBeNull();
+
+    // Stale value finally lands. Awaiters of the original promise
+    // still receive it (we don't break their contract), but the cache
+    // must NOT remember it.
+    releaseFirst('pre-rotation-stale');
+    expect(await inflight).toBe('pre-rotation-stale');
+    expect(cache.peek()).toBeNull();
+
+    // Next get() forces a fresh resolve (no coalescing onto the dead
+    // generation), and that result is what becomes the new cache.
+    expect(await cache.get()).toBe('post-rotation-v2');
+    expect(cache.peek()).toBe('post-rotation-v2');
+    expect(calls).toBe(2);
+  });
 });

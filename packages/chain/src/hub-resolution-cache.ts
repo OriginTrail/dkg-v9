@@ -31,6 +31,17 @@ export class HubResolutionCache<T> {
   private cached: T | null = null;
   private resolvedAt = 0;
   private inflight: Promise<T> | null = null;
+  /**
+   * Monotonic generation counter. Bumped on every `invalidate()` so an
+   * in-flight resolve started under generation N cannot write back its
+   * value if `invalidate()` was called while it was suspended (the
+   * post-invalidation get() is at generation N+1 and starts a fresh
+   * resolve). Without this guard a Hub rotation that lands while a
+   * previous tick's resolve is awaiting the RPC reply would re-cache
+   * the **pre-rotation** address — exactly the stale-entry bug this
+   * cache was added to fix.
+   */
+  private generation = 0;
 
   constructor(
     private readonly resolve: () => Promise<T>,
@@ -40,7 +51,8 @@ export class HubResolutionCache<T> {
   /**
    * Return the cached value, re-resolving if it is missing or stale.
    * Concurrent callers during a re-resolve share the same in-flight
-   * promise so we don't issue duplicate Hub reads.
+   * promise so we don't issue duplicate Hub reads, but only as long
+   * as no `invalidate()` has fired in the interim — see `generation`.
    */
   async get(): Promise<T> {
     const now = this.opts.now?.() ?? Date.now();
@@ -50,23 +62,45 @@ export class HubResolutionCache<T> {
       if (!stale) return this.cached;
     }
     if (this.inflight) return this.inflight;
+    const startGeneration = this.generation;
     this.inflight = (async () => {
       try {
         const value = await this.resolve();
-        this.cached = value;
-        this.resolvedAt = this.opts.now?.() ?? Date.now();
+        // If `invalidate()` ran while we were awaiting, the cache
+        // now belongs to a newer generation (and a newer get() may
+        // already be coalescing a fresh resolve). Returning `value`
+        // to our awaiters is fine — they asked under our generation
+        // — but we must not write it back to `cached` or future
+        // synchronous reads would observe the stale address.
+        if (this.generation === startGeneration) {
+          this.cached = value;
+          this.resolvedAt = this.opts.now?.() ?? Date.now();
+        }
         return value;
       } finally {
-        this.inflight = null;
+        // Only clear `inflight` if we still own it. A concurrent
+        // `invalidate()` may have already replaced it (effectively),
+        // but checking by reference identity covers both the
+        // single-resolve and racing cases.
+        if (this.generation === startGeneration) {
+          this.inflight = null;
+        }
       }
     })();
     return this.inflight;
   }
 
-  /** Drop the cached value. Next `get()` will re-resolve from source. */
+  /**
+   * Drop the cached value AND invalidate any in-flight resolve so its
+   * result cannot write back to the cache. Next `get()` re-resolves
+   * from source. Idempotent — duplicate calls (e.g. from the
+   * double-emit `Hub.ContractChanged`/`NewContract` pair) are safe.
+   */
   invalidate(): void {
     this.cached = null;
     this.resolvedAt = 0;
+    this.generation += 1;
+    this.inflight = null;
   }
 
   /** Snapshot the cached value without triggering a refresh. Returns `null` if never resolved or invalidated. */

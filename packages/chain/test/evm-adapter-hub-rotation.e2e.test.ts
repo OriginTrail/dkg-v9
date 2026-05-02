@@ -166,9 +166,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   it(
     'Hub event listener: ContractChanged invalidates the RandomSampling cache',
     async () => {
-      // TTL = 0 disables periodic refresh, so the only path that can
-      // re-resolve here is the event listener installed in init().
-      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 0);
+      // High TTL (10 min) far exceeds the test's lifetime, so the only
+      // path that can plausibly re-resolve within this test window is
+      // the event listener installed in init().
+      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
 
       // Drop the JsonRpcProvider polling interval (default 4 s) before
       // the listener is attached so this test resolves quickly.
@@ -206,7 +207,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   it(
     'withHubStaleRetry: marker error invalidates RS+RSS caches and retries the operation exactly once',
     async () => {
-      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 0);
+      // High TTL keeps the cache from "spontaneously" re-resolving
+      // mid-test; the wrapper's invalidate() is the only signal we
+      // care about here.
+      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       await adapter.getActiveProofPeriodStatus!();
       // After init both RS-side caches are populated.
       expect((adapter as any).randomSamplingCache.peek()).not.toBeNull();
@@ -244,7 +248,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   it(
     'withHubStaleRetry: unrelated revert messages do NOT invalidate the cache and do NOT retry',
     async () => {
-      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 0);
+      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       await adapter.getActiveProofPeriodStatus!();
       const cachedRsBefore = (adapter as any).randomSamplingCache.peek();
       const cachedRssBefore = (adapter as any).randomSamplingStorageCache.peek();

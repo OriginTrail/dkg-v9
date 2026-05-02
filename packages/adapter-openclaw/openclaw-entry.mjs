@@ -164,19 +164,18 @@ function resolveEntryConfig(api, options = {}) {
     : undefined;
   const currentWorkspaceDir = workspaceDirFromConfig(currentWorkspaceConfig);
   const fallbackWorkspaceDir = workspaceDirFromConfig(fallbackWorkspaceConfig);
-  const currentDirectConfigMatchesInstalledWorkspace =
-    config.stateDirSource === 'setup-default' &&
-    stateDirMatchesWorkspaceDefault(config.stateDir, installedWorkspaceDir);
-  const currentEntryConfigMatchesInstalledWorkspace = currentEntryConfigs.some((candidate) =>
+  const currentDirectConfigMatchesInstalledWorkspace = currentDirectConfigs.some((candidate) =>
+    setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
+  );
+  const currentEntryConfigMatchesInstalledWorkspace = currentDirectConfigs.length === 0 && currentEntryConfigs.some((candidate) =>
     setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
   );
   const currentWorkspaceMatchesConfiguredStateDir =
     stateDirMatchesWorkspaceDefault(config.stateDir, currentWorkspaceDir);
   const currentRouteWorkspaceIsStale =
-    (currentDirectConfigs.length > 0 || currentEntryConfigMatchesInstalledWorkspace) &&
+    (currentDirectConfigMatchesInstalledWorkspace || currentEntryConfigMatchesInstalledWorkspace) &&
     !!installedWorkspaceDir &&
     !!currentWorkspaceDir &&
-    currentDirectConfigMatchesInstalledWorkspace &&
     !currentWorkspaceMatchesConfiguredStateDir;
   const configWorkspaceDir = currentRouteWorkspaceIsStale
     ? undefined

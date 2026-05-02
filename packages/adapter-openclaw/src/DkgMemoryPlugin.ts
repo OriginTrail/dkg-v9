@@ -868,7 +868,7 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
   const currentMemoryEnabled = directPluginConfigMemoryEnabledFromCandidates(currentCandidates);
   if (currentMemoryEnabled !== undefined) return currentMemoryEnabled;
   if (currentCandidates.some(({ config }) =>
-    looksLikeAdapterPluginConfig(config) && isPartialAdapterConfigOverlay(config)
+    isPartialModuleConfigOverlay(config)
   )) {
     return undefined;
   }
@@ -904,6 +904,15 @@ function hasCurrentDirectPartialOverlay(api: OpenClawPluginApi): boolean {
     anyApi?.pluginConfig,
   ].some((candidate) =>
     looksLikeAdapterPluginConfig(candidate) && isPartialAdapterConfigOverlay(candidate)
+  );
+}
+
+function isPartialModuleConfigOverlay(candidate: unknown): boolean {
+  if (!looksLikeAdapterPluginConfig(candidate) || !isPartialAdapterConfigOverlay(candidate)) return false;
+  const config = candidate as Record<string, unknown>;
+  return ['memory', 'channel'].some((key) =>
+    isObjectRecord(config[key]) &&
+    !Object.prototype.hasOwnProperty.call(config[key], 'enabled')
   );
 }
 

@@ -353,7 +353,7 @@ describe('DkgMemoryPlugin.register', () => {
     } as any;
     (api as any).runtime = {
       pluginConfig: {
-        memory: { enabled: false },
+        daemonUrl: 'http://localhost:9400',
       },
     };
 
@@ -366,6 +366,31 @@ describe('DkgMemoryPlugin.register', () => {
 
     expect(plugin.register(api)).toBe(true);
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(3);
+  });
+
+  it('honors runtime direct memory disable behind state metadata-only current config', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      stateDir: '/work/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/work',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        memory: { enabled: false },
+      },
+    };
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
   });
 
   it('does not revive direct memory ownership after an explicit direct disable', () => {

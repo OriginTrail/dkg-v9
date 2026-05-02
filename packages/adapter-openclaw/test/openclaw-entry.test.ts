@@ -1365,6 +1365,40 @@ describe('openclaw-entry', () => {
     expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
+  it('keeps live route workspace when current direct overlay lacks setup state metadata', async () => {
+    const liveWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-live-route-workspace-'));
+    const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-entry-installed-workspace-'));
+    tempRoots.push(liveWorkspace, installedWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'live route skill' });
+    const api = makeDirectPluginConfigApi({
+      memory: { enabled: true },
+    }, {
+      cfg: {
+        agents: { defaults: { workspace: liveWorkspace } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: join(installedWorkspace, '.dkg-adapter'),
+                stateDirSource: 'setup-default',
+                installedWorkspace,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe(liveWorkspace);
+    expect(instance.config.installedWorkspace).toBe(installedWorkspace);
+    expect(instance.workspaceDirsAtRegister).toEqual([liveWorkspace]);
+    expect(readFileSync(join(liveWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('live route skill');
+    expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
   it('keeps current workspace metadata when direct installedWorkspace has no setup-default stateDir evidence', async () => {
     const currentWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-current-workspace-'));
     const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-installed-workspace-'));

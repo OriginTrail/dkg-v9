@@ -239,7 +239,6 @@ export class ChatTurnWriter {
         this.stateDir,
         this.stateLayout,
         options.legacyStateDirs ?? [],
-        { includeSameDirNested: !activeWatermarkFileLoaded },
       ),
       { ignoreMigrationMarkers: !activeWatermarkFileLoaded },
     );
@@ -332,7 +331,6 @@ export class ChatTurnWriter {
         newStateDir,
         newStateLayout,
         options.legacyStateDirs ?? [],
-        { includeSameDirNested: !destinationFileLoaded },
       ),
       newWatermarkFilePath,
       mergedWm,
@@ -534,13 +532,9 @@ export class ChatTurnWriter {
     stateDir: string,
     stateLayout: ChatTurnWriterStateLayout,
     legacyStateDirs: string[],
-    options: { includeSameDirNested?: boolean } = {},
   ): string[] {
     if (stateLayout !== "direct") return legacyStateDirs;
-    const directWatermarkFilePath = watermarkPathForStateDir(stateDir, stateLayout);
-    return fs.existsSync(directWatermarkFilePath) && !options.includeSameDirNested
-      ? legacyStateDirs
-      : [stateDir, ...legacyStateDirs];
+    return [stateDir, ...legacyStateDirs];
   }
 
   private mergeLegacyStateDirsInto(

@@ -109,9 +109,9 @@ describe("ChatTurnWriter", () => {
 
       let persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
       expect(persisted["openclaw:tg:::legacy-only"]).toEqual({ w: 2, b: 1 });
-      expect(persisted["openclaw:tg:::nested-only"]).toBeUndefined();
+      expect(persisted["openclaw:tg:::nested-only"]).toEqual({ w: 6, b: 2 });
       expect(persisted["openclaw:tg:::new-only"]).toEqual({ w: 11, b: 4 });
-      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 7, b: 9 });
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 8, b: 9 });
       expect(fs.existsSync(legacyFile)).toBe(true);
       expect(fs.existsSync(newNestedFile)).toBe(true);
 
@@ -204,7 +204,7 @@ describe("ChatTurnWriter", () => {
     }
   });
 
-  it("migrates a same-dir nested legacy watermark only before a direct file exists", () => {
+  it("remerges a same-dir nested legacy watermark when its content changes", () => {
     const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-direct-legacy-"));
     const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
     const nestedFile = path.join(directStateDir, "dkg-adapter", "chat-turn-watermarks.json");
@@ -239,12 +239,26 @@ describe("ChatTurnWriter", () => {
       persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
       expect(persisted["openclaw:tg:::nested-only"]).toEqual({ w: 1, b: 1 });
       expect(fs.existsSync(nestedFile)).toBe(true);
+
+      fs.writeFileSync(nestedFile, JSON.stringify({
+        "openclaw:tg:::nested-only": { w: 9, b: 3 },
+      }));
+      const afterNestedAdvance = new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      afterNestedAdvance.flushSync();
+
+      persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted["openclaw:tg:::nested-only"]).toEqual({ w: 9, b: 3 });
     } finally {
       fs.rmSync(directStateDir, { recursive: true, force: true });
     }
   });
 
-  it("setStateDir ignores same-dir nested legacy watermarks when the direct destination file exists", async () => {
+  it("setStateDir remerges same-dir nested legacy watermarks when the direct destination file exists", async () => {
     const oldStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-setstate-old-"));
     const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-setstate-direct-"));
     const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
@@ -267,7 +281,7 @@ describe("ChatTurnWriter", () => {
       localWriter.flushSync();
 
       const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
-      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 1, b: 1 });
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 9, b: 9 });
       expect(fs.existsSync(nestedFile)).toBe(true);
     } finally {
       localWriter.flushSync();

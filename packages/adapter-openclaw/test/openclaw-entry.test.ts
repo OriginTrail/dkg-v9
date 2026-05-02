@@ -520,6 +520,68 @@ describe('openclaw-entry', () => {
     });
   });
 
+  it('keeps runtime cfg direct config ahead of stale runtime pluginConfig on first load', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      runtime: {
+        cfg: {
+          daemonUrl: 'http://127.0.0.1:9765',
+          memory: { enabled: false },
+          channel: { enabled: true, port: 9766 },
+        },
+        pluginConfig: {
+          daemonUrl: 'http://127.0.0.1:9565',
+          memory: { enabled: true },
+          channel: { enabled: false, port: 9566 },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9765',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9766 },
+    });
+  });
+
+  it('keeps runtime cfg entry config ahead of stale runtime pluginConfig on first load', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const api = makeDirectPluginConfigApi({}, {
+      runtime: {
+        cfg: {
+          plugins: {
+            entries: {
+              'adapter-openclaw': {
+                config: {
+                  daemonUrl: 'http://127.0.0.1:9775',
+                  memory: { enabled: false },
+                  channel: { enabled: true, port: 9776 },
+                },
+              },
+            },
+          },
+        },
+        pluginConfig: {
+          daemonUrl: 'http://127.0.0.1:9575',
+          memory: { enabled: true },
+          channel: { enabled: false, port: 9576 },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9775',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9776 },
+    });
+  });
+
   it('keeps refreshed api.config ahead of stale api.pluginConfig', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
@@ -1301,12 +1363,15 @@ describe('openclaw-entry', () => {
     expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
-  it('keeps metadata-only current entry installedWorkspace ahead of stale route workspace metadata', async () => {
+  it('keeps metadata-only current entry installedWorkspace ahead of stale route workspace metadata with pluginConfig flags', async () => {
     const freshWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-fresh-entry-workspace-'));
     const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-entry-route-workspace-'));
     tempRoots.push(freshWorkspace, staleWorkspace);
     const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh entry skill' });
-    const api = makeDirectPluginConfigApi({}, {
+    const api = makeDirectPluginConfigApi({
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9876 },
+    }, {
       cfg: {
         agents: { defaults: { workspace: staleWorkspace } },
         plugins: {
@@ -1328,6 +1393,7 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect((api as any).workspaceDir).toBeUndefined();
     expect(instance.config.installedWorkspace).toBe(freshWorkspace);
+    expect(instance.config.memory).toEqual({ enabled: true });
     expect(instance.workspaceDirsAtRegister).toEqual([undefined]);
     expect(readFileSync(join(freshWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('fresh entry skill');
     expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
@@ -1370,9 +1436,10 @@ describe('openclaw-entry', () => {
     const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-entry-installed-workspace-'));
     tempRoots.push(liveWorkspace, installedWorkspace);
     const entry = await loadEntryWithFakeRuntime({ skillText: 'live route skill' });
-    const api = makeDirectPluginConfigApi({
-      memory: { enabled: true },
-    }, {
+    const api = makeDirectPluginConfigApi({}, {
+      config: {
+        memory: { enabled: true },
+      },
       cfg: {
         agents: { defaults: { workspace: liveWorkspace } },
         plugins: {

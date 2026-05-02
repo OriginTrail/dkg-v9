@@ -85,22 +85,21 @@ function resolveEntryConfig(api, options = {}) {
     runtime?.cfg,
     runtime?.config,
   ].filter(isObjectRecord);
-  const fallbackFullConfigCandidatesLeastToMost = [
-    runtime?.config,
-    runtime?.cfg,
-  ].filter(isObjectRecord);
   const currentWorkspaceConfig = currentFullConfigCandidatesMostToLeast.find(hasWorkspaceConfig);
   const fallbackWorkspaceConfig = fallbackFullConfigCandidatesMostToLeast.find(hasWorkspaceConfig);
   const currentEntryConfigs = currentFullConfigCandidatesLeastToMost
     .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
     .filter(isObjectRecord);
-  const fallbackEntryConfigs = fallbackFullConfigCandidatesLeastToMost
-    .map((candidate) => candidate?.plugins?.entries?.['adapter-openclaw']?.config)
-    .filter(isObjectRecord);
+  const fallbackConfigSources = [
+    directPluginConfigFrom(runtime?.pluginConfig),
+    ...adapterConfigSourcesFromFullConfig(runtime?.config),
+    ...adapterConfigSourcesFromFullConfig(runtime?.cfg),
+  ].filter(isObjectRecord);
   const currentDirectApiConfigs = [
     directApiConfigFrom(anyApi?.config),
     directApiConfigFrom(anyApi?.cfg),
   ].filter(isObjectRecord);
+  const hasCurrentDirectApiConfig = currentDirectApiConfigs.length > 0;
   const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
   const currentEntryConfigsAreMetadataOnly =
     currentEntryConfigs.length > 0 &&
@@ -109,26 +108,21 @@ function resolveEntryConfig(api, options = {}) {
     currentEntryConfigsAreMetadataOnly
       ? stripStateMetadataFromAdapterConfig(currentPluginConfig)
       : currentPluginConfig;
-  const currentDirectConfigs = currentDirectApiConfigs.length > 0
+  const currentDirectConfigs = hasCurrentDirectApiConfig
     ? currentDirectApiConfigs
     : currentEntryConfigs.length === 0 || currentEntryConfigsAreMetadataOnly
       ? [currentPluginConfigForMetadataEntry].filter(isObjectRecord)
       : [];
-  const fallbackDirectConfigs = [
-    directPluginConfigFrom(runtime?.config),
-    directPluginConfigFrom(runtime?.cfg),
-    directPluginConfigFrom(runtime?.pluginConfig),
-  ].filter(isObjectRecord);
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
-  const entryConfigs = hasCurrentConfigSource ? currentEntryConfigs : fallbackEntryConfigs;
-  const directConfigs = currentDirectConfigs.length > 0
-    ? currentDirectConfigs
-    : hasCurrentConfigSource
-      ? []
-      : fallbackDirectConfigs;
-  const config = mergeAdapterPluginConfigs(...entryConfigs, ...directConfigs);
-  const hasConfigSource = entryConfigs.length > 0 || directConfigs.length > 0;
-  const configSources = [...entryConfigs, ...directConfigs];
+  const currentConfigSourcesForMerge = [
+    ...currentEntryConfigs,
+    ...(currentDirectConfigs.length > 0 ? currentDirectConfigs : []),
+  ];
+  const configSources = hasCurrentConfigSource
+    ? currentConfigSourcesForMerge
+    : fallbackConfigSources;
+  const config = mergeAdapterPluginConfigs(...configSources);
+  const hasConfigSource = configSources.length > 0;
   const configIsPartial =
     !hasConfigSource ||
     configSources.every(isPartialAdapterConfigOverlay);
@@ -147,7 +141,7 @@ function resolveEntryConfig(api, options = {}) {
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
   }
-  const fallbackConfig = mergeAdapterPluginConfigs(...fallbackEntryConfigs, ...fallbackDirectConfigs);
+  const fallbackConfig = mergeAdapterPluginConfigs(...fallbackConfigSources);
   if (configIsPartial && (daemonUrlFromEnv || daemonUrlFromCurrentConfig) && !dkgHomeFromCurrentConfig) {
     delete fallbackConfig.dkgHome;
     if (!Object.prototype.hasOwnProperty.call(config, 'dkgHome')) {
@@ -167,7 +161,7 @@ function resolveEntryConfig(api, options = {}) {
   const currentDirectConfigMatchesInstalledWorkspace = currentDirectConfigs.some((candidate) =>
     setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
   );
-  const currentEntryConfigMatchesInstalledWorkspace = currentDirectConfigs.length === 0 && currentEntryConfigs.some((candidate) =>
+  const currentEntryConfigMatchesInstalledWorkspace = !hasCurrentDirectApiConfig && currentEntryConfigs.some((candidate) =>
     setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
   );
   const currentWorkspaceMatchesConfiguredStateDir =
@@ -274,6 +268,14 @@ function directPluginConfigFrom(config) {
     return config;
   }
   return undefined;
+}
+
+function adapterConfigSourcesFromFullConfig(config) {
+  if (!isObjectRecord(config)) return [];
+  return [
+    config.plugins?.entries?.['adapter-openclaw']?.config,
+    directPluginConfigFrom(config),
+  ].filter(isObjectRecord);
 }
 
 function stripStateMetadataFromAdapterConfig(config) {

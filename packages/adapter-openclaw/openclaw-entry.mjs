@@ -167,10 +167,13 @@ function resolveEntryConfig(api, options = {}) {
   const currentDirectConfigMatchesInstalledWorkspace =
     config.stateDirSource === 'setup-default' &&
     stateDirMatchesWorkspaceDefault(config.stateDir, installedWorkspaceDir);
+  const currentEntryConfigMatchesInstalledWorkspace = currentEntryConfigs.some((candidate) =>
+    setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
+  );
   const currentWorkspaceMatchesConfiguredStateDir =
     stateDirMatchesWorkspaceDefault(config.stateDir, currentWorkspaceDir);
   const currentRouteWorkspaceIsStale =
-    currentDirectConfigs.length > 0 &&
+    (currentDirectConfigs.length > 0 || currentEntryConfigMatchesInstalledWorkspace) &&
     !!installedWorkspaceDir &&
     !!currentWorkspaceDir &&
     currentDirectConfigMatchesInstalledWorkspace &&
@@ -202,6 +205,14 @@ function workspaceDirFromConfig(config) {
 function stateDirMatchesWorkspaceDefault(stateDir, workspaceDir) {
   if (typeof stateDir !== 'string' || typeof workspaceDir !== 'string') return false;
   return normalizePath(stateDir) === normalizePath(join(workspaceDir, '.dkg-adapter'));
+}
+
+function setupDefaultStateMetadataMatchesWorkspace(config, workspaceDir) {
+  return (
+    config?.stateDirSource === 'setup-default' &&
+    config?.installedWorkspace === workspaceDir &&
+    stateDirMatchesWorkspaceDefault(config?.stateDir, workspaceDir)
+  );
 }
 
 function normalizePath(value) {

@@ -337,6 +337,63 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves direct memory ownership across partial direct config overlays', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      stateDir: '/work/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/work',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        memory: { enabled: false },
+      },
+    };
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+    api.config = {
+      memory: { memoryDir: '/work/.dkg-adapter/memory' },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not revive direct memory ownership after an explicit direct disable', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    api.config = {
+      stateDir: '/disabled/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/disabled',
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
+  });
+
   it('uses direct memory fallback when merged config only carries route metadata', () => {
     const api = makeApi();
     api.config = {

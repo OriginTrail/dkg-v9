@@ -617,7 +617,9 @@ export class DkgMemoryPlugin {
       this.registeredCapability &&
       typeof targetApi.registerMemoryCapability === 'function'
     ) {
-      const ownership = memorySlotOwnershipForApi(targetApi);
+      const ownership = memorySlotOwnershipForApi(targetApi, {
+        preserveDirectPartialOverlay: this.registeredOwnershipSource === 'direct-plugin-config',
+      });
       if (ownership?.owned !== true) {
         this.invalidateRegistration();
         return;
@@ -742,6 +744,7 @@ export class DkgMemoryPlugin {
    */
   private registerCapability(api: OpenClawPluginApi): boolean {
     if (typeof api.registerMemoryCapability !== 'function') {
+      this.invalidateRegistration();
       api.logger.warn?.(
         '[dkg-memory] api.registerMemoryCapability is not available — gateway is older than the memory-slot contract. ' +
         'The adapter no longer ships a compatibility `dkg_memory_search` tool; upgrade the gateway to restore recall.',
@@ -749,8 +752,13 @@ export class DkgMemoryPlugin {
       return false;
     }
 
-    const ownership = memorySlotOwnershipForApi(api);
+    const ownership = memorySlotOwnershipForApi(api, {
+      preserveDirectPartialOverlay:
+        this.registeredCapability !== null &&
+        this.registeredOwnershipSource === 'direct-plugin-config',
+    });
     if (ownership?.owned !== true) {
+      this.invalidateRegistration();
       api.logger.warn?.(memoryRegistrationSkipMessage(ownership));
       return false;
     }
@@ -815,7 +823,10 @@ type MemorySlotOwnership = {
   source: MemorySlotOwnershipSource;
 };
 
-function memorySlotOwnershipForApi(api: OpenClawPluginApi): MemorySlotOwnership | undefined {
+function memorySlotOwnershipForApi(
+  api: OpenClawPluginApi,
+  options: { preserveDirectPartialOverlay?: boolean } = {},
+): MemorySlotOwnership | undefined {
   const mergedConfig = resolveOpenClawMergedConfig(api);
   const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
   const slots = plugins?.slots as Record<string, unknown> | undefined;
@@ -826,7 +837,12 @@ function memorySlotOwnershipForApi(api: OpenClawPluginApi): MemorySlotOwnership 
     return { owned: false, source: 'merged-config' };
   }
   const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);
-  if (directMemoryEnabled === undefined) return undefined;
+  if (directMemoryEnabled === undefined) {
+    if (options.preserveDirectPartialOverlay && hasCurrentDirectPartialOverlay(api)) {
+      return { owned: true, source: 'direct-plugin-config' };
+    }
+    return undefined;
+  }
   return { owned: directMemoryEnabled, source: 'direct-plugin-config' };
 }
 
@@ -844,14 +860,29 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
   if (!api) return undefined;
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
-  const candidates = [
+  const currentCandidates = [
     { config: anyApi?.cfg, omittedMemoryMeansDisabled: true },
     { config: anyApi?.config, omittedMemoryMeansDisabled: true },
     { config: anyApi?.pluginConfig, omittedMemoryMeansDisabled: true },
+  ];
+  const currentMemoryEnabled = directPluginConfigMemoryEnabledFromCandidates(currentCandidates);
+  if (currentMemoryEnabled !== undefined) return currentMemoryEnabled;
+  if (currentCandidates.some(({ config }) =>
+    looksLikeAdapterPluginConfig(config) && isPartialAdapterConfigOverlay(config)
+  )) {
+    return undefined;
+  }
+
+  return directPluginConfigMemoryEnabledFromCandidates([
     { config: runtime?.cfg, omittedMemoryMeansDisabled: false },
     { config: runtime?.config, omittedMemoryMeansDisabled: false },
     { config: runtime?.pluginConfig, omittedMemoryMeansDisabled: false },
-  ];
+  ]);
+}
+
+function directPluginConfigMemoryEnabledFromCandidates(
+  candidates: Array<{ config: unknown; omittedMemoryMeansDisabled: boolean }>,
+): boolean | undefined {
   for (const { config: candidate, omittedMemoryMeansDisabled } of candidates) {
     if (!looksLikeAdapterPluginConfig(candidate)) continue;
     const memory = (candidate as Record<string, unknown>).memory;
@@ -863,6 +894,17 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
     }
   }
   return undefined;
+}
+
+function hasCurrentDirectPartialOverlay(api: OpenClawPluginApi): boolean {
+  const anyApi = api as any;
+  return [
+    anyApi?.cfg,
+    anyApi?.config,
+    anyApi?.pluginConfig,
+  ].some((candidate) =>
+    looksLikeAdapterPluginConfig(candidate) && isPartialAdapterConfigOverlay(candidate)
+  );
 }
 
 

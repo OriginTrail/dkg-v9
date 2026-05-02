@@ -718,6 +718,59 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
   });
 
+  it('keeps api.pluginConfig operational fields when the strongest current entry only carries state metadata', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9755',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9756 },
+    }, {
+      config: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                daemonUrl: 'http://127.0.0.1:9655',
+                dkgHome: '/stale-entry-dkg-home',
+                memory: { enabled: true },
+                channel: { enabled: false, port: 9656 },
+              },
+            },
+          },
+        },
+      },
+      cfg: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: '/strongest-entry-workspace/.dkg-adapter',
+                stateDirSource: 'setup-default',
+                installedWorkspace: '/strongest-entry-workspace',
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9755',
+      stateDir: '/strongest-entry-workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/strongest-entry-workspace',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9756 },
+    });
+    expect(instance.config.dkgHome).toBeUndefined();
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });
+  });
+
   it('keeps metadata-only entry plus metadata-only api.pluginConfig as a partial update', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');

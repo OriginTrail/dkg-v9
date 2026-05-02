@@ -1586,9 +1586,23 @@ export class DkgNodePlugin {
         return;
       }
       this.clearLocalAgentIntegrationRetry();
-      if (this.localAgentIntegrationRetryAttempt > 0) {
+      const retryAttempt = this.localAgentIntegrationRetryAttempt;
+      if (existing === null) {
+        if (retryAttempt > 0) {
+          api.logger.info?.(
+            `[dkg] No stored OpenClaw integration state found for disabled-channel cleanup after ${retryAttempt} retry attempt(s); nothing to clear`,
+          );
+        } else {
+          api.logger.debug?.('[dkg] No stored OpenClaw integration state found for disabled-channel cleanup; nothing to clear');
+        }
+        this.localAgentIntegrationRetryAttempt = 0;
+        this.lastLocalAgentIntegrationWarnReason = null;
+        this.lastLocalAgentIntegrationLoadError = null;
+        return;
+      }
+      if (retryAttempt > 0) {
         api.logger.info?.(
-          `[dkg] Stored OpenClaw integration state loaded for disabled-channel cleanup after ${this.localAgentIntegrationRetryAttempt} retry attempt(s)`,
+          `[dkg] Stored OpenClaw integration state loaded for disabled-channel cleanup after ${retryAttempt} retry attempt(s)`,
         );
       }
       this.localAgentIntegrationRetryAttempt = 0;

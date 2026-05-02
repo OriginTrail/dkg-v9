@@ -101,23 +101,32 @@ function resolveEntryConfig(api, options = {}) {
   ].filter(isObjectRecord);
   const hasCurrentDirectApiConfig = currentDirectApiConfigs.length > 0;
   const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
-  const currentEntryConfigsAreMetadataOnly =
-    currentEntryConfigs.length > 0 &&
-    currentEntryConfigs.every(isStateMetadataOnlyAdapterConfig);
+  const strongestCurrentEntryConfig = currentEntryConfigs[currentEntryConfigs.length - 1];
+  const strongestCurrentEntryConfigIsMetadataOnly =
+    isStateMetadataOnlyAdapterConfig(strongestCurrentEntryConfig);
   const currentPluginConfigForMetadataEntry =
-    currentEntryConfigsAreMetadataOnly
+    strongestCurrentEntryConfigIsMetadataOnly
       ? stripStateMetadataFromAdapterConfig(currentPluginConfig)
       : currentPluginConfig;
   const currentDirectConfigs = hasCurrentDirectApiConfig
     ? currentDirectApiConfigs
-    : currentEntryConfigs.length === 0 || currentEntryConfigsAreMetadataOnly
+    : currentEntryConfigs.length === 0 || strongestCurrentEntryConfigIsMetadataOnly
       ? [currentPluginConfigForMetadataEntry].filter(isObjectRecord)
       : [];
   const hasCurrentConfigSource = currentEntryConfigs.length > 0 || currentDirectConfigs.length > 0;
-  const currentConfigSourcesForMerge = [
-    ...currentEntryConfigs,
-    ...(currentDirectConfigs.length > 0 ? currentDirectConfigs : []),
-  ];
+  const currentConfigSourcesForMerge =
+    !hasCurrentDirectApiConfig &&
+    strongestCurrentEntryConfigIsMetadataOnly &&
+    currentDirectConfigs.length > 0
+      ? [
+          ...currentEntryConfigs.slice(0, -1).filter(isStateMetadataOnlyAdapterConfig),
+          ...currentDirectConfigs,
+          strongestCurrentEntryConfig,
+        ].filter(isObjectRecord)
+      : [
+          ...currentEntryConfigs,
+          ...(currentDirectConfigs.length > 0 ? currentDirectConfigs : []),
+        ];
   const configSources = hasCurrentConfigSource
     ? currentConfigSourcesForMerge
     : fallbackConfigSources;

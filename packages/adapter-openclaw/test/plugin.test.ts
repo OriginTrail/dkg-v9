@@ -2386,7 +2386,12 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: false },
     });
-    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).channelPlugin = null;
@@ -2428,7 +2433,12 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: false },
     });
-    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).channelPlugin = null;
@@ -2464,6 +2474,39 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('skips disabled-channel cleanup on cold runtime registration when no local-agent record exists', async () => {
+    const debug = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+    });
+    expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining('nothing to clear'));
+  });
+
   it('retries disabled-channel local-agent cleanup after a transient stored-state load failure', async () => {
     vi.useFakeTimers();
     const warn = vi.fn();
@@ -2476,7 +2519,12 @@ describe('DkgNodePlugin', () => {
     });
     const getLocalAgentIntegration = vi.fn()
       .mockRejectedValueOnce(new Error('daemon cold start'))
-      .mockResolvedValueOnce(null);
+      .mockResolvedValueOnce({
+        id: 'openclaw',
+        enabled: true,
+        runtime: { status: 'configured', ready: true },
+        metadata: { transportMode: 'openclaw-channel' },
+      });
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).channelPlugin = null;
@@ -2521,6 +2569,59 @@ describe('DkgNodePlugin', () => {
         }),
       );
       expect(info).toHaveBeenCalledWith(expect.stringContaining('loaded for disabled-channel cleanup after 1 retry attempt'));
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
+  it('stops disabled-channel cleanup retry when the stored local-agent record is still missing', async () => {
+    vi.useFakeTimers();
+    const warn = vi.fn();
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn, debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying disabled-channel status update'));
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(2);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('nothing to clear'));
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
     } finally {
       vi.useRealTimers();
       await plugin.stop();
@@ -2576,7 +2677,12 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: true },
     });
-    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     const syncLocalAgentIntegrationState = vi
@@ -2658,7 +2764,12 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: false },
     });
-    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: true,
+      runtime: { status: 'configured', ready: true },
+      metadata: { transportMode: 'openclaw-channel' },
+    });
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     const memoryPlugin = {
       isRegistered: vi.fn(() => true),

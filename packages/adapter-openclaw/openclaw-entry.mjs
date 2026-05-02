@@ -204,7 +204,11 @@ function workspaceDirFromConfig(config) {
 
 function stateDirMatchesWorkspaceDefault(stateDir, workspaceDir) {
   if (typeof stateDir !== 'string' || typeof workspaceDir !== 'string') return false;
-  return normalizePath(stateDir) === normalizePath(join(workspaceDir, '.dkg-adapter'));
+  const normalized = normalizePath(stateDir);
+  return (
+    normalized === normalizePath(join(workspaceDir, '.dkg-adapter')) ||
+    normalized === normalizePath(join(workspaceDir, '.openclaw'))
+  );
 }
 
 function setupDefaultStateMetadataMatchesWorkspace(config, workspaceDir) {

@@ -2464,6 +2464,53 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('cancels a pending local-agent retry when clearing a disabled channel', async () => {
+    vi.useFakeTimers();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const syncLocalAgentIntegrationState = vi
+      .spyOn(plugin as any, 'syncLocalAgentIntegrationState')
+      .mockResolvedValue(undefined);
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).scheduleLocalAgentIntegrationRetry(mockApi, 'full');
+      expect((plugin as any).localAgentIntegrationRetryTimer).not.toBeNull();
+
+      (plugin as any).clearLocalAgentChannelIntegration(mockApi, 'full');
+
+      expect((plugin as any).localAgentIntegrationRetryTimer).toBeNull();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(syncLocalAgentIntegrationState).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+          'openclaw',
+          expect.objectContaining({
+            enabled: false,
+            capabilities: expect.objectContaining({ localChat: false, connectFromUi: false }),
+            metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          }),
+        );
+      });
+    } finally {
+      vi.useRealTimers();
+      syncLocalAgentIntegrationState.mockRestore();
+    }
+  });
+
   it('does not re-enable an explicitly disconnected stored bridge when channel is disabled', async () => {
     const info = vi.fn();
     const plugin = new DkgNodePlugin({

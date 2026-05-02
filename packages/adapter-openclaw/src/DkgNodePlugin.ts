@@ -1552,6 +1552,7 @@ export class DkgNodePlugin {
   }
 
   private clearLocalAgentChannelIntegration(api: OpenClawPluginApi, registrationMode = 'full'): void {
+    this.clearLocalAgentIntegrationRetry();
     const generation = this.daemonClientGeneration;
     const client = this.client;
     const memoryActive = this.config.memory?.enabled === true && this.memoryPlugin?.isRegistered() === true;

@@ -1333,6 +1333,38 @@ describe('openclaw-entry', () => {
     expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
+  it('keeps legacy setup-owned entry installedWorkspace ahead of stale route workspace metadata', async () => {
+    const freshWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-legacy-entry-workspace-'));
+    const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-legacy-stale-route-workspace-'));
+    tempRoots.push(freshWorkspace, staleWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'legacy entry skill' });
+    const api = makeDirectPluginConfigApi({}, {
+      cfg: {
+        agents: { defaults: { workspace: staleWorkspace } },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: join(freshWorkspace, '.openclaw'),
+                stateDirSource: 'setup-default',
+                installedWorkspace: freshWorkspace,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBeUndefined();
+    expect(instance.config.installedWorkspace).toBe(freshWorkspace);
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined]);
+    expect(readFileSync(join(freshWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('legacy entry skill');
+    expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
   it('keeps current workspace metadata when direct installedWorkspace has no setup-default stateDir evidence', async () => {
     const currentWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-current-workspace-'));
     const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-installed-workspace-'));

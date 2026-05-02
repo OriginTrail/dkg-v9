@@ -130,6 +130,23 @@ describe("ChatTurnWriter", () => {
       persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
       expect(persisted["openclaw:tg:::legacy-only"]).toBeUndefined();
       expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 1, b: 1 });
+
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        "openclaw:tg:::legacy-only": { w: 4, b: 4 },
+        "openclaw:tg:::shared": { w: 5, b: 5 },
+      }));
+      const afterLegacyAdvance = new ChatTurnWriter({
+        client: mockClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      });
+      afterLegacyAdvance.flushSync();
+
+      persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted["openclaw:tg:::legacy-only"]).toEqual({ w: 4, b: 4 });
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 5, b: 5 });
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }

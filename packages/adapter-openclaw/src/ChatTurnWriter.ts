@@ -72,6 +72,7 @@ interface WatermarkStateSnapshot {
 
 interface LegacyMergeSource {
   markerKey: string;
+  contentHash: string;
   watermarkFilePath: string;
 }
 
@@ -526,24 +527,29 @@ export class ChatTurnWriter {
     targetMarkers: Map<string, Map<string, number>>,
   ): LegacyMergeSource[] {
     const targetCanonical = canonicalPathForCompare(targetWatermarkFilePath);
-    const migratedLegacySources = this.readLegacyMigrationSourceKeys(targetWatermarkFilePath);
+    const migratedLegacySources = this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
     const seen = new Set<string>();
     const mergedSources: LegacyMergeSource[] = [];
     for (const legacyStateDir of legacyStateDirs) {
       const legacyWatermarkFilePath = legacyWatermarkPathForStateDir(legacyStateDir);
       const legacyCanonical = canonicalPathForCompare(legacyWatermarkFilePath);
       if (legacyCanonical === targetCanonical || seen.has(legacyCanonical)) continue;
-      if (migratedLegacySources.has(legacyCanonical)) continue;
       seen.add(legacyCanonical);
       if (!fs.existsSync(legacyWatermarkFilePath)) continue;
       try {
+        const legacyContentHash = this.hashWatermarkFileForMigration(legacyWatermarkFilePath);
+        if (migratedLegacySources.get(legacyCanonical) === legacyContentHash) continue;
         this.mergeWatermarkFileInto(
           legacyWatermarkFilePath,
           targetWm,
           targetBc,
           targetMarkers,
         );
-        mergedSources.push({ markerKey: legacyCanonical, watermarkFilePath: legacyWatermarkFilePath });
+        mergedSources.push({
+          markerKey: legacyCanonical,
+          contentHash: legacyContentHash,
+          watermarkFilePath: legacyWatermarkFilePath,
+        });
         this.logger.info?.(
           "[ChatTurnWriter] Merged legacy chat-turn watermark state into active state.",
           { legacyWatermarkFilePath, targetWatermarkFilePath },
@@ -562,22 +568,33 @@ export class ChatTurnWriter {
     return `${targetWatermarkFilePath}.legacy-migrated.json`;
   }
 
-  private readLegacyMigrationSourceKeys(targetWatermarkFilePath: string): Set<string> {
+  private readLegacyMigrationSourceHashes(targetWatermarkFilePath: string): Map<string, string> {
     const markerPath = this.legacyMigrationMarkerPath(targetWatermarkFilePath);
-    if (!fs.existsSync(markerPath)) return new Set();
+    if (!fs.existsSync(markerPath)) return new Map();
     try {
       const marker = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as { migratedLegacyWatermarkFiles?: unknown };
-      const values = Array.isArray(marker?.migratedLegacyWatermarkFiles)
-        ? marker.migratedLegacyWatermarkFiles
-        : [];
-      return new Set(values.filter((value): value is string => typeof value === "string"));
+      const values = marker?.migratedLegacyWatermarkFiles;
+      if (!values || typeof values !== "object" || Array.isArray(values)) return new Map();
+      return new Map(
+        Object.entries(values)
+          .filter((entry): entry is [string, string] =>
+            typeof entry[0] === "string" &&
+            typeof entry[1] === "string"
+          ),
+      );
     } catch (err) {
       this.logger.warn?.(
         "[ChatTurnWriter] Failed to read legacy watermark migration marker; legacy sources may be retried.",
         { err, markerPath },
       );
-      return new Set();
+      return new Map();
     }
+  }
+
+  private hashWatermarkFileForMigration(watermarkFilePath: string): string {
+    return createHash("sha256")
+      .update(fs.readFileSync(watermarkFilePath))
+      .digest("hex");
   }
 
   private recordLegacyMigrationSources(
@@ -587,16 +604,20 @@ export class ChatTurnWriter {
     if (mergedSources.length === 0) return;
     const markerPath = this.legacyMigrationMarkerPath(targetWatermarkFilePath);
     try {
-      const migratedLegacyWatermarkFiles = this.readLegacyMigrationSourceKeys(targetWatermarkFilePath);
+      const migratedLegacyWatermarkFiles = this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
       for (const source of mergedSources) {
-        migratedLegacyWatermarkFiles.add(source.markerKey);
+        migratedLegacyWatermarkFiles.set(source.markerKey, source.contentHash);
       }
       const dir = path.dirname(markerPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(
         markerPath,
         `${JSON.stringify({
-          migratedLegacyWatermarkFiles: [...migratedLegacyWatermarkFiles].sort(),
+          migratedLegacyWatermarkFiles: Object.fromEntries(
+            [...migratedLegacyWatermarkFiles.entries()].sort(([left], [right]) =>
+              left.localeCompare(right)
+            ),
+          ),
         }, null, 2)}\n`,
         "utf-8",
       );

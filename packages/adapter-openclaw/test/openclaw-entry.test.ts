@@ -247,6 +247,34 @@ describe('openclaw-entry', () => {
         channel: { enabled: true, port: 9301 },
       });
     });
+
+    it(`defers skill sync during ${registrationMode} re-registration`, async () => {
+      const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-metadata-skill-workspace-'));
+      tempRoots.push(installedWorkspace);
+      const skillPath = join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md');
+      const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh skill' });
+      const firstApi = makeApi('http://127.0.0.1:9200');
+      const metadataApi = makeDirectPluginConfigApi({
+        stateDir: join(installedWorkspace, '.dkg-adapter'),
+        stateDirSource: 'setup-default',
+        installedWorkspace,
+      }, { registrationMode });
+      const runtimeApi = makeDirectPluginConfigApi({
+        stateDir: join(installedWorkspace, '.dkg-adapter'),
+        stateDirSource: 'setup-default',
+        installedWorkspace,
+      }, { registrationMode: 'setup-runtime' });
+
+      entry(firstApi);
+      entry(metadataApi);
+
+      expect(existsSync(skillPath)).toBe(false);
+
+      entry(runtimeApi);
+
+      expect(existsSync(skillPath)).toBe(true);
+      expect(readFileSync(skillPath, 'utf8')).toBe('fresh skill');
+    });
   }
 
   it('accepts OpenClaw-provided direct pluginConfig including setup state metadata', async () => {

@@ -47,7 +47,9 @@ export default function (api) {
     }
     instance.register(api);
     registerLifecycleService(api, log);
-    syncSkillToWorkspace(workspaceDir, log);
+    if (registrationModeEnablesRuntime(api)) {
+      syncSkillToWorkspace(workspaceDir, log);
+    }
     return;
   }
 
@@ -67,7 +69,9 @@ export default function (api) {
   // The CLI dist ships the canonical template; the workspace copy goes stale
   // after adapter/CLI upgrades unless re-synced. This runs on every plugin
   // load, is idempotent (skips when content matches), and non-fatal.
-  syncSkillToWorkspace(workspaceDir, log);
+  if (registrationModeEnablesRuntime(api)) {
+    syncSkillToWorkspace(workspaceDir, log);
+  }
 
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }

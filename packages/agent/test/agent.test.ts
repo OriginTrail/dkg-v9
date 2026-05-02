@@ -63,6 +63,21 @@ class NonRegisteringACKChainAdapter extends MockChainAdapter {
   }
 }
 
+class FlakyRegistrationACKChainAdapter extends MockChainAdapter {
+  ensureCalls = 0;
+
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }) {
+    this.ensureCalls += 1;
+    if (this.ensureCalls === 1) {
+      throw new Error('temporary registration failure');
+    }
+    return super.ensureOperationalWalletsRegistered(options);
+  }
+}
+
 let _fileSnapshot: string;
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
@@ -817,6 +832,32 @@ describe('DKGAgent ACK signer gating', () => {
       await agent.start();
 
       expect(await chain.isOperationalWalletRegistered(42n, ackSigner.address)).toBe(true);
+      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('retries operational-wallet registration during StorageACK setup', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new FlakyRegistrationACKChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 45n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerRegistrationRetry',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(chain.ensureCalls).toBeGreaterThanOrEqual(2);
+      expect(await chain.isOperationalWalletRegistered(45n, ackSigner.address)).toBe(true);
       expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
     } finally {
       await agent.stop().catch(() => {});

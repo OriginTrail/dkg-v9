@@ -538,10 +538,11 @@ export interface ChainAdapter {
 
   /**
    * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.
-   * Required for V10 ACK signing; adapters that cannot inspect an on-chain
-   * registry must return false or throw so ACK signing remains closed-safe.
+   * V10 ACK signing refuses to proceed when this capability is missing, but the
+   * method stays optional to preserve the public ChainAdapter interface for
+   * adapters that never advertise StorageACK support.
    */
-  isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean>;
+  isOperationalWalletRegistered?(identityId: bigint, address: string): Promise<boolean>;
 
   /**
    * Verify that a recovered signer address owns the claimed identity without

@@ -99,6 +99,9 @@ export async function requestFaucetFunding(
         }
       }
     } catch (err) {
+      if (!sawSuccess && funded.length === 0 && fundedWallets.size === 0) {
+        throw err;
+      }
       errors.push(`Faucet request failed: ${err instanceof Error ? err.message : String(err)}`);
       for (const wallet of batch) {
         failedWallets.add(wallet);

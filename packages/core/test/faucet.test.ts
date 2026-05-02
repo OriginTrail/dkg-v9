@@ -161,16 +161,11 @@ describe('requestFaucetFunding', () => {
     expect(result.funded).toEqual([]);
   });
 
-  it('returns failed wallets for network errors', async () => {
+  it('rejects network errors before any wallet is funded', async () => {
     const fetch = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof globalThis.fetch;
-    const result = await requestFaucetFunding(
+    await expect(requestFaucetFunding(
       'https://faucet.example.com/fund', 'test', ['0xAAA'], 'test-node', fetch,
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.fundedWallets).toEqual([]);
-    expect(result.failedWallets).toEqual(['0xAAA']);
-    expect(result.error).toContain('ECONNREFUSED');
+    )).rejects.toThrow('ECONNREFUSED');
   });
 
   it('preserves earlier funded wallets when a later batch throws', async () => {

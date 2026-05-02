@@ -734,6 +734,40 @@ export class DKGAgent {
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
     let onChainIdentityId = 0n;
+    const ensureACKCandidateWalletsRegistered = async (
+      attemptCtx: OperationContext,
+    ): Promise<boolean> => {
+      if (onChainIdentityId <= 0n || typeof this.chain.ensureOperationalWalletsRegistered !== 'function') {
+        return true;
+      }
+      try {
+        const registration = await this.chain.ensureOperationalWalletsRegistered({
+          identityId: onChainIdentityId,
+          additionalAddresses: ackSignerCandidates.map((wallet) => wallet.address),
+        });
+        if (registration.registered.length > 0) {
+          this.log.info(
+            attemptCtx,
+            `Registered ${registration.registered.length} operational wallet(s) on-chain for ` +
+            `identityId=${onChainIdentityId}`,
+          );
+        }
+        if (registration.taken.length > 0) {
+          this.log.warn(
+            attemptCtx,
+            `Operational wallet(s) already registered to another identity: ` +
+            registration.taken.map((w) => `${w.address}->${w.identityId}`).join(', '),
+          );
+        }
+        return true;
+      } catch (err) {
+        this.log.warn(
+          attemptCtx,
+          `Operational wallet auto-registration failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      }
+    };
 
     // Auto-detect or register on-chain identity.
     // Edge nodes skip profile creation — they operate with agent identity only.
@@ -761,33 +795,7 @@ export class DKGAgent {
         } catch { /* ignore */ }
       }
       if (onChainIdentityId > 0n) {
-        if (typeof this.chain.ensureOperationalWalletsRegistered === 'function') {
-          try {
-            const registration = await this.chain.ensureOperationalWalletsRegistered({
-              identityId: onChainIdentityId,
-              additionalAddresses: ackSignerCandidates.map((wallet) => wallet.address),
-            });
-            if (registration.registered.length > 0) {
-              this.log.info(
-                ctx,
-                `Registered ${registration.registered.length} operational wallet(s) on-chain for ` +
-                `identityId=${onChainIdentityId}`,
-              );
-            }
-            if (registration.taken.length > 0) {
-              this.log.warn(
-                ctx,
-                `Operational wallet(s) already registered to another identity: ` +
-                registration.taken.map((w) => `${w.address}->${w.identityId}`).join(', '),
-              );
-            }
-          } catch (err) {
-            this.log.warn(
-              ctx,
-              `Operational wallet auto-registration failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
+        await ensureACKCandidateWalletsRegistered(ctx);
 
         this.publisher.setIdentityId(onChainIdentityId);
         this.log.info(ctx, `Publisher using identityId=${onChainIdentityId}`);
@@ -809,13 +817,16 @@ export class DKGAgent {
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
           if (storageACKProtocolRegistered) return 'registered';
           if (onChainIdentityId > 0n) {
+            const registrationSucceeded = await ensureACKCandidateWalletsRegistered(attemptCtx);
             const signerResolution = await this.resolveConfirmedACKSigner(
               onChainIdentityId,
               ackSignerCandidates,
               attemptCtx,
             );
             const ackSignerWallet = signerResolution.wallet;
-            if (!ackSignerWallet) return signerResolution.retryable ? 'retryable' : 'disabled';
+            if (!ackSignerWallet) {
+              return (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable';
+            }
 
             // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
             // per KnowledgeAssetsV10.sol:362-373. Resolve both from the chain

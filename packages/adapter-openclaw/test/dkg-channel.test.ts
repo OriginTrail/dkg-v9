@@ -206,7 +206,42 @@ describe('DkgChannelPlugin', () => {
     const reply = await plugin.processInbound('Hello', 'corr-direct-cfg', 'owner');
 
     expect(reply.text).toBe('Direct cfg reply');
-    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(liveConfig);
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(liveConfig);
+  });
+
+  it.each(['cfg', 'config'] as const)('merges metadata-only api.%s with current api.pluginConfig for dispatch cfg fallback', async (sourceKey) => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged metadata reply' });
+      },
+    });
+    const metadataOnlyConfig = {
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    };
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    };
+    const api = makeApi({
+      [sourceKey]: metadataOnlyConfig,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-metadata-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Merged metadata reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(metadataOnlyConfig);
+    expect(dispatchCfg).toMatchObject({
+      ...metadataOnlyConfig,
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    });
   });
 
   it('keeps current api.pluginConfig ahead of runtime direct config fallback', async () => {
@@ -236,7 +271,7 @@ describe('DkgChannelPlugin', () => {
     const reply = await plugin.processInbound('Hello', 'corr-plugin-config', 'owner');
 
     expect(reply.text).toBe('Plugin config reply');
-    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(currentPluginConfig);
   });
 
   it('keeps route metadata while overlaying api.pluginConfig when api.cfg is not merged config', async () => {

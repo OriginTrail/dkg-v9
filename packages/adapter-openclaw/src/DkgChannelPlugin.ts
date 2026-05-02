@@ -33,6 +33,7 @@ import type {
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import type { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
+  isStateMetadataOnlyAdapterConfig,
   isObjectRecord,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
@@ -2481,14 +2482,25 @@ function getErrorMessage(err: unknown): string {
 function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<string, unknown> | undefined {
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
-  return [
-    anyApi?.cfg,
-    anyApi?.config,
-    anyApi?.pluginConfig,
-    runtime?.cfg,
-    runtime?.config,
-    runtime?.pluginConfig,
-  ].find((candidate) => isObjectRecord(candidate) && looksLikeAdapterPluginConfig(candidate));
+  const sources = [
+    directAdapterConfigFrom(anyApi?.cfg),
+    directAdapterConfigFrom(anyApi?.config),
+    directAdapterConfigFrom(anyApi?.pluginConfig),
+    directAdapterConfigFrom(runtime?.cfg),
+    directAdapterConfigFrom(runtime?.config),
+    directAdapterConfigFrom(runtime?.pluginConfig),
+  ].filter(isObjectRecord);
+  let metadataOverlay: Record<string, unknown> | undefined;
+  for (const source of sources) {
+    if (isStateMetadataOnlyAdapterConfig(source)) {
+      metadataOverlay ??= source;
+      continue;
+    }
+    return metadataOverlay
+      ? mergeAdapterPluginConfigs(source, metadataOverlay)
+      : source;
+  }
+  return metadataOverlay;
 }
 
 function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
@@ -2502,6 +2514,12 @@ function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, un
   }
 
   return directConfig ?? routeConfig;
+}
+
+function directAdapterConfigFrom(candidate: unknown): Record<string, unknown> | undefined {
+  return isObjectRecord(candidate) && looksLikeAdapterPluginConfig(candidate)
+    ? candidate
+    : undefined;
 }
 
 function mergeRouteConfigWithAdapterConfig(

@@ -1277,14 +1277,12 @@ describe('openclaw-entry', () => {
     tempRoots.push(staleRouteWorkspace, installedWorkspace, runtimeWorkspace);
     const entry = await loadEntryWithFakeRuntime({ skillText: 'runtime fallback skill' });
     const api = makeDirectPluginConfigApi(undefined as any, {
-      cfg: {
+      config: {
         agents: {
           defaults: {
             workspace: staleRouteWorkspace,
           },
         },
-      },
-      config: {
         plugins: {
           entries: {
             'adapter-openclaw': {
@@ -1604,8 +1602,10 @@ describe('openclaw-entry', () => {
       memory: { enabled: true },
       channel: { enabled: true, port: 9876 },
     }, {
-      cfg: {
+      config: {
         agents: { defaults: { workspace: staleWorkspace } },
+      },
+      cfg: {
         plugins: {
           entries: {
             'adapter-openclaw': {
@@ -1637,8 +1637,10 @@ describe('openclaw-entry', () => {
     tempRoots.push(freshWorkspace, staleWorkspace);
     const entry = await loadEntryWithFakeRuntime({ skillText: 'legacy entry skill' });
     const api = makeDirectPluginConfigApi({}, {
-      cfg: {
+      config: {
         agents: { defaults: { workspace: staleWorkspace } },
+      },
+      cfg: {
         plugins: {
           entries: {
             'adapter-openclaw': {
@@ -1695,6 +1697,41 @@ describe('openclaw-entry', () => {
     expect(instance.config.installedWorkspace).toBe(installedWorkspace);
     expect(instance.workspaceDirsAtRegister).toEqual([liveWorkspace]);
     expect(readFileSync(join(liveWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('live route skill');
+    expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
+  it('keeps live api.cfg workspace ahead of lower setup metadata without direct config', async () => {
+    const liveWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-live-cfg-workspace-'));
+    const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-lower-entry-workspace-'));
+    tempRoots.push(liveWorkspace, installedWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'live cfg skill' });
+    const api = makeDirectPluginConfigApi(undefined as any, {
+      cfg: {
+        agents: { defaults: { workspace: liveWorkspace } },
+      },
+      config: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: join(installedWorkspace, '.dkg-adapter'),
+                stateDirSource: 'setup-default',
+                installedWorkspace,
+              },
+            },
+          },
+        },
+      },
+    });
+    delete (api as any).pluginConfig;
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe(liveWorkspace);
+    expect(instance.config.installedWorkspace).toBe(installedWorkspace);
+    expect(instance.workspaceDirsAtRegister).toEqual([liveWorkspace]);
+    expect(readFileSync(join(liveWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('live cfg skill');
     expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 

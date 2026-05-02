@@ -194,13 +194,10 @@ function resolveEntryConfig(api, options = {}) {
   const currentDirectConfigMatchesInstalledWorkspace = currentDirectConfigs.some((candidate) =>
     setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
   );
-  // Entry setup metadata is useful for rejecting lower-priority stale route
-  // workspaces, but a live route workspace on api.cfg remains stronger.
+  // Entry setup metadata can reject stale lower-priority api.config route
+  // workspaces, but it must not mark the strongest api.cfg route workspace stale.
   const currentEntryConfigMatchesInstalledWorkspace =
-    (
-      !hasCurrentDirectApiConfig ||
-      currentWorkspaceConfig !== anyApi?.cfg
-    ) &&
+    currentWorkspaceConfig !== anyApi?.cfg &&
     currentEntryConfigs.some((candidate) =>
       setupDefaultStateMetadataMatchesWorkspace(candidate, installedWorkspaceDir)
     );

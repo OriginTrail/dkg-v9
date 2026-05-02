@@ -190,6 +190,30 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
+  it('stamps disabled direct memory capability on the current api after re-registration', async () => {
+    const initialApi = makeApi();
+    initialApi.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(initialApi)).toBe(true);
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    const currentApi = makeApi();
+    currentApi.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.disable(currentApi)).toBe(true);
+
+    expect(initialApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(currentApi.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    const disabledCapability = currentApi.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('disabled');
+  });
+
   it('warns about direct memory disable without setup guidance', () => {
     const api = makeApi();
     api.config = {

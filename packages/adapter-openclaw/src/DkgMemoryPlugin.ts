@@ -640,7 +640,7 @@ export class DkgMemoryPlugin {
     const directConfigDisableForRegisteredApi =
       hadRegisteredCapability &&
       this.registeredOwnershipSource === 'direct-plugin-config' &&
-      currentApi === this.registeredApi &&
+      currentApi !== null &&
       directPluginConfigMemoryEnabledForApi(currentApi) === false;
     const targetApi =
       currentOwnership?.owned === true || directConfigDisableForRegisteredApi

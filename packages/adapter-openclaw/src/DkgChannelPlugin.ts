@@ -2505,15 +2505,49 @@ function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<stri
 
 function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
   const mergedConfig = resolveOpenClawMergedConfig(api);
-  if (mergedConfig) return mergedConfig;
+  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
+  if (mergedConfig) {
+    return routeConfig
+      ? mergeRouteMetadataWithMergedConfig(mergedConfig, routeConfig)
+      : mergedConfig;
+  }
 
   const directConfig = resolveDirectAdapterConfigFallback(api);
-  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
   if (routeConfig && directConfig) {
     return mergeRouteConfigWithAdapterConfig(routeConfig, directConfig);
   }
 
   return directConfig ?? routeConfig;
+}
+
+function mergeRouteMetadataWithMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  routeConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const priorAgents = isObjectRecord(mergedConfig.agents) ? mergedConfig.agents : undefined;
+  const nextAgents = isObjectRecord(routeConfig.agents) ? routeConfig.agents : undefined;
+  const priorSession = isObjectRecord(mergedConfig.session) ? mergedConfig.session : undefined;
+  const nextSession = isObjectRecord(routeConfig.session) ? routeConfig.session : undefined;
+  const result: Record<string, unknown> = {
+    ...mergedConfig,
+    ...routeConfig,
+    plugins: mergedConfig.plugins,
+  };
+  if (priorAgents || nextAgents) {
+    result.agents = { ...(priorAgents ?? {}), ...(nextAgents ?? {}) };
+    const priorDefaults = isObjectRecord(priorAgents?.defaults) ? priorAgents.defaults : undefined;
+    const nextDefaults = isObjectRecord(nextAgents?.defaults) ? nextAgents.defaults : undefined;
+    if (priorDefaults || nextDefaults) {
+      (result.agents as Record<string, unknown>).defaults = {
+        ...(priorDefaults ?? {}),
+        ...(nextDefaults ?? {}),
+      };
+    }
+  }
+  if (priorSession || nextSession) {
+    result.session = { ...(priorSession ?? {}), ...(nextSession ?? {}) };
+  }
+  return result;
 }
 
 function directAdapterConfigFrom(candidate: unknown): Record<string, unknown> | undefined {

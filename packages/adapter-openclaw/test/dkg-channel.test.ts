@@ -152,6 +152,50 @@ describe('DkgChannelPlugin', () => {
     expect((plugin as any).cfg).toBe(fullConfig);
   });
 
+  it('overlays current route metadata onto fallback merged runtime config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged route reply' });
+      },
+    });
+    const staleRuntimeConfig = {
+      agents: { defaults: { workspace: '/stale-runtime-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'stale-cg', ttlMs: 10_000 },
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+    };
+    const currentRouteMetadata = {
+      agents: { defaults: { workspace: '/live-cfg-workspace' } },
+      session: { projectContextGraphId: 'live-cg' },
+      workspace: '/live-cfg-workspace',
+    };
+    const api = makeApi({
+      cfg: currentRouteMetadata,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-merged-route', 'owner');
+
+    expect(reply.text).toBe('Merged route reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      agents: { defaults: { workspace: '/live-cfg-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'live-cg', ttlMs: 10_000 },
+      workspace: '/live-cfg-workspace',
+      plugins: staleRuntimeConfig.plugins,
+    });
+  });
+
   it('uses direct plugin config as dispatch cfg fallback when no merged config exists', async () => {
     const { runtime } = makeMockRuntime({
       dispatchImpl: async (params) => {

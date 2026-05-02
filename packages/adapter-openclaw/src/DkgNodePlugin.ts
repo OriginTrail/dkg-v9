@@ -1555,14 +1555,16 @@ export class DkgNodePlugin {
     this.clearLocalAgentIntegrationRetry();
     const generation = this.daemonClientGeneration;
     const client = this.client;
-    const memoryActive = this.config.memory?.enabled === true && this.memoryPlugin?.isRegistered() === true;
-    const capabilities = {
-      ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
-      localChat: false,
-      chatAttachments: false,
-      connectFromUi: false,
-      dkgPrimaryMemory: memoryActive,
-      wmImportPipeline: memoryActive,
+    const disabledChannelCapabilities = (): Record<keyof typeof OPENCLAW_LOCAL_AGENT_CAPABILITIES, boolean> => {
+      const memoryActive = this.config.memory?.enabled === true && this.memoryPlugin?.isRegistered() === true;
+      return {
+        ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+        localChat: false,
+        chatAttachments: false,
+        connectFromUi: false,
+        dkgPrimaryMemory: memoryActive,
+        wmImportPipeline: memoryActive,
+      };
     };
     const channelEnabled = () => this.config.channel?.enabled === true;
     void Promise.resolve().then(async () => {
@@ -1616,7 +1618,7 @@ export class DkgNodePlugin {
         enabled: false,
         description: 'Connect a local OpenClaw agent through the DKG node.',
         transport: { kind: 'openclaw-channel' },
-        capabilities,
+        capabilities: disabledChannelCapabilities(),
         manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
         setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
         metadata: {

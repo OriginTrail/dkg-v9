@@ -148,21 +148,37 @@ export class RandomSamplingProver {
    * `existingIsCurrent` stayed truthy forever and the prover never
    * tried to rotate. Wall-clock comparison breaks the deadlock.)
    *
+   * Codex round 2 on PR #369 — the on-chain
+   * `updateAndGetActiveProofPeriodStartBlock()` rolls forward using
+   * the CURRENT epoch's
+   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()`, NOT
+   * whatever duration was baked into a cached `NodeChallenge` at
+   * creation time. If governance shortens the proofing duration
+   * mid-flight, the cached duration overstates expiry and the same
+   * `kc-not-synced` deadlock reappears at the rollover. So when the
+   * adapter exposes the live duration on `ProofPeriodStatus`
+   * (modern EVM/mock adapters), prefer it; fall back to
+   * `existing.proofingPeriodDurationInBlocks` only for legacy adapters
+   * that don't yet populate the field.
+   *
    * Robust to chain adapters that don't expose `getBlockNumber` (mock
    * / test): falls back to "not stale" so the existing short-circuit
    * behaviour is preserved.
    */
-  private async isCachedChallengeStale(existing: NodeChallenge): Promise<boolean> {
+  private async isCachedChallengeStale(
+    existing: NodeChallenge,
+    liveDurationInBlocks?: bigint,
+  ): Promise<boolean> {
     if (!this.chain.getBlockNumber) return false;
-    if (existing.proofingPeriodDurationInBlocks <= 0n) return false;
+    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
+    if (duration <= 0n) return false;
     let currentBlock: number;
     try {
       currentBlock = await this.chain.getBlockNumber();
     } catch {
       return false;
     }
-    const periodEndBlock =
-      existing.activeProofPeriodStartBlock + existing.proofingPeriodDurationInBlocks;
+    const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
     return BigInt(currentBlock) >= periodEndBlock;
   }
 
@@ -220,7 +236,10 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
-      const isStale = await this.isCachedChallengeStale(existing);
+      const isStale = await this.isCachedChallengeStale(
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      );
       if (!isStale) {
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
@@ -255,7 +274,10 @@ export class RandomSamplingProver {
     // after the 2026-05-01 RS-contract Hub rotation.
     const unsolvedStale = existingIsCurrent
       && !existing.solved
-      && (await this.isCachedChallengeStale(existing));
+      && (await this.isCachedChallengeStale(
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      ));
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
         cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),

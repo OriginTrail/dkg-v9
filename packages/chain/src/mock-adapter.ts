@@ -1233,6 +1233,11 @@ export class MockChainAdapter implements ChainAdapter {
     return {
       activeProofPeriodStartBlock: this.rsPeriodCursor,
       isValid: this.rsPeriodIsValid,
+      // Mock mirrors the same duration the in-mock createChallenge bakes
+      // into NodeChallenge.proofingPeriodDurationInBlocks (L1159) so the
+      // off-chain wall-clock staleness check in RandomSamplingProver sees
+      // a self-consistent (status, challenge) pair from the mock chain.
+      proofingPeriodDurationInBlocks: 100n,
     };
   }
 

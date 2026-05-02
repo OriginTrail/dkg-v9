@@ -2696,10 +2696,23 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     const { rs } = await this.getRandomSampling();
 
-    const raw = await rs.getActiveProofPeriodStatus();
+    // Codex round 2 on PR #369: the cached `NodeChallenge.proofingPeriodDurationInBlocks`
+    // is whatever the contract used at challenge-creation time. The chain's
+    // `updateAndGetActiveProofPeriodStartBlock()` rolls forward using the
+    // CURRENT epoch's duration via `getActiveProofingPeriodDurationInBlocks()`.
+    // If a governance change shortens the duration mid-flight, off-chain
+    // staleness checks against the cached duration would underestimate
+    // expiry and re-deadlock at the rollover boundary. Pull the live
+    // duration in parallel with the status read so the prover can compare
+    // wall-clock against the same value the contract uses for rollover.
+    const [raw, durationRaw] = await Promise.all([
+      rs.getActiveProofPeriodStatus(),
+      rs.getActiveProofingPeriodDurationInBlocks(),
+    ]);
     return {
       activeProofPeriodStartBlock: BigInt(raw.activeProofPeriodStartBlock ?? raw[0]),
       isValid: Boolean(raw.isValid ?? raw[1]),
+      proofingPeriodDurationInBlocks: BigInt(durationRaw),
     };
   }
 

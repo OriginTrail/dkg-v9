@@ -2705,14 +2705,31 @@ export class EVMChainAdapter implements ChainAdapter {
     // expiry and re-deadlock at the rollover boundary. Pull the live
     // duration in parallel with the status read so the prover can compare
     // wall-clock against the same value the contract uses for rollover.
-    const [raw, durationRaw] = await Promise.all([
+    //
+    // Codex round 3 — keep the live-duration read STRICTLY best-effort:
+    // a transient RPC blip, partial rollout, or older RS deployment that
+    // doesn't expose `getActiveProofingPeriodDurationInBlocks` must NOT
+    // make the whole `getActiveProofPeriodStatus()` reject. Use
+    // `Promise.allSettled` so we keep the (already-correct) status read
+    // and let the duration silently fall back to `undefined`, which the
+    // prover treats as "use the cached challenge duration" — the
+    // pre-fix behaviour. The tradeoff: during such an outage the
+    // governance-shortens-duration edge case temporarily regresses to
+    // the cached value; that's strictly better than the alternative,
+    // which would surface the duration RPC failure as a `rs.loop.tick-threw`
+    // and gate every other prover read on a non-essential field.
+    const [statusResult, durationResult] = await Promise.allSettled([
       rs.getActiveProofPeriodStatus(),
       rs.getActiveProofingPeriodDurationInBlocks(),
     ]);
+    if (statusResult.status === 'rejected') throw statusResult.reason;
+    const raw = statusResult.value;
+    const proofingPeriodDurationInBlocks =
+      durationResult.status === 'fulfilled' ? BigInt(durationResult.value) : undefined;
     return {
       activeProofPeriodStartBlock: BigInt(raw.activeProofPeriodStartBlock ?? raw[0]),
       isValid: Boolean(raw.isValid ?? raw[1]),
-      proofingPeriodDurationInBlocks: BigInt(durationRaw),
+      proofingPeriodDurationInBlocks,
     };
   }
 

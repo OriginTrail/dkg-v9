@@ -1437,7 +1437,12 @@ export class DkgNodePlugin {
     // --- Channel module ---
     const channelConfig = this.config.channel;
     const nextChannelFingerprint = channelConfigFingerprint(channelConfig);
-    if (!channelConfig?.enabled) {
+    const channelDisabled = channelConfig?.enabled !== true;
+    const hasChannelDisableSignal =
+      channelConfig !== undefined ||
+      this.channelPlugin !== null ||
+      this.channelPluginStopInFlight !== null;
+    if (channelDisabled && hasChannelDisableSignal) {
       this.pendingChannelStartApi = null;
       this.pendingChannelStartRegistrationMode = null;
       this.pendingChannelStartFingerprint = null;
@@ -1454,6 +1459,8 @@ export class DkgNodePlugin {
             api.logger.warn?.(`[dkg] Channel module disable status update failed: ${err?.message ?? err}`);
           },
         );
+      } else if (!this.channelPlugin) {
+        this.clearLocalAgentChannelIntegration(api, opts?.registrationMode);
       }
     }
     if (this.channelPlugin && this.channelPluginConfigFingerprint !== nextChannelFingerprint) {

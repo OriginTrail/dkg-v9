@@ -2412,6 +2412,42 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('clears stored local-agent bridge state on cold runtime registration with channel disabled', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          capabilities: expect.objectContaining({ localChat: false }),
+          metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          runtime: expect.objectContaining({ status: 'configured', ready: false }),
+        }),
+      );
+    });
+  });
+
   it('recomputes gatewayUrl from current gateway config even when the port stays at the default', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];

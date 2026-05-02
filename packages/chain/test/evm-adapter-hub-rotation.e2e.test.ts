@@ -205,6 +205,46 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
+    'Hub event listener: invalidation also flips isRandomSamplingReady() to false until next getRandomSampling()',
+    async () => {
+      // Codex N15 — invalidating only the pair cache without dropping
+      // the side-channel `this.contracts.randomSampling[Storage]` handles
+      // would leave `isRandomSamplingReady()` reporting `true` after a
+      // Hub rotation (until the next `getRandomSampling()` re-populates
+      // the handles). The prover would then poll the rotated-away
+      // RandomSampling contract believing it's still good. This test
+      // verifies the readiness probe correctly drops to `false` on
+      // invalidation and recovers on the next resolve.
+      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
+      (adapter as any).provider.pollingInterval = 250;
+
+      await adapter.getActiveProofPeriodStatus!();
+      expect(adapter.isRandomSamplingReady()).toBe(true);
+
+      const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
+      const realRsAddr = await readHubAddress(ctx.hubAddress, deployer, 'RandomSampling');
+      const replacementAddr = freshAddress();
+
+      try {
+        await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', replacementAddr);
+
+        const becameNotReady = await waitFor(
+          () => adapter.isRandomSamplingReady() === false,
+          15_000,
+          100,
+        );
+        expect(becameNotReady).toBe(true);
+
+        await (adapter as any).getRandomSampling();
+        expect(adapter.isRandomSamplingReady()).toBe(true);
+      } finally {
+        await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', realRsAddr);
+      }
+    },
+    60_000,
+  );
+
+  it(
     'Hub event listener: ContractChanged invalidates the RandomSampling cache',
     async () => {
       // High TTL (10 min) far exceeds the test's lifetime, so the only

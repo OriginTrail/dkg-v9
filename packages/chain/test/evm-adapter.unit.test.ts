@@ -158,6 +158,46 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
+  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
+    // ethers v6 `Contract.on(...)` is async — providers that reject
+    // filter installation (e.g. HTTP-only endpoints, mocked providers)
+    // must NOT bubble as unhandled rejections, and the listener-started
+    // flag must NOT be flipped if subscription failed (so a future
+    // retry remains possible).
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeHub = {
+      on: async (_event: string, _cb: (...args: unknown[]) => void) => {
+        throw new Error('provider does not support filter subscriptions');
+      },
+    };
+    (a as any).contracts.hub = fakeHub;
+    (a as any).hubRotationListenerStarted = false;
+    let unhandled: unknown = null;
+    const onRejection = (reason: unknown) => { unhandled = reason; };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await expect((a as any).startHubRotationListener()).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toBeNull();
+      expect((a as any).hubRotationListenerStarted).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).contracts.randomSampling = { dummy: 'rs' };
+    (a as any).contracts.randomSamplingStorage = { dummy: 'rss' };
+    (a as any).randomSamplingPairCache.cached = { rs: 'x', rss: 'y' };
+    (a as any).randomSamplingPairCache.resolvedAt = Date.now();
+
+    expect(a.isRandomSamplingReady()).toBe(true);
+    (a as any).invalidateRandomSamplingPair();
+    expect(a.isRandomSamplingReady()).toBe(false);
+    expect((a as any).randomSamplingPairCache.peek()).toBeNull();
+  });
+
   it('coerces randomSamplingHubRefreshMs<=0 to the default TTL (no "disable refresh" mode)', () => {
     // The "disable refresh entirely" mode is intentionally not
     // supported — without a TTL backstop, a missed Hub event on a

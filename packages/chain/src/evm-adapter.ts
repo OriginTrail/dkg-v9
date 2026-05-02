@@ -515,7 +515,7 @@ export class EVMChainAdapter implements ChainAdapter {
       // RandomSampling not deployed — proof submission unavailable
     }
 
-    this.startHubRotationListener();
+    await this.startHubRotationListener();
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
     if (tokenAddress !== ethers.ZeroAddress) {
@@ -2446,11 +2446,24 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
       if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
-        this.randomSamplingPairCache.invalidate();
+        this.invalidateRandomSamplingPair();
         return await fn();
       }
       throw err;
     }
+  }
+
+  /**
+   * Invalidate both the cache AND the side-channel contract handles. Without
+   * dropping `this.contracts.randomSampling[Storage]`, the public
+   * `isRandomSamplingReady()` probe would keep returning `true` after a Hub
+   * rotation (until the next `getRandomSampling()` re-populates the
+   * handles), giving the prover a stale all-clear.
+   */
+  private invalidateRandomSamplingPair(): void {
+    this.randomSamplingPairCache.invalidate();
+    this.contracts.randomSampling = undefined;
+    this.contracts.randomSamplingStorage = undefined;
   }
 
   /**
@@ -2466,21 +2479,28 @@ export class EVMChainAdapter implements ChainAdapter {
    * `NewContract`. We listen to BOTH events so the cache invalidates
    * regardless of which Hub variant the deployment ships, and the
    * invalidation is idempotent so duplicate notifications are
-   * harmless. Wrapped in try/catch because some providers (e.g.
-   * tests, no-WS endpoints) reject filter installation.
+   * harmless.
+   *
+   * `Contract.on(...)` is async in ethers v6: a sync `try/catch` would
+   * miss provider rejections (e.g. HTTP-only endpoints that can't
+   * install filter subscriptions) and leave us with an unhandled
+   * rejection. We `await` both subscriptions and only set
+   * `hubRotationListenerStarted` after both succeed, so a failed
+   * provider can be retried by a future call site if we ever need to
+   * — and meanwhile the TTL refresh path still keeps the pair fresh.
    */
-  private startHubRotationListener(): void {
+  private async startHubRotationListener(): Promise<void> {
     if (this.hubRotationListenerStarted) return;
-    this.hubRotationListenerStarted = true;
     const onChange = (name: unknown): void => {
       if (typeof name !== 'string') return;
       if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
-        this.randomSamplingPairCache.invalidate();
+        this.invalidateRandomSamplingPair();
       }
     };
     try {
-      void this.contracts.hub.on('ContractChanged', onChange);
-      void this.contracts.hub.on('NewContract', onChange);
+      await this.contracts.hub.on('ContractChanged', onChange);
+      await this.contracts.hub.on('NewContract', onChange);
+      this.hubRotationListenerStarted = true;
     } catch {
       /* provider doesn't support filter subscriptions — TTL refresh is the fallback */
     }

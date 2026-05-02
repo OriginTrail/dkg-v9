@@ -107,6 +107,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // rotation surface to mirror.
   'withHubStaleRetry',
   'startHubRotationListener',
+  'invalidateRandomSamplingPair',
   // KC views (Phase 1) — TS-private helpers; the four public methods
   // (getLatestMerkleRoot, getMerkleLeafCount, getLatestMerkleRootPublisher,
   // getKCContextGraphId) ARE mirrored on MockChainAdapter.

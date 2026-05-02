@@ -152,4 +152,117 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(sig.r).toHaveLength(32);
     expect(sig.vs).toHaveLength(32);
   });
+
+  it('accepts randomSamplingHubRefreshMs override without RPC contact', () => {
+    const a = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 60_000 }));
+    expect(a.chainType).toBe('evm');
+  });
+
+  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
+    // ethers v6 `Contract.on(...)` is async — providers that reject
+    // filter installation (e.g. HTTP-only endpoints, mocked providers)
+    // must NOT bubble as unhandled rejections, and the listener-started
+    // flag must NOT be flipped if subscription failed (so a future
+    // retry remains possible).
+    const a = new EVMChainAdapter(minimalConfig());
+    const fakeHub = {
+      on: async (_event: string, _cb: (...args: unknown[]) => void) => {
+        throw new Error('provider does not support filter subscriptions');
+      },
+    };
+    (a as any).contracts.hub = fakeHub;
+    (a as any).hubRotationListenerStarted = false;
+    let unhandled: unknown = null;
+    const onRejection = (reason: unknown) => { unhandled = reason; };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await expect((a as any).startHubRotationListener()).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toBeNull();
+      expect((a as any).hubRotationListenerStarted).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).contracts.randomSampling = { dummy: 'rs' };
+    (a as any).contracts.randomSamplingStorage = { dummy: 'rss' };
+    (a as any).randomSamplingPairCache.cached = { rs: 'x', rss: 'y' };
+    (a as any).randomSamplingPairCache.resolvedAt = Date.now();
+
+    expect(a.isRandomSamplingReady()).toBe(true);
+    (a as any).invalidateRandomSamplingPair();
+    expect(a.isRandomSamplingReady()).toBe(false);
+    expect((a as any).randomSamplingPairCache.peek()).toBeNull();
+  });
+
+  it('resolveAndAssignRandomSamplingPair refuses to write stale handles back when invalidate() raced the await (Codex N16)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    let releaseResolve: ((v: { rs: any; rss: any }) => void) = () => {};
+    const stalePair = { rs: { stale: 'rs' }, rss: { stale: 'rss' } };
+
+    (a as any).randomSamplingPairCache = {
+      _gen: 0,
+      currentGeneration() { return this._gen; },
+      get() {
+        return new Promise((resolve) => { releaseResolve = resolve; });
+      },
+    };
+
+    const pending = (a as any).resolveAndAssignRandomSamplingPair() as Promise<unknown>;
+    (a as any).randomSamplingPairCache._gen += 1;
+    releaseResolve(stalePair);
+    const returned = await pending;
+
+    expect(returned).toBe(stalePair);
+    expect((a as any).contracts.randomSampling).toBeUndefined();
+    expect((a as any).contracts.randomSamplingStorage).toBeUndefined();
+    expect(a.isRandomSamplingReady()).toBe(false);
+  });
+
+  it('resolveAndAssignRandomSamplingPair writes handles when no invalidate() raced (happy path)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const freshPair = { rs: { fresh: 'rs' }, rss: { fresh: 'rss' } };
+
+    (a as any).randomSamplingPairCache = {
+      _gen: 5,
+      currentGeneration() { return this._gen; },
+      get: async () => freshPair,
+    };
+
+    const returned = await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(returned).toBe(freshPair);
+    expect((a as any).contracts.randomSampling).toBe(freshPair.rs);
+    expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
+  });
+
+  it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    expect((a as any).isContractMissingRevert(new Error('reverted with custom error ContractDoesNotExist("RandomSampling")'))).toBe(true);
+    expect((a as any).isContractMissingRevert(new Error('AddressDoesNotExist(0x123)'))).toBe(true);
+    expect((a as any).isContractMissingRevert(new Error('Contract "X" not found in Hub at 0xabc'))).toBe(false);
+    expect((a as any).isContractMissingRevert(new Error('execution reverted: ProfileDoesntExist(0)'))).toBe(false);
+    expect((a as any).isContractMissingRevert('not an error')).toBe(false);
+  });
+
+  it('coerces randomSamplingHubRefreshMs<=0 to the default TTL (no "disable refresh" mode)', () => {
+    // The "disable refresh entirely" mode is intentionally not
+    // supported — without a TTL backstop, a missed Hub event on a
+    // read-only path (e.g. getActiveProofPeriodStatus) would leave
+    // the adapter pinned to a stale RandomSampling address until
+    // restart. The constructor coerces values <=0 (and undefined) to
+    // the same 5-minute default. We verify by peeking the underlying
+    // cache's ttlMs option.
+    const DEFAULT_TTL_MS = 5 * 60 * 1000;
+    const aZero = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 0 }));
+    const aNeg = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: -42 }));
+    const aDefault = new EVMChainAdapter(minimalConfig());
+    const ttlOf = (a: EVMChainAdapter) =>
+      ((a as any).randomSamplingPairCache.opts as { ttlMs: number }).ttlMs;
+    expect(ttlOf(aZero)).toBe(DEFAULT_TTL_MS);
+    expect(ttlOf(aNeg)).toBe(DEFAULT_TTL_MS);
+    expect(ttlOf(aDefault)).toBe(DEFAULT_TTL_MS);
+  });
 });

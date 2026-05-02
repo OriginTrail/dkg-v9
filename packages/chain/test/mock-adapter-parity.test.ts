@@ -99,9 +99,17 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // submitProof, getActiveProofPeriodStatus, getNodeChallenge,
   // getNodeEpochProofPeriodScore) ARE mirrored on MockChainAdapter; only
   // these internal helpers stay EVM-only.
-  'requireRandomSampling',
+  'getRandomSampling',
   'translateRandomSamplingError',
   'toNodeChallenge',
+  // Hub-rotation handling — adapter-internal plumbing that backs the
+  // self-refreshing RS resolution. The mock has no Hub, so no live
+  // rotation surface to mirror.
+  'withHubStaleRetry',
+  'startHubRotationListener',
+  'invalidateRandomSamplingPair',
+  'resolveAndAssignRandomSamplingPair',
+  'isContractMissingRevert',
   // KC views (Phase 1) — TS-private helpers; the four public methods
   // (getLatestMerkleRoot, getMerkleLeafCount, getLatestMerkleRootPublisher,
   // getKCContextGraphId) ARE mirrored on MockChainAdapter.

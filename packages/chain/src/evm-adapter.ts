@@ -38,6 +38,31 @@ import {
   MerkleRootMismatchError,
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
+import { HubResolutionCache } from './hub-resolution-cache.js';
+
+/**
+ * Default TTL for re-resolving `RandomSampling` / `RandomSamplingStorage`
+ * from the Hub. Matches the daemon auto-update poll cadence — small
+ * enough that a missed `Hub.ContractChanged` event still self-heals
+ * within ~5 min, large enough that the steady-state RPC overhead is
+ * effectively zero (one extra `eth_call` every 5 min for the two
+ * names, vs. the prover's per-tick reads). Override per-adapter via
+ * `EVMAdapterConfig.randomSamplingHubRefreshMs`.
+ */
+const DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS = 5 * 60 * 1000;
+
+/**
+ * Substrings we treat as "the Hub no longer recognises this contract
+ * as a registered participant" — i.e. the cached address is stale and
+ * the next call should re-resolve from the Hub. Conservative match on
+ * the canonical revert wording from `ContractStatus.onlyContracts` /
+ * `UnauthorizedAccess(Only Contracts in Hub)` so we don't accidentally
+ * drop the cache on an unrelated authorization failure.
+ */
+const HUB_STALE_ERROR_MARKERS = [
+  'Only Contracts in Hub',
+  'UnauthorizedAccess(Only Contracts in Hub)',
+];
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -138,6 +163,21 @@ interface EVMAdapterBaseConfig {
   additionalKeys?: string[];
   hubAddress: string;
   chainId?: string;
+  /**
+   * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
+   * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
+   * treated as "use default" and intentionally NOT supported as a
+   * "disable periodic refresh" mode: even with the Hub event listener
+   * and the `Only Contracts in Hub` retry wrapper, a missed event on
+   * a read-only path (e.g. `getActiveProofPeriodStatus`,
+   * `getNodeChallenge`) would leave the adapter pinned to a stale
+   * address until restart, exactly the failure mode this cache exists
+   * to prevent. The TTL is a backstop, not the primary refresh
+   * mechanism — keep it short enough that a missed rotation
+   * self-heals within minutes and the steady-state RPC overhead is
+   * still effectively zero.
+   */
+  randomSamplingHubRefreshMs?: number;
 }
 
 export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
@@ -191,6 +231,31 @@ export class EVMChainAdapter implements ChainAdapter {
   private readonly hubAddress: string;
   private contracts: ContractCache;
   private initialized = false;
+  /**
+   * Single self-refreshing cache for the `RandomSampling` /
+   * `RandomSamplingStorage` pair. RS is the highest-value Hub-resolved
+   * surface (it gates per-period proof rewards), so it gets stricter
+   * freshness guarantees than the one-shot resolution every other
+   * contract uses.
+   *
+   * The two addresses are deliberately treated as a **coupled unit**
+   * because `RandomSampling.initialize()` snapshots its
+   * `RandomSamplingStorage` address once at deploy time. If the
+   * adapter ever held a mixed pair (e.g. new RS + old RSS, or the
+   * inverse) `createChallenge()` would write through one contract
+   * and `getNodeChallenge()` would read from the other — producing
+   * the empty-struct / state-mismatch failures the prover already
+   * has a defensive guard against. Resolving both names atomically
+   * inside one cache eliminates that race.
+   *
+   * See `HubResolutionCache` for the semantics; the listener
+   * installed in `init()` invalidates this cache on
+   * `Hub.ContractChanged` / `Hub.NewContract` for **either** name,
+   * and `withHubStaleRetry()` invalidates it when a write surfaces
+   * `UnauthorizedAccess(Only Contracts in Hub)`.
+   */
+  private readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
+  private hubRotationListenerStarted = false;
 
   constructor(config: EVMAdapterConfig) {
     this.provider = new JsonRpcProvider(config.rpcUrl, undefined, { cacheTimeout: -1 });
@@ -212,6 +277,27 @@ export class EVMChainAdapter implements ChainAdapter {
     this.contracts = {
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
     };
+
+    // Coerce `<=0` to the default. The "disable refresh entirely" mode
+    // is intentionally unsupported (see `randomSamplingHubRefreshMs`
+    // doc above) — without a TTL backstop, a missed Hub event on a
+    // read-only path (`getActiveProofPeriodStatus`, `getNodeChallenge`)
+    // would silently pin the adapter to a stale address until restart.
+    const rawRsRefreshMs = config.randomSamplingHubRefreshMs ?? DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+    const rsRefreshMs = rawRsRefreshMs > 0 ? rawRsRefreshMs : DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+    this.randomSamplingPairCache = new HubResolutionCache(
+      async () => {
+        // Resolve both names in a single round (Promise.all) so that
+        // the cache only ever holds a coherent pair: when this
+        // resolves, both addresses came from the same Hub view.
+        const [rs, rss] = await Promise.all([
+          this.resolveContract('RandomSampling'),
+          this.resolveContract('RandomSamplingStorage'),
+        ]);
+        return { rs, rss };
+      },
+      { ttlMs: rsRefreshMs },
+    );
   }
 
   /** Pick the next signer from the pool (round-robin). */
@@ -360,7 +446,15 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
-    const address: string = await this.contracts.hub.getContractAddress(name);
+    let address: string;
+    try {
+      address = await this.contracts.hub.getContractAddress(name);
+    } catch (err) {
+      if (this.isContractMissingRevert(err)) {
+        throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+      }
+      throw err;
+    }
     if (address === ethers.ZeroAddress) {
       throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
     }
@@ -368,11 +462,34 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   private async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
-    const address: string = await this.contracts.hub.getAssetStorageAddress(name);
+    let address: string;
+    try {
+      address = await this.contracts.hub.getAssetStorageAddress(name);
+    } catch (err) {
+      if (this.isContractMissingRevert(err)) {
+        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+      }
+      throw err;
+    }
     if (address === ethers.ZeroAddress) {
       throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
+  }
+
+  /**
+   * The current Hub implementation reverts with `ContractDoesNotExist(name)`
+   * (custom error from `UnorderedNamedContractDynamicSet.get`) when a name
+   * is missing, instead of returning `address(0)`. We normalise both
+   * shapes onto the legacy `Contract "X" not found in Hub at <addr>` marker
+   * so downstream code (`getRandomSampling()`'s catch block) only needs
+   * to recognise one wording.
+   */
+  private isContractMissingRevert(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    enrichEvmError(err);
+    return err.message.includes('ContractDoesNotExist')
+      || err.message.includes('AddressDoesNotExist');
   }
 
   private async init(): Promise<void> {
@@ -422,11 +539,12 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     try {
-      this.contracts.randomSampling = await this.resolveContract('RandomSampling');
-      this.contracts.randomSamplingStorage = await this.resolveContract('RandomSamplingStorage');
+      await this.resolveAndAssignRandomSamplingPair();
     } catch {
       // RandomSampling not deployed — proof submission unavailable
     }
+
+    await this.startHubRotationListener();
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
     if (tokenAddress !== ethers.ZeroAddress) {
@@ -2307,16 +2425,134 @@ export class EVMChainAdapter implements ChainAdapter {
   // Random Sampling (V10 RandomSampling.sol)
   // =====================================================================
 
-  private requireRandomSampling(): { rs: Contract; rss: Contract } {
-    const rs = this.contracts.randomSampling;
-    const rss = this.contracts.randomSamplingStorage;
-    if (!rs || !rss) {
-      throw new Error(
-        'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
-        'The deployer is responsible for shipping these alongside V10 publish.',
-      );
+  /**
+   * Resolve `RandomSampling` and `RandomSamplingStorage` through the
+   * Hub-backed cache. Each call may trigger a re-resolve when the
+   * cached value is missing or has expired (TTL or invalidation),
+   * which is exactly the property that makes node operators no longer
+   * need a daemon restart after a Hub-side contract rotation.
+   *
+   * Failure-mode handling: only the documented "name not registered
+   * in the Hub" case (which `resolveContract` throws as
+   * `Contract "X" not found in Hub at <addr>`) is rewritten to a
+   * deployment-oriented hint. Every other failure (transient RPC,
+   * ABI mismatch, provider error, etc.) propagates with its original
+   * message preserved so the prover loop's error log points
+   * operators at the actual cause instead of misdirecting them
+   * toward a redeploy.
+   */
+  private async getRandomSampling(): Promise<{ rs: Contract; rss: Contract }> {
+    try {
+      return await this.resolveAndAssignRandomSamplingPair();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found in Hub at')) {
+        throw new Error(
+          'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
+          'The deployer is responsible for shipping these alongside V10 publish.',
+          { cause: err },
+        );
+      }
+      throw err;
     }
-    return { rs, rss };
+  }
+
+  /**
+   * Resolve the RS+RSS pair from the cache and write the handles into
+   * `this.contracts.randomSampling[Storage]` ONLY if no `invalidate()`
+   * happened during the await. Without the generation guard, an
+   * in-flight resolve started before a Hub rotation would leak the
+   * pre-rotation pair back into the side-channel handles, undoing the
+   * invalidation's clearing of those handles and leaving
+   * `isRandomSamplingReady()` reporting `true` against stale addresses.
+   * Returning the (possibly stale) pair to the immediate caller is
+   * still safe — `withHubStaleRetry` catches the inevitable on-chain
+   * `UnauthorizedAccess` and re-tries against the freshly resolved
+   * pair.
+   */
+  private async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
+    const generationBefore = this.randomSamplingPairCache.currentGeneration();
+    const pair = await this.randomSamplingPairCache.get();
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+      this.contracts.randomSampling = pair.rs;
+      this.contracts.randomSamplingStorage = pair.rss;
+    }
+    return pair;
+  }
+
+  /**
+   * Run `fn` and, if it fails with the unique "this caller is no
+   * longer registered as a Hub contract" revert, drop the cached RS
+   * pair and retry exactly once. This is the safety net for the
+   * rare case where (a) the daemon missed the `Hub.ContractChanged`
+   * event (RPC reconnect, dropped subscription, etc.) AND (b) the TTL
+   * hasn't expired yet. After the retry, the cache holds the freshly
+   * resolved pair for subsequent ticks.
+   */
+  private async withHubStaleRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+        this.invalidateRandomSamplingPair();
+        return await fn();
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Invalidate both the cache AND the side-channel contract handles. Without
+   * dropping `this.contracts.randomSampling[Storage]`, the public
+   * `isRandomSamplingReady()` probe would keep returning `true` after a Hub
+   * rotation (until the next `getRandomSampling()` re-populates the
+   * handles), giving the prover a stale all-clear.
+   */
+  private invalidateRandomSamplingPair(): void {
+    this.randomSamplingPairCache.invalidate();
+    this.contracts.randomSampling = undefined;
+    this.contracts.randomSamplingStorage = undefined;
+  }
+
+  /**
+   * Subscribe to Hub `ContractChanged` / `NewContract` events and
+   * invalidate the RS pair cache whenever **either** RS-side name is
+   * rotated. The pair is treated as a single coupled unit (see the
+   * `randomSamplingPairCache` field comment) — invalidating on either
+   * name forces an atomic re-resolve of both.
+   *
+   * `Hub._setContractAddress` is double-tap-emitting (`Hub-extra.test.ts`
+   * E-7): on the new-contract path it emits `NewContract` twice, and
+   * on the update path it emits both `ContractChanged` AND
+   * `NewContract`. We listen to BOTH events so the cache invalidates
+   * regardless of which Hub variant the deployment ships, and the
+   * invalidation is idempotent so duplicate notifications are
+   * harmless.
+   *
+   * `Contract.on(...)` is async in ethers v6: a sync `try/catch` would
+   * miss provider rejections (e.g. HTTP-only endpoints that can't
+   * install filter subscriptions) and leave us with an unhandled
+   * rejection. We `await` both subscriptions and only set
+   * `hubRotationListenerStarted` after both succeed, so a failed
+   * provider can be retried by a future call site if we ever need to
+   * — and meanwhile the TTL refresh path still keeps the pair fresh.
+   */
+  private async startHubRotationListener(): Promise<void> {
+    if (this.hubRotationListenerStarted) return;
+    const onChange = (name: unknown): void => {
+      if (typeof name !== 'string') return;
+      if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
+        this.invalidateRandomSamplingPair();
+      }
+    };
+    try {
+      await this.contracts.hub.on('ContractChanged', onChange);
+      await this.contracts.hub.on('NewContract', onChange);
+      this.hubRotationListenerStarted = true;
+    } catch {
+      /* provider doesn't support filter subscriptions — TTL refresh is the fallback */
+    }
   }
 
   /**
@@ -2367,67 +2603,69 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
-    const { rs, rss } = this.requireRandomSampling();
 
     const identityStorage = await this.resolveContract('IdentityStorage');
     const identityId: bigint = await identityStorage.getIdentityId(this.signer.address);
 
-    let receipt: ethers.TransactionReceipt;
-    try {
-      const tx = await rs.createChallenge();
-      receipt = await tx.wait();
-    } catch (err) {
-      this.translateRandomSamplingError(err);
-    }
+    return this.withHubStaleRetry(async () => {
+      const { rs, rss } = await this.getRandomSampling();
 
-    // Decode `ChallengeGenerated(identityId, contextGraphId, kcId, chunkId, epoch, startBlock)`
-    // from the receipt. cgId is indexed (topic[2]); the rest are in data
-    // but we only need cgId here — the proof builder reads kcId/chunkId
-    // off the Challenge struct fetched below, so everything stays
-    // consistent if the storage layout shifts.
-    let contextGraphId = 0n;
-    const rsIface = rs.interface;
-    for (const log of receipt.logs) {
+      let receipt: ethers.TransactionReceipt;
       try {
-        const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === 'ChallengeGenerated') {
-          contextGraphId = BigInt(parsed.args.contextGraphId);
-          break;
-        }
-      } catch { /* not this contract */ }
-    }
-    if (contextGraphId === 0n) {
-      // The picker only emits the event when it actually lands on a CG,
-      // so a missing event is a bug — fail loud rather than fall back
-      // to "lookup by KC" which V10 doesn't support natively.
-      throw new Error(
-        'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
-        'cannot route proof builder without contextGraphId.',
-      );
-    }
+        const tx = await rs.createChallenge();
+        receipt = await tx.wait();
+      } catch (err) {
+        this.translateRandomSamplingError(err);
+      }
 
-    const challengeRaw = await rss.getNodeChallenge(identityId);
-    const challenge = this.toNodeChallenge(challengeRaw);
-    if (!challenge) {
-      throw new Error(
-        `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
-        'returned an empty struct. This indicates a state inconsistency between ' +
-        'RandomSampling and RandomSamplingStorage.',
-      );
-    }
+      // Decode `ChallengeGenerated(identityId, contextGraphId, kcId, chunkId, epoch, startBlock)`
+      // from the receipt. cgId is indexed (topic[2]); the rest are in data
+      // but we only need cgId here — the proof builder reads kcId/chunkId
+      // off the Challenge struct fetched below, so everything stays
+      // consistent if the storage layout shifts.
+      let contextGraphId = 0n;
+      const rsIface = rs.interface;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed?.name === 'ChallengeGenerated') {
+            contextGraphId = BigInt(parsed.args.contextGraphId);
+            break;
+          }
+        } catch { /* not this contract */ }
+      }
+      if (contextGraphId === 0n) {
+        // The picker only emits the event when it actually lands on a CG,
+        // so a missing event is a bug — fail loud rather than fall back
+        // to "lookup by KC" which V10 doesn't support natively.
+        throw new Error(
+          'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
+          'cannot route proof builder without contextGraphId.',
+        );
+      }
 
-    return {
-      hash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      success: true,
-      challenge,
-      contextGraphId,
-    };
+      const challengeRaw = await rss.getNodeChallenge(identityId);
+      const challenge = this.toNodeChallenge(challengeRaw);
+      if (!challenge) {
+        throw new Error(
+          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
+          'returned an empty struct. This indicates a state inconsistency between ' +
+          'RandomSampling and RandomSamplingStorage.',
+        );
+      }
+
+      return {
+        hash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        success: true,
+        challenge,
+        contextGraphId,
+      };
+    });
   }
 
   async submitProof(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
     await this.init();
-    const { rs } = this.requireRandomSampling();
 
     const leafHex = typeof leaf === 'string' ? leaf : ethers.hexlify(leaf);
     if (!ethers.isHexString(leafHex, 32)) {
@@ -2435,24 +2673,28 @@ export class EVMChainAdapter implements ChainAdapter {
     }
     const proofHex = merkleProof.map((p) => ethers.hexlify(p));
 
-    let receipt: ethers.TransactionReceipt;
-    try {
-      const tx = await rs.submitProof(leafHex, proofHex);
-      receipt = await tx.wait();
-    } catch (err) {
-      this.translateRandomSamplingError(err);
-    }
+    return this.withHubStaleRetry(async () => {
+      const { rs } = await this.getRandomSampling();
 
-    return {
-      hash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      success: true,
-    };
+      let receipt: ethers.TransactionReceipt;
+      try {
+        const tx = await rs.submitProof(leafHex, proofHex);
+        receipt = await tx.wait();
+      } catch (err) {
+        this.translateRandomSamplingError(err);
+      }
+
+      return {
+        hash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        success: true,
+      };
+    });
   }
 
   async getActiveProofPeriodStatus(): Promise<ProofPeriodStatus> {
     await this.init();
-    const { rs } = this.requireRandomSampling();
+    const { rs } = await this.getRandomSampling();
 
     const raw = await rs.getActiveProofPeriodStatus();
     return {
@@ -2463,7 +2705,7 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async getNodeChallenge(identityId: bigint): Promise<NodeChallenge | null> {
     await this.init();
-    const { rss } = this.requireRandomSampling();
+    const { rss } = await this.getRandomSampling();
     const raw = await rss.getNodeChallenge(identityId);
     return this.toNodeChallenge(raw);
   }
@@ -2474,7 +2716,7 @@ export class EVMChainAdapter implements ChainAdapter {
     periodStartBlock: bigint,
   ): Promise<bigint> {
     await this.init();
-    const { rss } = this.requireRandomSampling();
+    const { rss } = await this.getRandomSampling();
     const score: bigint = await rss.getNodeEpochProofPeriodScore(identityId, epoch, periodStartBlock);
     return BigInt(score);
   }

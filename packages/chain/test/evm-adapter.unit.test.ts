@@ -198,6 +198,55 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).randomSamplingPairCache.peek()).toBeNull();
   });
 
+  it('resolveAndAssignRandomSamplingPair refuses to write stale handles back when invalidate() raced the await (Codex N16)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    let releaseResolve: ((v: { rs: any; rss: any }) => void) = () => {};
+    const stalePair = { rs: { stale: 'rs' }, rss: { stale: 'rss' } };
+
+    (a as any).randomSamplingPairCache = {
+      _gen: 0,
+      currentGeneration() { return this._gen; },
+      get() {
+        return new Promise((resolve) => { releaseResolve = resolve; });
+      },
+    };
+
+    const pending = (a as any).resolveAndAssignRandomSamplingPair() as Promise<unknown>;
+    (a as any).randomSamplingPairCache._gen += 1;
+    releaseResolve(stalePair);
+    const returned = await pending;
+
+    expect(returned).toBe(stalePair);
+    expect((a as any).contracts.randomSampling).toBeUndefined();
+    expect((a as any).contracts.randomSamplingStorage).toBeUndefined();
+    expect(a.isRandomSamplingReady()).toBe(false);
+  });
+
+  it('resolveAndAssignRandomSamplingPair writes handles when no invalidate() raced (happy path)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const freshPair = { rs: { fresh: 'rs' }, rss: { fresh: 'rss' } };
+
+    (a as any).randomSamplingPairCache = {
+      _gen: 5,
+      currentGeneration() { return this._gen; },
+      get: async () => freshPair,
+    };
+
+    const returned = await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(returned).toBe(freshPair);
+    expect((a as any).contracts.randomSampling).toBe(freshPair.rs);
+    expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
+  });
+
+  it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    expect((a as any).isContractMissingRevert(new Error('reverted with custom error ContractDoesNotExist("RandomSampling")'))).toBe(true);
+    expect((a as any).isContractMissingRevert(new Error('AddressDoesNotExist(0x123)'))).toBe(true);
+    expect((a as any).isContractMissingRevert(new Error('Contract "X" not found in Hub at 0xabc'))).toBe(false);
+    expect((a as any).isContractMissingRevert(new Error('execution reverted: ProfileDoesntExist(0)'))).toBe(false);
+    expect((a as any).isContractMissingRevert('not an error')).toBe(false);
+  });
+
   it('coerces randomSamplingHubRefreshMs<=0 to the default TTL (no "disable refresh" mode)', () => {
     // The "disable refresh entirely" mode is intentionally not
     // supported — without a TTL backstop, a missed Hub event on a

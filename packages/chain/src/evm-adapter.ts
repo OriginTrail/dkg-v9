@@ -446,7 +446,15 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
-    const address: string = await this.contracts.hub.getContractAddress(name);
+    let address: string;
+    try {
+      address = await this.contracts.hub.getContractAddress(name);
+    } catch (err) {
+      if (this.isContractMissingRevert(err)) {
+        throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+      }
+      throw err;
+    }
     if (address === ethers.ZeroAddress) {
       throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
     }
@@ -454,11 +462,34 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   private async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
-    const address: string = await this.contracts.hub.getAssetStorageAddress(name);
+    let address: string;
+    try {
+      address = await this.contracts.hub.getAssetStorageAddress(name);
+    } catch (err) {
+      if (this.isContractMissingRevert(err)) {
+        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+      }
+      throw err;
+    }
     if (address === ethers.ZeroAddress) {
       throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
+  }
+
+  /**
+   * The current Hub implementation reverts with `ContractDoesNotExist(name)`
+   * (custom error from `UnorderedNamedContractDynamicSet.get`) when a name
+   * is missing, instead of returning `address(0)`. We normalise both
+   * shapes onto the legacy `Contract "X" not found in Hub at <addr>` marker
+   * so downstream code (`getRandomSampling()`'s catch block) only needs
+   * to recognise one wording.
+   */
+  private isContractMissingRevert(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    enrichEvmError(err);
+    return err.message.includes('ContractDoesNotExist')
+      || err.message.includes('AddressDoesNotExist');
   }
 
   private async init(): Promise<void> {
@@ -508,9 +539,7 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     try {
-      const pair = await this.randomSamplingPairCache.get();
-      this.contracts.randomSampling = pair.rs;
-      this.contracts.randomSamplingStorage = pair.rss;
+      await this.resolveAndAssignRandomSamplingPair();
     } catch {
       // RandomSampling not deployed — proof submission unavailable
     }
@@ -2414,10 +2443,7 @@ export class EVMChainAdapter implements ChainAdapter {
    */
   private async getRandomSampling(): Promise<{ rs: Contract; rss: Contract }> {
     try {
-      const pair = await this.randomSamplingPairCache.get();
-      this.contracts.randomSampling = pair.rs;
-      this.contracts.randomSamplingStorage = pair.rss;
-      return pair;
+      return await this.resolveAndAssignRandomSamplingPair();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('not found in Hub at')) {
@@ -2429,6 +2455,29 @@ export class EVMChainAdapter implements ChainAdapter {
       }
       throw err;
     }
+  }
+
+  /**
+   * Resolve the RS+RSS pair from the cache and write the handles into
+   * `this.contracts.randomSampling[Storage]` ONLY if no `invalidate()`
+   * happened during the await. Without the generation guard, an
+   * in-flight resolve started before a Hub rotation would leak the
+   * pre-rotation pair back into the side-channel handles, undoing the
+   * invalidation's clearing of those handles and leaving
+   * `isRandomSamplingReady()` reporting `true` against stale addresses.
+   * Returning the (possibly stale) pair to the immediate caller is
+   * still safe — `withHubStaleRetry` catches the inevitable on-chain
+   * `UnauthorizedAccess` and re-tries against the freshly resolved
+   * pair.
+   */
+  private async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
+    const generationBefore = this.randomSamplingPairCache.currentGeneration();
+    const pair = await this.randomSamplingPairCache.get();
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+      this.contracts.randomSampling = pair.rs;
+      this.contracts.randomSamplingStorage = pair.rss;
+    }
+    return pair;
   }
 
   /**

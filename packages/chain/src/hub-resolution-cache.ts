@@ -107,4 +107,17 @@ export class HubResolutionCache<T> {
   peek(): T | null {
     return this.cached;
   }
+
+  /**
+   * Snapshot the current generation. Callers use this to detect whether
+   * an `invalidate()` has happened during their `await get()` window —
+   * if `currentGeneration()` differs from a previously-captured value,
+   * the awaited result was resolved against a stale Hub view and must
+   * not be used for any downstream "remember this last-known address"
+   * side-channel (it's still safe to *use once* and discard, since
+   * `withHubStaleRetry` will catch the inevitable on-chain failure).
+   */
+  currentGeneration(): number {
+    return this.generation;
+  }
 }

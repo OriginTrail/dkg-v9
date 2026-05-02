@@ -290,6 +290,45 @@ describe("ChatTurnWriter", () => {
     }
   });
 
+  it("setStateDir remerges same-dir direct watermarks when switching to nested layout", async () => {
+    const oldStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-setstate-old-"));
+    const nestedStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-setstate-nested-"));
+    const directFile = path.join(nestedStateDir, "chat-turn-watermarks.json");
+    const nestedFile = path.join(nestedStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    const localWriter = new ChatTurnWriter({
+      client: mockClient,
+      logger: mockLogger,
+      stateDir: oldStateDir,
+    });
+    try {
+      fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
+      fs.writeFileSync(directFile, JSON.stringify({
+        "openclaw:tg:::direct-only": { w: 8, b: 2 },
+        "openclaw:tg:::shared": { w: 9, b: 1 },
+      }));
+      fs.writeFileSync(nestedFile, JSON.stringify({
+        "openclaw:tg:::nested-only": { w: 3, b: 4 },
+        "openclaw:tg:::shared": { w: 4, b: 6 },
+      }));
+      (localWriter as any).cachedWatermarks.set("openclaw:tg:::source-only", 5);
+      (localWriter as any).w4bSessionCounts.set("openclaw:tg:::source-only", 2);
+
+      await localWriter.setStateDir(nestedStateDir, { stateLayout: "nested" });
+      localWriter.flushSync();
+
+      const persisted = JSON.parse(fs.readFileSync(nestedFile, "utf-8"));
+      expect(persisted["openclaw:tg:::direct-only"]).toEqual({ w: 8, b: 2 });
+      expect(persisted["openclaw:tg:::nested-only"]).toEqual({ w: 3, b: 4 });
+      expect(persisted["openclaw:tg:::shared"]).toEqual({ w: 9, b: 6 });
+      expect(persisted["openclaw:tg:::source-only"]).toEqual({ w: 5, b: 2 });
+      expect(fs.existsSync(directFile)).toBe(true);
+    } finally {
+      localWriter.flushSync();
+      fs.rmSync(oldStateDir, { recursive: true, force: true });
+      fs.rmSync(nestedStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("calls storeChatTurn on onAgentEnd with ctx", async () => {
     const event: AgentEndContext = {
       sessionId: "test-session",

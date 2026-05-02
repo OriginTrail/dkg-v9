@@ -234,8 +234,8 @@ export class ChatTurnWriter {
     this.stateLayout = options.stateLayout ?? "nested";
     this.watermarkFilePath = watermarkPathForStateDir(this.stateDir, this.stateLayout);
     const activeWatermarkFileLoaded = this.initFromFile();
-    this.migrateLegacyStateDirs(
-      this.legacyStateDirsForLayout(
+    this.migrateLegacyWatermarkFiles(
+      this.legacyWatermarkFilePathsForLayout(
         this.stateDir,
         this.stateLayout,
         options.legacyStateDirs ?? [],
@@ -326,8 +326,8 @@ export class ChatTurnWriter {
       destinationFileLoaded = false;
       this.logger.warn?.("[ChatTurnWriter.setStateDir] Failed to merge destination file; proceeding with current state", { err });
     }
-    const legacyMergeSources = this.mergeLegacyStateDirsInto(
-      this.legacyStateDirsForLayout(
+    const legacyMergeSources = this.mergeLegacyWatermarkFilesInto(
+      this.legacyWatermarkFilePathsForLayout(
         newStateDir,
         newStateLayout,
         options.legacyStateDirs ?? [],
@@ -501,12 +501,12 @@ export class ChatTurnWriter {
     }
   }
 
-  private migrateLegacyStateDirs(
-    legacyStateDirs: string[],
+  private migrateLegacyWatermarkFiles(
+    legacyWatermarkFilePaths: string[],
     options: { ignoreMigrationMarkers?: boolean } = {},
   ): void {
-    const mergedSources = this.mergeLegacyStateDirsInto(
-      legacyStateDirs,
+    const mergedSources = this.mergeLegacyWatermarkFilesInto(
+      legacyWatermarkFilePaths,
       this.watermarkFilePath,
       this.cachedWatermarks,
       this.w4bSessionCounts,
@@ -528,17 +528,22 @@ export class ChatTurnWriter {
     }
   }
 
-  private legacyStateDirsForLayout(
+  private legacyWatermarkFilePathsForLayout(
     stateDir: string,
     stateLayout: ChatTurnWriterStateLayout,
     legacyStateDirs: string[],
   ): string[] {
-    if (stateLayout !== "direct") return legacyStateDirs;
-    return [stateDir, ...legacyStateDirs];
+    const sameDirOppositeLayoutWatermarkPath = stateLayout === "direct"
+      ? legacyWatermarkPathForStateDir(stateDir)
+      : watermarkPathForStateDir(stateDir, "direct");
+    return [
+      sameDirOppositeLayoutWatermarkPath,
+      ...legacyStateDirs.map((legacyStateDir) => legacyWatermarkPathForStateDir(legacyStateDir)),
+    ];
   }
 
-  private mergeLegacyStateDirsInto(
-    legacyStateDirs: string[],
+  private mergeLegacyWatermarkFilesInto(
+    legacyWatermarkFilePaths: string[],
     targetWatermarkFilePath: string,
     targetWm: Map<string, number>,
     targetBc: Map<string, number>,
@@ -551,8 +556,7 @@ export class ChatTurnWriter {
       : this.readLegacyMigrationSourceHashes(targetWatermarkFilePath);
     const seen = new Set<string>();
     const mergedSources: LegacyMergeSource[] = [];
-    for (const legacyStateDir of legacyStateDirs) {
-      const legacyWatermarkFilePath = legacyWatermarkPathForStateDir(legacyStateDir);
+    for (const legacyWatermarkFilePath of legacyWatermarkFilePaths) {
       const legacyCanonical = canonicalPathForCompare(legacyWatermarkFilePath);
       if (legacyCanonical === targetCanonical || seen.has(legacyCanonical)) continue;
       seen.add(legacyCanonical);

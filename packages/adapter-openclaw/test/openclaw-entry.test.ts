@@ -898,7 +898,7 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
-  it('treats module-shaped direct re-registration config as a full snapshot', async () => {
+  it('treats module-shaped direct re-registration config without enabled as a partial overlay', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');
     const secondApi = makeDirectPluginConfigApi({
@@ -912,7 +912,27 @@ describe('openclaw-entry', () => {
     const instance = globalThis.__openclawEntryTestInstances![0];
     expect(instance.config).toMatchObject({
       daemonUrl: 'http://127.0.0.1:9800',
-      channel: { port: 9801 },
+      memory: { enabled: true },
+      channel: { enabled: false, port: 9801 },
+    });
+    expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
+  });
+
+  it('treats module-shaped direct re-registration config with enabled as a full snapshot', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9800',
+      channel: { enabled: true, port: 9801 },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9800',
+      channel: { enabled: true, port: 9801 },
     });
     expect(instance.config).not.toHaveProperty('memory');
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: false });

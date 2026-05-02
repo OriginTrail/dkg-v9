@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isPartialAdapterConfigOverlay,
   isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
@@ -180,5 +181,21 @@ describe('openclaw-config helpers', () => {
       memory: { enabled: false, memoryDir: '/memory' },
       channel: { enabled: true, port: 9202 },
     });
+  });
+
+  it('classifies module objects without enabled as partial overlays', () => {
+    expect(isPartialAdapterConfigOverlay({
+      channel: { port: 9801 },
+    })).toBe(true);
+    expect(isPartialAdapterConfigOverlay({
+      memory: { memoryDir: '/memory' },
+      channel: { port: 9801 },
+    })).toBe(true);
+    expect(isPartialAdapterConfigOverlay({
+      channel: { enabled: false },
+    })).toBe(false);
+    expect(isPartialAdapterConfigOverlay({
+      memory: { enabled: true },
+    })).toBe(false);
   });
 });

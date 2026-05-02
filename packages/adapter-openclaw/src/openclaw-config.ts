@@ -28,6 +28,11 @@ const PARTIAL_OVERLAY_CONFIG_KEYS = [
   'installedWorkspace',
 ] as const;
 
+const PARTIAL_MODULE_CONFIG_KEYS = [
+  'memory',
+  'channel',
+] as const;
+
 export function looksLikeAdapterPluginConfig(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
   if (
@@ -53,7 +58,16 @@ export function isPartialAdapterConfigOverlay(value: unknown): boolean {
   if (!isObjectRecord(value) || !looksLikeAdapterPluginConfig(value)) return false;
   const keys = Object.keys(value);
   return keys.length > 0 && keys.every((key) =>
-    (PARTIAL_OVERLAY_CONFIG_KEYS as readonly string[]).includes(key)
+    (PARTIAL_OVERLAY_CONFIG_KEYS as readonly string[]).includes(key) ||
+    isPartialModuleConfigOverlay(key, value[key])
+  );
+}
+
+function isPartialModuleConfigOverlay(key: string, value: unknown): boolean {
+  return (
+    (PARTIAL_MODULE_CONFIG_KEYS as readonly string[]).includes(key) &&
+    isObjectRecord(value) &&
+    !Object.prototype.hasOwnProperty.call(value, 'enabled')
   );
 }
 

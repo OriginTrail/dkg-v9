@@ -265,6 +265,23 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
+  it('does not treat module-shaped direct config without enabled as memory disable intent', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { port: 9801 },
+    } as any;
+
+    expect(plugin.disable(api)).toBe(false);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('does not treat daemon/home-only direct config as memory disable intent', () => {
     const api = makeApi();
     api.config = {

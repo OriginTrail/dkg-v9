@@ -666,19 +666,23 @@ export class DkgNodePlugin {
     const legacySetupDefaultStateDir = setupWorkspaceDir ? legacyStateDirForWorkspace(setupWorkspaceDir) : undefined;
     const matchesPath = (a: string | undefined, b: string | undefined): boolean =>
       !!a && !!b && canonicalPathForCompare(a) === canonicalPathForCompare(b);
+    const configuredDefaultWorkspaceDir =
+      configuredStateDir ? workspaceDirForDefaultStateDir(configuredStateDir) : undefined;
     const configuredIsSetupDefault =
       configuredHasSetupDefaultSource &&
       !!configuredStateDir &&
       (
         matchesPath(configuredStateDir, setupDefaultStateDir) ||
-        matchesPath(configuredStateDir, legacySetupDefaultStateDir)
+        matchesPath(configuredStateDir, legacySetupDefaultStateDir) ||
+        (!setupWorkspaceDir && !!configuredDefaultWorkspaceDir)
       );
     const workspaceStateDir = trimmedWorkspaceDir ? defaultStateDirForWorkspace(trimmedWorkspaceDir) : undefined;
     const runtimeStateDir = trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.());
     const runtimeWorkspaceDir = runtimeStateDir ? workspaceDirForDefaultStateDir(runtimeStateDir) : undefined;
     const envStateDir = trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR);
     const envWorkspaceDir = envStateDir ? workspaceDirForDefaultStateDir(envStateDir) : undefined;
-    const configuredWorkspaceDir = configuredStateDir ? workspaceDirForDefaultStateDir(configuredStateDir) : undefined;
+    const configuredSetupWorkspaceDir =
+      configuredIsSetupDefault ? setupWorkspaceDir ?? configuredDefaultWorkspaceDir : undefined;
     let stateDir = homeDir;
     let stateDirSource: ChatTurnWriterStateDirSource = 'home';
     if (runtimeStateDir) {
@@ -704,25 +708,32 @@ export class DkgNodePlugin {
       stateDirSource = configuredIsSetupDefault ? 'setup-default' : 'config';
     }
 
-    const workspaceDerivedStateDirs = [
-      runtimeWorkspaceDir ? defaultStateDirForWorkspace(runtimeWorkspaceDir) : undefined,
-      envWorkspaceDir ? defaultStateDirForWorkspace(envWorkspaceDir) : undefined,
-      configuredWorkspaceDir ? defaultStateDirForWorkspace(configuredWorkspaceDir) : undefined,
-      workspaceStateDir,
-      setupDefaultStateDir,
-    ].filter((candidate): candidate is string => !!candidate);
+    const workspaceDerivedStateDirs =
+      stateDirSource === 'config' || stateDirSource === 'home'
+        ? []
+        : [
+          runtimeWorkspaceDir ? defaultStateDirForWorkspace(runtimeWorkspaceDir) : undefined,
+          envWorkspaceDir ? defaultStateDirForWorkspace(envWorkspaceDir) : undefined,
+          configuredSetupWorkspaceDir ? defaultStateDirForWorkspace(configuredSetupWorkspaceDir) : undefined,
+          workspaceStateDir,
+          setupDefaultStateDir,
+        ].filter((candidate): candidate is string => !!candidate);
     const stateDirIsKnownWorkspaceDefault = workspaceDerivedStateDirs.some((candidate) =>
       matchesPath(stateDir, candidate),
     );
     const stateLayout: ChatTurnWriterStateLayout =
       stateDirIsKnownWorkspaceDefault ? 'direct' : 'nested';
-    const legacyStateDirs = [
-      runtimeWorkspaceDir,
-      envWorkspaceDir,
-      configuredWorkspaceDir,
-      trimmedWorkspaceDir,
-      setupWorkspaceDir,
-    ]
+    const legacyStateDirs = (
+      stateDirSource === 'config' || stateDirSource === 'home'
+        ? []
+        : [
+          runtimeWorkspaceDir,
+          envWorkspaceDir,
+          configuredSetupWorkspaceDir,
+          trimmedWorkspaceDir,
+          setupWorkspaceDir,
+        ]
+    )
       .filter((candidate): candidate is string => !!candidate)
       .filter((candidate) => matchesPath(stateDir, defaultStateDirForWorkspace(candidate)))
       .map((candidate) => legacyStateDirForWorkspace(candidate))

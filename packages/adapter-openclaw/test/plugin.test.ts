@@ -4507,6 +4507,52 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - stale setup-owned marker does not make custom .dkg-adapter config direct', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const installedWorkspace = path.join(require('os').tmpdir(), `dkg-t75-installed-marker-${Date.now()}`);
+    const customWorkspace = path.join(require('os').tmpdir(), `dkg-t75-custom-marker-${Date.now()}`);
+    const configuredStateDir = path.join(customWorkspace, '.dkg-adapter');
+    const legacyFile = path.join(customWorkspace, '.openclaw', 'dkg-adapter', 'chat-turn-watermarks.json');
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({
+        'openclaw:tg:::stale-marker': { w: 8, b: 2 },
+      }));
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace,
+        stateDir: configuredStateDir,
+        stateDirSource: 'setup-default',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+
+      plugin.register(mockApi);
+
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toBe(
+        path.join(configuredStateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+      );
+      expect(fs.existsSync(path.join(configuredStateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      expect(fs.existsSync(legacyFile)).toBe(true);
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(installedWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(customWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - config stateDir matching installedWorkspace default is explicit without setup marker', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
@@ -4587,7 +4633,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - explicit config.stateDir matching installedWorkspace .dkg-adapter uses direct layout', async () => {
+  it('T75 - user-owned config.stateDir matching installedWorkspace .dkg-adapter keeps nested layout', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-config-direct-${Date.now()}`);
@@ -4613,8 +4659,9 @@ describe('DkgNodePlugin', () => {
 
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toBe(
-        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
+      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
@@ -4665,7 +4712,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('T75 - explicit config.stateDir ending .dkg-adapter migrates sibling legacy state from config-derived workspace', async () => {
+  it('T75 - user-owned config.stateDir ending .dkg-adapter does not migrate sibling legacy state', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_STATE_DIR;
     const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-custom-dkg-adapter-${Date.now()}`);
@@ -4695,11 +4742,10 @@ describe('DkgNodePlugin', () => {
 
       const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
       expect(watermarkPath.replace(/\\/g, '/')).toBe(
-        path.join(stateDir, 'chat-turn-watermarks.json').replace(/\\/g, '/'),
+        path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json').replace(/\\/g, '/'),
       );
-      expect(fs.existsSync(path.join(stateDir, 'dkg-adapter', 'chat-turn-watermarks.json'))).toBe(false);
-      const persisted = JSON.parse(fs.readFileSync(watermarkPath, 'utf8'));
-      expect(persisted['openclaw:tg:::unrelated']).toEqual({ w: 4, b: 1 });
+      expect(fs.existsSync(path.join(stateDir, 'chat-turn-watermarks.json'))).toBe(false);
+      expect(fs.existsSync(legacyFile)).toBe(true);
       await plugin.stop();
     } finally {
       if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;

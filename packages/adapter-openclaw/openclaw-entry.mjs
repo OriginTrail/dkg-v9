@@ -21,6 +21,10 @@ const PARTIAL_OVERLAY_CONFIG_KEYS = new Set([
   'stateDirSource',
   'installedWorkspace',
 ]);
+const PARTIAL_MODULE_CONFIG_KEYS = new Set([
+  'memory',
+  'channel',
+]);
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -231,7 +235,18 @@ function directApiConfigFrom(config) {
 function isPartialAdapterConfigOverlay(config) {
   if (!looksLikeAdapterPluginConfig(config)) return false;
   const keys = Object.keys(config);
-  return keys.length > 0 && keys.every((key) => PARTIAL_OVERLAY_CONFIG_KEYS.has(key));
+  return keys.length > 0 && keys.every((key) =>
+    PARTIAL_OVERLAY_CONFIG_KEYS.has(key) ||
+    isPartialModuleConfigOverlay(key, config[key])
+  );
+}
+
+function isPartialModuleConfigOverlay(key, value) {
+  return (
+    PARTIAL_MODULE_CONFIG_KEYS.has(key) &&
+    isObjectRecord(value) &&
+    !Object.prototype.hasOwnProperty.call(value, 'enabled')
+  );
 }
 
 function registrationModeEnablesRuntime(api) {

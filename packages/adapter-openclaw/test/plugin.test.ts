@@ -2448,6 +2448,49 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('does not advertise memory capabilities when clearing a disabled channel during memory disable', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    const memoryPlugin = {
+      isRegistered: vi.fn(() => true),
+      disable: vi.fn(() => true),
+      close: vi.fn(async () => {}),
+    };
+    (plugin as any).client = { updateLocalAgentIntegration };
+    (plugin as any).memoryPlugin = memoryPlugin;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          capabilities: expect.objectContaining({
+            localChat: false,
+            dkgPrimaryMemory: false,
+            wmImportPipeline: false,
+          }),
+        }),
+      );
+    });
+    expect(memoryPlugin.disable).toHaveBeenCalledWith(mockApi);
+  });
+
   it('recomputes gatewayUrl from current gateway config even when the port stays at the default', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];

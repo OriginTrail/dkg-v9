@@ -190,6 +190,19 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
+  it('warns about direct memory disable without setup guidance', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: false },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('dkg setup'));
+  });
+
   it('prefers refreshed direct api.cfg over stale api.pluginConfig for memory ownership', async () => {
     const api = makeApi();
     api.config = {
@@ -340,6 +353,24 @@ describe('DkgMemoryPlugin.register', () => {
   it('does not use direct memory fallback when merged config explicitly exposes an unset memory slot', () => {
     const api = makeApi();
     (api.config as any).plugins.slots.memory = undefined;
+    (api as any).pluginConfig = {
+      memory: { enabled: true },
+    };
+
+    expect(plugin.register(api)).toBe(false);
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+  });
+
+  it('does not use direct memory fallback when merged config omits the memory slot', () => {
+    const api = makeApi();
+    api.config = {
+      plugins: {
+        slots: {},
+        entries: {
+          'adapter-openclaw': { config: { memory: { enabled: true } } },
+        },
+      },
+    } as any;
     (api as any).pluginConfig = {
       memory: { enabled: true },
     };

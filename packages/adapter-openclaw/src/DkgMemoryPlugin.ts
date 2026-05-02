@@ -751,11 +751,7 @@ export class DkgMemoryPlugin {
 
     const ownership = memorySlotOwnershipForApi(api);
     if (ownership?.owned !== true) {
-      api.logger.warn?.(
-        '[dkg-memory] plugins.slots.memory is not set to "adapter-openclaw" in the workspace config — ' +
-        'skipping memory-capability registration so this adapter does not silently override the elected ' +
-        'memory provider. Rerun `dkg setup` to elect adapter-openclaw into the memory slot if that was the intent.',
-      );
+      api.logger.warn?.(memoryRegistrationSkipMessage(ownership));
       return false;
     }
 
@@ -823,12 +819,25 @@ function memorySlotOwnershipForApi(api: OpenClawPluginApi): MemorySlotOwnership 
   const mergedConfig = resolveOpenClawMergedConfig(api);
   const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
   const slots = plugins?.slots as Record<string, unknown> | undefined;
-  if (slots && Object.prototype.hasOwnProperty.call(slots, 'memory')) {
-    return { owned: slots.memory === 'adapter-openclaw', source: 'merged-config' };
+  if (mergedConfig) {
+    if (slots && Object.prototype.hasOwnProperty.call(slots, 'memory')) {
+      return { owned: slots.memory === 'adapter-openclaw', source: 'merged-config' };
+    }
+    return { owned: false, source: 'merged-config' };
   }
   const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);
   if (directMemoryEnabled === undefined) return undefined;
   return { owned: directMemoryEnabled, source: 'direct-plugin-config' };
+}
+
+function memoryRegistrationSkipMessage(ownership: MemorySlotOwnership | undefined): string {
+  if (ownership?.source === 'direct-plugin-config') {
+    return '[dkg-memory] memory.enabled is false in the adapter plugin config — ' +
+      'skipping memory-capability registration because this runtime explicitly disabled DKG memory.';
+  }
+  return '[dkg-memory] plugins.slots.memory is not set to "adapter-openclaw" in the workspace config — ' +
+    'skipping memory-capability registration so this adapter does not silently override the elected ' +
+    'memory provider. Rerun `dkg setup` to elect adapter-openclaw into the memory slot if that was the intent.';
 }
 
 function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): boolean | undefined {

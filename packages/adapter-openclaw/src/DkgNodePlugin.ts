@@ -1554,7 +1554,7 @@ export class DkgNodePlugin {
   private clearLocalAgentChannelIntegration(api: OpenClawPluginApi, registrationMode = 'full'): void {
     const generation = this.daemonClientGeneration;
     const client = this.client;
-    const memoryActive = this.memoryPlugin?.isRegistered() === true;
+    const memoryActive = this.config.memory?.enabled === true && this.memoryPlugin?.isRegistered() === true;
     const capabilities = {
       ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
       localChat: false,

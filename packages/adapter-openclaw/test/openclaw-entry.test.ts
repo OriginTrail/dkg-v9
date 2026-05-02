@@ -634,6 +634,42 @@ describe('openclaw-entry', () => {
     });
   });
 
+  it('merges api.pluginConfig when the strongest direct api config only carries state metadata', async () => {
+    const entry = await loadEntryWithFakeRuntime();
+    const firstApi = makeApi('http://127.0.0.1:9200');
+    const secondApi = makeDirectPluginConfigApi({
+      daemonUrl: 'http://127.0.0.1:9727',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9728 },
+    }, {
+      config: {
+        daemonUrl: 'http://127.0.0.1:9627',
+        dkgHome: '/stale-direct-dkg-home',
+        memory: { enabled: true },
+        channel: { enabled: false, port: 9628 },
+      },
+      cfg: {
+        stateDir: '/direct-metadata-workspace/.dkg-adapter',
+        stateDirSource: 'setup-default',
+        installedWorkspace: '/direct-metadata-workspace',
+      },
+    });
+
+    entry(firstApi);
+    entry(secondApi);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      daemonUrl: 'http://127.0.0.1:9727',
+      stateDir: '/direct-metadata-workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/direct-metadata-workspace',
+      memory: { enabled: false },
+      channel: { enabled: true, port: 9728 },
+    });
+    expect(instance.config.dkgHome).toBeUndefined();
+  });
+
   it('keeps current entry config ahead of stale api.pluginConfig', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const firstApi = makeApi('http://127.0.0.1:9200');

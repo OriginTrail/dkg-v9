@@ -394,7 +394,7 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
   });
 
-  it('honors runtime direct memory disable behind state metadata-only current config', () => {
+  it('does not let stale runtime memory disable override state metadata-only current config', () => {
     const api = makeApi();
     api.config = {
       memory: { enabled: true },
@@ -414,9 +414,25 @@ describe('DkgMemoryPlugin.register', () => {
       },
     };
 
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+    expect(plugin.isRegistered()).toBe(true);
+  });
+
+  it('does not use stale runtime memory enable behind daemon-only current config', () => {
+    const api = makeApi();
+    api.config = {
+      daemonUrl: 'http://localhost:9500',
+    } as any;
+    (api as any).runtime = {
+      pluginConfig: {
+        memory: { enabled: true },
+      },
+    };
+
     expect(plugin.register(api)).toBe(false);
-    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
-    expect(plugin.isRegistered()).toBe(false);
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
   });
 
   it('does not revive direct memory ownership after an explicit direct disable', () => {

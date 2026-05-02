@@ -101,6 +101,25 @@ function resolveEntryConfig(api, options = {}) {
   ].filter(isObjectRecord);
   const hasCurrentDirectApiConfig = currentDirectApiConfigs.length > 0;
   const currentPluginConfig = directPluginConfigFrom(anyApi?.pluginConfig);
+  const strongestCurrentDirectApiConfig = currentDirectApiConfigs[currentDirectApiConfigs.length - 1];
+  const strongestCurrentDirectApiConfigIsMetadataOnly =
+    isStateMetadataOnlyAdapterConfig(strongestCurrentDirectApiConfig);
+  const currentPluginConfigForMetadataDirect =
+    strongestCurrentDirectApiConfigIsMetadataOnly
+      ? stripStateMetadataFromAdapterConfig(currentPluginConfig)
+      : undefined;
+  const currentDirectApiConfigSources =
+    hasCurrentDirectApiConfig &&
+    strongestCurrentDirectApiConfigIsMetadataOnly &&
+    isObjectRecord(currentPluginConfigForMetadataDirect)
+      ? [
+          ...(isPartialAdapterConfigOverlay(currentPluginConfigForMetadataDirect)
+            ? currentDirectApiConfigs.slice(0, -1)
+            : currentDirectApiConfigs.slice(0, -1).filter(isStateMetadataOnlyAdapterConfig)),
+          currentPluginConfigForMetadataDirect,
+          strongestCurrentDirectApiConfig,
+        ].filter(isObjectRecord)
+      : currentDirectApiConfigs;
   const strongestCurrentEntryConfig = currentEntryConfigs[currentEntryConfigs.length - 1];
   const strongestCurrentEntryConfigIsMetadataOnly =
     isStateMetadataOnlyAdapterConfig(strongestCurrentEntryConfig);
@@ -109,7 +128,7 @@ function resolveEntryConfig(api, options = {}) {
       ? stripStateMetadataFromAdapterConfig(currentPluginConfig)
       : currentPluginConfig;
   const currentDirectConfigs = hasCurrentDirectApiConfig
-    ? currentDirectApiConfigs
+    ? currentDirectApiConfigSources
     : currentEntryConfigs.length === 0 || strongestCurrentEntryConfigIsMetadataOnly
       ? [currentPluginConfigForMetadataEntry].filter(isObjectRecord)
       : [];

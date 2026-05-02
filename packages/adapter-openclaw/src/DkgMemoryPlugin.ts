@@ -49,7 +49,6 @@ import type {
 } from './types.js';
 import {
   isObjectRecord,
-  isPartialAdapterConfigOverlay,
   looksLikeAdapterPluginConfig,
   resolveOpenClawMergedConfig,
 } from './openclaw-config.js';
@@ -866,7 +865,7 @@ function directPluginConfigMemoryEnabledForApi(api: OpenClawPluginApi | null): b
   ];
   const currentMemoryEnabled = directPluginConfigMemoryEnabledFromCandidates(currentCandidates);
   if (currentMemoryEnabled !== undefined) return currentMemoryEnabled;
-  if (currentCandidates.some(isModuleScopedDirectConfigWithoutMemoryDecision)) {
+  if (currentCandidates.some(isDirectConfigWithoutMemoryDecision)) {
     return undefined;
   }
 
@@ -896,23 +895,17 @@ function hasCurrentDirectOverlayWithoutMemoryDecision(api: OpenClawPluginApi): b
     anyApi?.cfg,
     anyApi?.config,
     anyApi?.pluginConfig,
-  ].some((candidate) =>
-    looksLikeAdapterPluginConfig(candidate) &&
-    (
-      isPartialAdapterConfigOverlay(candidate) ||
-      isModuleScopedDirectConfigWithoutMemoryDecision(candidate)
-    )
-  );
+  ].some(isDirectConfigWithoutMemoryDecision);
 }
 
-function isModuleScopedDirectConfigWithoutMemoryDecision(candidate: unknown): boolean {
+function isDirectConfigWithoutMemoryDecision(candidate: unknown): boolean {
   if (!looksLikeAdapterPluginConfig(candidate)) return false;
   const config = candidate as Record<string, unknown>;
   const memory = config.memory;
   if (isObjectRecord(memory) && Object.prototype.hasOwnProperty.call(memory, 'enabled')) {
     return false;
   }
-  return isObjectRecord(config.memory) || isObjectRecord(config.channel);
+  return Object.keys(config).length > 0;
 }
 
 

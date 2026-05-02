@@ -100,16 +100,12 @@ export function mergeAdapterPluginConfigs<T extends Record<string, unknown>>(
   return merged as T;
 }
 
-function hasOpenClawConfigSignal(value: Record<string, unknown>): boolean {
-  return (
-    isObjectRecord(value.plugins) ||
-    isObjectRecord(value.agents) ||
-    typeof value.workspace === 'string'
-  );
-}
-
 function hasMergedPluginConfigSignal(value: Record<string, unknown>): boolean {
   return isObjectRecord(value.plugins);
+}
+
+function hasRouteMetadataConfigSignal(value: Record<string, unknown>): boolean {
+  return isObjectRecord(value.agents) || typeof value.workspace === 'string';
 }
 
 export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
@@ -123,7 +119,23 @@ export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<stri
   ].filter((candidate) =>
     isObjectRecord(candidate) &&
     !looksLikeAdapterPluginConfig(candidate) &&
-    hasOpenClawConfigSignal(candidate)
+    hasMergedPluginConfigSignal(candidate)
   );
-  return candidates.find(hasMergedPluginConfigSignal) ?? candidates[0];
+  return candidates[0];
+}
+
+export function resolveOpenClawRouteMetadataConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  return [
+    anyApi?.cfg,
+    anyApi?.config,
+    runtime?.cfg,
+    runtime?.config,
+  ].find((candidate) =>
+    isObjectRecord(candidate) &&
+    !looksLikeAdapterPluginConfig(candidate) &&
+    !hasMergedPluginConfigSignal(candidate) &&
+    hasRouteMetadataConfigSignal(candidate)
+  );
 }

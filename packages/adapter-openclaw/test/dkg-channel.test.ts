@@ -239,6 +239,34 @@ describe('DkgChannelPlugin', () => {
     expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
   });
 
+  it('uses api.pluginConfig when api.cfg only carries route/workspace metadata', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Route metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9500',
+      channel: { enabled: true, port: 0 },
+    };
+    const routeMetadata = {
+      agents: { defaults: { workspace: '/route-workspace' } },
+      workspace: '/route-workspace',
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Route metadata fallback reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(currentPluginConfig);
+  });
+
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
     const reassertSpy = vi.fn();
     plugin.setPreDispatchReAssert(reassertSpy);

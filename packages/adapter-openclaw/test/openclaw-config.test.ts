@@ -5,6 +5,7 @@ import {
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
   resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
 } from '../src/openclaw-config.js';
 
 describe('openclaw-config helpers', () => {
@@ -128,7 +129,7 @@ describe('openclaw-config helpers', () => {
     expect(resolveOpenClawMergedConfig(api)).toBe(fullConfig);
   });
 
-  it('skips empty api.config and falls back to api.cfg route config', () => {
+  it('does not treat route-only api.cfg as merged plugin config', () => {
     const routeConfig = {
       agents: {},
       session: {
@@ -140,7 +141,29 @@ describe('openclaw-config helpers', () => {
       cfg: routeConfig,
     } as any;
 
-    expect(resolveOpenClawMergedConfig(api)).toBe(routeConfig);
+    expect(resolveOpenClawMergedConfig(api)).toBeUndefined();
+    expect(resolveOpenClawRouteMetadataConfig(api)).toBe(routeConfig);
+  });
+
+  it('keeps route metadata separate from direct plugin config fallback', () => {
+    const routeConfig = {
+      agents: {
+        defaults: {
+          workspace: '/workspace',
+        },
+      },
+    };
+    const directPluginConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+    };
+    const api = {
+      cfg: routeConfig,
+      pluginConfig: directPluginConfig,
+    } as any;
+
+    expect(resolveOpenClawMergedConfig(api)).toBeUndefined();
+    expect(resolveOpenClawRouteMetadataConfig(api)).toBe(routeConfig);
   });
 
   it('skips session-only route metadata and falls back to runtime config', () => {

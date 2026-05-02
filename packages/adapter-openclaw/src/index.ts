@@ -38,10 +38,12 @@ export {
 } from './DkgMemoryPlugin.js';
 export {
   isObjectRecord,
+  isPartialAdapterConfigOverlay,
   isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
   resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
 } from './openclaw-config.js';
 export type {
   DkgMemorySession,

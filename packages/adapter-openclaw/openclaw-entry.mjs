@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DkgNodePlugin,
   isObjectRecord,
+  isPartialAdapterConfigOverlay,
   isStateMetadataOnlyAdapterConfig,
   looksLikeAdapterPluginConfig,
   mergeAdapterPluginConfigs,
@@ -14,17 +15,6 @@ let instance = null;
 const lifecycleServiceApis = new WeakMap();
 const entryAssignedWorkspaceDirMarkers = new WeakMap();
 let lifecycleOwnerToken = null;
-const PARTIAL_OVERLAY_CONFIG_KEYS = new Set([
-  'daemonUrl',
-  'dkgHome',
-  'stateDir',
-  'stateDirSource',
-  'installedWorkspace',
-]);
-const PARTIAL_MODULE_CONFIG_KEYS = new Set([
-  'memory',
-  'channel',
-]);
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -231,23 +221,6 @@ function directApiConfigFrom(config) {
     return config;
   }
   return undefined;
-}
-
-function isPartialAdapterConfigOverlay(config) {
-  if (!looksLikeAdapterPluginConfig(config)) return false;
-  const keys = Object.keys(config);
-  return keys.length > 0 && keys.every((key) =>
-    PARTIAL_OVERLAY_CONFIG_KEYS.has(key) ||
-    isPartialModuleConfigOverlay(key, config[key])
-  );
-}
-
-function isPartialModuleConfigOverlay(key, value) {
-  return (
-    PARTIAL_MODULE_CONFIG_KEYS.has(key) &&
-    isObjectRecord(value) &&
-    !Object.prototype.hasOwnProperty.call(value, 'enabled')
-  );
 }
 
 function registrationModeEnablesRuntime(api) {

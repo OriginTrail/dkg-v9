@@ -273,6 +273,14 @@ describe('RandomSamplingProver — short-circuits', () => {
     // Fix: mirror the wall-clock stale check that already protected
     // the solved branch. If wallclock is past the cached period's
     // boundary, force a rotation regardless of solved/unsolved.
+    //
+    // Codex round 1: the rotated challenge from createChallenge must
+    // sit in a DIFFERENT period than the frozen cached one — otherwise
+    // the test only proves createChallenge was called, not that the
+    // prover actually consumed the rotated challenge downstream. So
+    // make the frozen cursor sit at period 1000 and have createChallenge
+    // return a challenge for the now-current period 9050, then assert
+    // the WAL trail records `periodStartBlock` of the rotated period.
     const fixture: KCFixture = {
       cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
@@ -280,14 +288,22 @@ describe('RandomSamplingProver — short-circuits', () => {
     };
     const { root, leafCount } = await seedKC(store, fixture);
 
+    const FROZEN_PERIOD = 1000n;
+    const ROTATED_PERIOD = 9050n;
+    const ROTATED_EPOCH = 18n;
+
     const submitProof = vi.fn(async () => ({ hash: '0xfresh', blockNumber: 9000, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
         knowledgeCollectionId: fixture.kcId,
         chunkId: 0n,
-        // The chain's createChallenge auto-rotates the period internally;
-        // the returned challenge points at the now-current period.
-        activeProofPeriodStartBlock: 1000n,
+        // The chain's createChallenge auto-rotates the period internally
+        // (`updateAndGetActiveProofPeriodStartBlock` runs inside the tx),
+        // so the returned challenge sits in the NEW period — not the
+        // frozen cached one. Test asserts the prover consumes this
+        // rotated period downstream (WAL entries reflect ROTATED_PERIOD).
+        epoch: ROTATED_EPOCH,
+        activeProofPeriodStartBlock: ROTATED_PERIOD,
         proofingPeriodDurationInBlocks: 50n,
       }),
       contextGraphId: fixture.cgId,
@@ -295,17 +311,17 @@ describe('RandomSamplingProver — short-circuits', () => {
     }));
     const chain = makeChain({
       // Status read still reflects the FROZEN cursor — both the
-      // status and the stored challenge agree on period 1000, so
-      // `existingIsCurrent` is truthy. Only the wall-clock check
+      // status and the stored challenge agree on the frozen period,
+      // so `existingIsCurrent` is truthy. Only the wall-clock check
       // can detect that the period actually expired.
-      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      status: { activeProofPeriodStartBlock: FROZEN_PERIOD, isValid: true },
       challengeForNode: makeChallenge({
         knowledgeCollectionId: fixture.kcId,
-        activeProofPeriodStartBlock: 1000n,
+        activeProofPeriodStartBlock: FROZEN_PERIOD,
         proofingPeriodDurationInBlocks: 50n,
         solved: false,
       }),
-      // Wallclock is far past period boundary (1000 + 50 = 1050).
+      // Wallclock far past frozen period boundary (1000 + 50 = 1050).
       blockNumber: 9000,
       createChallenge,
       expectedRoot: root,
@@ -313,11 +329,24 @@ describe('RandomSamplingProver — short-circuits', () => {
       cgIdForKc: fixture.cgId,
       submitProof: submitProof as never,
     });
-    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID, wal });
     const outcome = await prover.tick();
     expect(outcome.kind).toBe('submitted');
     expect(createChallenge).toHaveBeenCalledTimes(1);
     expect(submitProof).toHaveBeenCalledTimes(1);
+
+    // Codex round 1 fix — verify the prover actually advanced to the
+    // rotated period. WAL entries written after `periodKey.periodStartBlock
+    // = challenge.activeProofPeriodStartBlock` (prover.ts L288) all carry
+    // the new period; if the prover had instead reused the frozen cached
+    // challenge they'd carry FROZEN_PERIOD's string and this would fail.
+    const trail = await wal.readAll();
+    const submitted = trail.find((e) => e.status === 'submitted');
+    expect(submitted).toBeDefined();
+    expect(submitted!.periodStartBlock).toBe(ROTATED_PERIOD.toString());
+    expect(submitted!.epoch).toBe(ROTATED_EPOCH.toString());
+    expect(trail.map((e) => e.status)).toEqual(['challenge', 'extracted', 'built', 'submitted']);
     await prover.close();
   });
 

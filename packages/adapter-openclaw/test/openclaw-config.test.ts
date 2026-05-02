@@ -250,8 +250,12 @@ describe('openclaw-config helpers', () => {
     })).toBe(true);
     expect(isPartialAdapterConfigOverlay({
       channel: { enabled: false },
-    })).toBe(false);
+    })).toBe(true);
     expect(isPartialAdapterConfigOverlay({
+      memory: { enabled: true },
+    })).toBe(true);
+    expect(isPartialAdapterConfigOverlay({
+      daemonUrl: 'http://127.0.0.1:9200',
       memory: { enabled: true },
     })).toBe(false);
   });

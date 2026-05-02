@@ -832,6 +832,13 @@ function memorySlotOwnershipForApi(
     if (slots && Object.prototype.hasOwnProperty.call(slots, 'memory')) {
       return { owned: slots.memory === 'adapter-openclaw', source: 'merged-config' };
     }
+    const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);
+    if (directMemoryEnabled !== undefined) {
+      return { owned: directMemoryEnabled, source: 'direct-plugin-config' };
+    }
+    if (options.preserveDirectOverlayWithoutMemoryDecision && hasCurrentDirectOverlayWithoutMemoryDecision(api)) {
+      return { owned: true, source: 'direct-plugin-config' };
+    }
     return { owned: false, source: 'merged-config' };
   }
   const directMemoryEnabled = directPluginConfigMemoryEnabledForApi(api);

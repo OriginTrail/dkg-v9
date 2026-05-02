@@ -57,6 +57,9 @@ export function isStateMetadataOnlyAdapterConfig(value: unknown): boolean {
 export function isPartialAdapterConfigOverlay(value: unknown): boolean {
   if (!isObjectRecord(value) || !looksLikeAdapterPluginConfig(value)) return false;
   const keys = Object.keys(value);
+  if (keys.every((key) => (PARTIAL_MODULE_CONFIG_KEYS as readonly string[]).includes(key))) {
+    return true;
+  }
   return keys.length > 0 && keys.every((key) =>
     (PARTIAL_OVERLAY_CONFIG_KEYS as readonly string[]).includes(key) ||
     isPartialModuleConfigOverlay(key, value[key])

@@ -485,7 +485,7 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerMemoryCapability).not.toHaveBeenCalled();
   });
 
-  it('does not use direct memory fallback when merged config omits the memory slot', () => {
+  it('uses direct memory fallback when merged config omits the memory slot', () => {
     const api = makeApi();
     api.config = {
       plugins: {
@@ -499,8 +499,8 @@ describe('DkgMemoryPlugin.register', () => {
       memory: { enabled: true },
     };
 
-    expect(plugin.register(api)).toBe(false);
-    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('does not stamp the inactive capability when another plugin owns the memory slot', () => {

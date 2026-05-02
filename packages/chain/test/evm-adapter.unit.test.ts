@@ -122,13 +122,13 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       .toThrow('EVM adminPrivateKey must be distinct from operational keys');
   });
 
-  it('requires adminPrivateKey unless publish/read-only mode is explicit', () => {
+  it('allows missing adminPrivateKey for backwards-compatible publish/read-only adapters', () => {
     expect(() => new EVMChainAdapter({
       rpcUrl: 'http://127.0.0.1:59998',
       privateKey: DEPLOYER_PK,
       hubAddress: '0x0000000000000000000000000000000000000001',
       chainId: 'evm:31337',
-    } as EVMAdapterConfig)).toThrow('EVM adminPrivateKey is required');
+    })).not.toThrow();
 
     expect(() => new EVMChainAdapter({
       rpcUrl: 'http://127.0.0.1:59998',

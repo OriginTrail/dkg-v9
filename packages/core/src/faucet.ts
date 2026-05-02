@@ -29,69 +29,77 @@ export async function requestFaucetFunding(
   let sawSuccess = false;
 
   for (const batch of batches) {
-    const res = await _fetch(faucetUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': `init-${mode}-${safeNodeName}-${[...batch].sort().join(',')}`,
-      },
-      body: JSON.stringify({ mode, wallets: batch, callerId: `dkg-node:${nodeName}` }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      errors.push(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-      for (const wallet of batch) failedWallets.add(wallet);
-      continue;
-    }
-    const data = await res.json() as Record<string, unknown>;
-    const results = Array.isArray(data.results) ? data.results : [];
-    const amounts = results
-      .filter((r: any) => r && typeof r.status === 'string' && r.status === 'success' && typeof r.chainId === 'string')
-      .map((r: any) => {
-        const label = String(r.chainId).includes('eth') ? 'ETH' : 'TRAC';
-        return `${r.amount ?? '?'} ${label}`;
+    try {
+      const res = await _fetch(faucetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `init-${mode}-${safeNodeName}-${[...batch].sort().join(',')}`,
+        },
+        body: JSON.stringify({ mode, wallets: batch, callerId: `dkg-node:${nodeName}` }),
+        signal: AbortSignal.timeout(30_000),
       });
-    const summary = data.summary && typeof data.summary === 'object' ? data.summary as Record<string, unknown> : null;
-    const batchSuccess = (typeof summary?.success === 'number' && summary.success > 0) || amounts.length > 0;
-    sawSuccess ||= batchSuccess;
-    funded.push(...amounts);
-    const summarySuccessCount = typeof summary?.success === 'number' ? summary.success : 0;
-    const successfulTransferCount = Math.max(summarySuccessCount, amounts.length);
-    const expectedTransferCount = batch.length * EXPECTED_FAUCET_TRANSFERS_PER_WALLET;
-    const batchFullyFunded = successfulTransferCount >= expectedTransferCount;
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        errors.push(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+        for (const wallet of batch) failedWallets.add(wallet);
+        continue;
+      }
+      const data = await res.json() as Record<string, unknown>;
+      const results = Array.isArray(data.results) ? data.results : [];
+      const amounts = results
+        .filter((r: any) => r && typeof r.status === 'string' && r.status === 'success' && typeof r.chainId === 'string')
+        .map((r: any) => {
+          const label = String(r.chainId).includes('eth') ? 'ETH' : 'TRAC';
+          return `${r.amount ?? '?'} ${label}`;
+        });
+      const summary = data.summary && typeof data.summary === 'object' ? data.summary as Record<string, unknown> : null;
+      const batchSuccess = (typeof summary?.success === 'number' && summary.success > 0) || amounts.length > 0;
+      sawSuccess ||= batchSuccess;
+      funded.push(...amounts);
+      const summarySuccessCount = typeof summary?.success === 'number' ? summary.success : 0;
+      const successfulTransferCount = Math.max(summarySuccessCount, amounts.length);
+      const expectedTransferCount = batch.length * EXPECTED_FAUCET_TRANSFERS_PER_WALLET;
+      const batchFullyFunded = successfulTransferCount >= expectedTransferCount;
 
-    const resultStatusesByAddress = new Map<string, string[]>();
-    for (const result of results) {
-      if (!result || typeof result !== 'object') continue;
-      const record = result as Record<string, unknown>;
-      if (typeof record.address !== 'string' || typeof record.status !== 'string') continue;
-      const key = record.address.toLowerCase();
-      const statuses = resultStatusesByAddress.get(key) ?? [];
-      statuses.push(record.status);
-      resultStatusesByAddress.set(key, statuses);
-    }
+      const resultStatusesByAddress = new Map<string, string[]>();
+      for (const result of results) {
+        if (!result || typeof result !== 'object') continue;
+        const record = result as Record<string, unknown>;
+        if (typeof record.address !== 'string' || typeof record.status !== 'string') continue;
+        const key = record.address.toLowerCase();
+        const statuses = resultStatusesByAddress.get(key) ?? [];
+        statuses.push(record.status);
+        resultStatusesByAddress.set(key, statuses);
+      }
 
-    if (resultStatusesByAddress.size > 0) {
-      for (const wallet of batch) {
-        const statuses = resultStatusesByAddress.get(wallet.toLowerCase()) ?? [];
-        if (
-          statuses.length >= EXPECTED_FAUCET_TRANSFERS_PER_WALLET &&
-          statuses.every((status) => status === 'success')
-        ) {
+      if (resultStatusesByAddress.size > 0) {
+        for (const wallet of batch) {
+          const statuses = resultStatusesByAddress.get(wallet.toLowerCase()) ?? [];
+          if (
+            statuses.length >= EXPECTED_FAUCET_TRANSFERS_PER_WALLET &&
+            statuses.every((status) => status === 'success')
+          ) {
+            fundedWallets.add(wallet);
+            failedWallets.delete(wallet);
+          } else {
+            failedWallets.add(wallet);
+            fundedWallets.delete(wallet);
+          }
+        }
+      } else if (batchFullyFunded) {
+        for (const wallet of batch) {
           fundedWallets.add(wallet);
           failedWallets.delete(wallet);
-        } else {
+        }
+      } else {
+        for (const wallet of batch) {
           failedWallets.add(wallet);
           fundedWallets.delete(wallet);
         }
       }
-    } else if (batchFullyFunded) {
-      for (const wallet of batch) {
-        fundedWallets.add(wallet);
-        failedWallets.delete(wallet);
-      }
-    } else {
+    } catch (err) {
+      errors.push(`Faucet request failed: ${err instanceof Error ? err.message : String(err)}`);
       for (const wallet of batch) {
         failedWallets.add(wallet);
         fundedWallets.delete(wallet);

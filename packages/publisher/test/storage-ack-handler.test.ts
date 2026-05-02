@@ -133,7 +133,7 @@ describe('StorageACKHandler', () => {
     );
   });
 
-  it('continues signing when signer registration lookup has a transient failure', async () => {
+  it('refuses to sign when signer registration lookup fails', async () => {
     const lookupFailed = vi.fn();
     const unregistered = vi.fn();
     const handler = await createHandler(swmQuads, {
@@ -154,9 +154,9 @@ describe('StorageACKHandler', () => {
       merkleLeafCount: swmMerkleLeafCount,
     });
 
-    const response = await handler.handler(intent, fakePeerId);
-    const ack = decodeStorageACK(response);
-    expect(ack.contextGraphId).toBe(contextGraphId);
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      'StorageACK signer registration lookup failed; refusing to sign',
+    );
     expect(lookupFailed).toHaveBeenCalledOnce();
     expect(unregistered).not.toHaveBeenCalled();
   });

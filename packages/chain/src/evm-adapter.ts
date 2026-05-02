@@ -140,21 +140,16 @@ interface EVMAdapterBaseConfig {
   chainId?: string;
 }
 
-export type EVMAdapterConfig = EVMAdapterBaseConfig & (
-  | {
-      /** Admin wallet key used for profile/key-management transactions. */
-      adminPrivateKey: string;
-      allowNoAdminSigner?: false;
-    }
-  | {
-      /**
-       * Explicit publish/read-only mode for callers that never create profiles
-       * or mutate profile keys. ACK/profile-management paths stay disabled.
-       */
-      allowNoAdminSigner: true;
-      adminPrivateKey?: undefined;
-    }
-);
+export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
+  /** Admin wallet key used for profile/key-management transactions. */
+  adminPrivateKey?: string;
+  /**
+   * Documents that this adapter is intentionally running without admin
+   * authority. Missing admin keys are still accepted for backwards-compatible
+   * publish/read-only usage; admin-only operations fail when invoked.
+   */
+  allowNoAdminSigner?: boolean;
+}
 
 interface ContractCache {
   hub: Contract;
@@ -210,11 +205,6 @@ export class EVMChainAdapter implements ChainAdapter {
       if (this.signerPool.some((signer) => signer.address.toLowerCase() === adminAddress)) {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
-    } else if (!config.allowNoAdminSigner) {
-      throw new Error(
-        'EVM adminPrivateKey is required. Set allowNoAdminSigner=true only for publish/read-only adapters ' +
-        'that never create profiles or mutate profile keys.',
-      );
     }
     this.hubAddress = config.hubAddress;
     this.chainId = config.chainId ?? 'evm:31337';

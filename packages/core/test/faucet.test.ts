@@ -161,11 +161,40 @@ describe('requestFaucetFunding', () => {
     expect(result.funded).toEqual([]);
   });
 
-  it('propagates network errors', async () => {
+  it('returns failed wallets for network errors', async () => {
     const fetch = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof globalThis.fetch;
-    await expect(
-      requestFaucetFunding('https://faucet.example.com/fund', 'test', ['0xAAA'], 'test-node', fetch),
-    ).rejects.toThrow('ECONNREFUSED');
+    const result = await requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test', ['0xAAA'], 'test-node', fetch,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.fundedWallets).toEqual([]);
+    expect(result.failedWallets).toEqual(['0xAAA']);
+    expect(result.error).toContain('ECONNREFUSED');
+  });
+
+  it('preserves earlier funded wallets when a later batch throws', async () => {
+    const calls: FetchCall[] = [];
+    const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: url as any, init: init as RequestInit });
+      if (calls.length === 1) {
+        return new Response(JSON.stringify({
+          summary: { success: 6 },
+          results: [],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      throw new Error('faucet offline');
+    }) as typeof globalThis.fetch;
+
+    const result = await requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test',
+      ['0x1', '0x2', '0x3', '0x4'], 'throwing-node', fetch,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3']);
+    expect(result.failedWallets).toEqual(['0x4']);
+    expect(result.error).toContain('faucet offline');
   });
 
   it('includes nodeName in callerId and Idempotency-Key', async () => {

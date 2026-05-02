@@ -49,9 +49,9 @@ export interface StorageACKHandlerConfig {
    */
   onSignerUnregistered?: () => void | Promise<void>;
   /**
-   * Called when the live confirmation hook itself fails. The handler keeps
-   * the last confirmed signer state and does not treat lookup errors as
-   * revocation.
+   * Called when the live confirmation hook itself fails. Lookup errors are
+   * signing blockers because ACKs must only be produced by keys confirmed
+   * registered on-chain at signing time.
    */
   onSignerRegistrationLookupFailed?: (err: unknown) => void | Promise<void>;
 }
@@ -269,6 +269,7 @@ export class StorageACKHandler {
         } catch {
           // Keep ACK availability independent from logging/callback failures.
         }
+        throw new Error('StorageACK signer registration lookup failed; refusing to sign');
       }
       if (signerRegistered === false) {
         try {

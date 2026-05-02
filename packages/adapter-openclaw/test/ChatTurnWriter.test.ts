@@ -581,7 +581,7 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("strong move outbound");
   });
 
-  it("T359 - internal-first duplicate typed inbound does not move the queue to weaker identity", async () => {
+  it("T359 - internal-first duplicate typed inbound still persists once when weak outbound arrives first", async () => {
     writer.onMessageReceived({
       sessionKey: "internal-sk",
       context: {
@@ -615,8 +615,9 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
 
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
-    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-1:internal-sk");
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toContain("chat-1");
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("internal first");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("typed duplicate outbound");
   });
 
   it("T359 - no-session typed Telegram identities stay isolated by conversation", async () => {
@@ -949,6 +950,89 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-fallback-concrete:internal-sk");
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("fallback to concrete inbound");
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("concrete outbound");
+  });
+
+  it("T359 - weak inbound promotes to concrete outbound without session fallback marker", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "weak only inbound", metadata: { messageId: "weak-only-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-weak-concrete" },
+    );
+
+    await writer.onMessageSent({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-weak-concrete",
+        content: "concrete answer",
+        success: true,
+        messageId: "weak-concrete-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toBe("openclaw:telegram:bot:chat-weak-concrete:internal-sk");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("weak only inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("concrete answer");
+  });
+
+  it("T359 - concrete inbound promotes to weak outbound by conversation identity", async () => {
+    writer.onMessageReceived({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-concrete-weak",
+        content: "concrete only inbound",
+        messageId: "concrete-weak-in",
+      },
+    } as any);
+
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "weak answer", success: true, metadata: { messageId: "concrete-weak-out" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-concrete-weak" },
+    );
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][0]).toContain("chat-concrete-weak");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("concrete only inbound");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("weak answer");
+  });
+
+  it("T359 - outbound promotion merges weak sibling into existing concrete queue", async () => {
+    writer.onTypedMessageReceived(
+      { from: "user-1", content: "older weak sibling", metadata: { messageId: "merge-weak-in" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-merge-sibling" },
+    );
+    writer.onMessageReceived({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-merge-sibling",
+        content: "newer concrete sibling",
+        messageId: "merge-concrete-in",
+      },
+    } as any);
+
+    await writer.onMessageSent({
+      sessionKey: "internal-sk",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "chat-merge-sibling",
+        content: "merged sibling answer",
+        success: true,
+        messageId: "merge-sibling-out",
+      },
+    } as any);
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("older weak sibling\nnewer concrete sibling");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("merged sibling answer");
   });
 
   it("T359 - queue promotion appends later weak duplicates after earlier strong messages", async () => {

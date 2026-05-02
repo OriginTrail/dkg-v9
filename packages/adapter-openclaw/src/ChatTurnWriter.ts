@@ -1248,7 +1248,7 @@ export class ChatTurnWriter {
       // so we don't write a turn whose state was about to be wiped.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
-      this.promotePendingInboundQueueForOutbound(conversationKey, ev);
+      this.promotePendingInboundQueueForOutbound(conversationKey);
       const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Consume the SAME set of pending inbounds that
@@ -1722,7 +1722,6 @@ export class ChatTurnWriter {
   private shouldMoveInboundQueueForOutbound(
     existingKey: string,
     targetKey: string,
-    outboundUsesTypedSessionIdFallback: boolean,
   ): boolean {
     const existing = this.parseComposedSessionId(existingKey);
     const target = this.parseComposedSessionId(targetKey);
@@ -1733,25 +1732,20 @@ export class ChatTurnWriter {
     if (existing.conversationId !== target.conversationId) return false;
     const existingWeak = this.isWeakSessionKey(existing.sessionKey);
     const targetWeak = this.isWeakSessionKey(target.sessionKey);
+    if (existingWeak !== targetWeak) return true;
     if (this.pendingQueueUsesTypedSessionFallback(existingKey) && !targetWeak) return true;
-    if (existingWeak === targetWeak) return false;
-    if (targetWeak) return this.pendingQueueUsesTypedSessionFallback(existingKey);
-    return outboundUsesTypedSessionIdFallback;
+    return false;
   }
 
-  private promotePendingInboundQueueForOutbound(targetKey: string, ev: InternalMessageEvent): void {
-    const targetQueue = this.pendingUserMessages.get(targetKey);
-    if (targetQueue && targetQueue.length > 0) return;
-    const outboundUsesTypedSessionIdFallback = (ev as any)?.context?.typedSessionIdFallback === true;
+  private promotePendingInboundQueueForOutbound(targetKey: string): void {
     const candidates: string[] = [];
     for (const [candidateKey, messages] of Array.from(this.pendingUserMessages.entries())) {
       if (candidateKey === targetKey || !messages || messages.length === 0) continue;
-      if (this.shouldMoveInboundQueueForOutbound(candidateKey, targetKey, outboundUsesTypedSessionIdFallback)) {
+      if (this.shouldMoveInboundQueueForOutbound(candidateKey, targetKey)) {
         candidates.push(candidateKey);
       }
     }
-    if (candidates.length !== 1) return;
-    this.movePendingInboundQueue(candidates[0], targetKey);
+    for (const candidateKey of candidates) this.movePendingInboundQueue(candidateKey, targetKey);
   }
 
   private movePendingInboundQueue(fromKey: string, toKey: string): void {

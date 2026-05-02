@@ -795,7 +795,9 @@ export class DKGAgent {
         } catch { /* ignore */ }
       }
       if (onChainIdentityId > 0n) {
-        await ensureACKCandidateWalletsRegistered(ctx);
+        if (effectiveRole === 'core') {
+          await ensureACKCandidateWalletsRegistered(ctx);
+        }
 
         this.publisher.setIdentityId(onChainIdentityId);
         this.log.info(ctx, `Publisher using identityId=${onChainIdentityId}`);
@@ -811,13 +813,16 @@ export class DKGAgent {
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
         let storageACKProtocolRegistered = false;
-        let storageACKProtocolUnregistered = false;
+        let storageACKFailoverInFlight = false;
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
+          options: { repairWallets?: boolean } = {},
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
           if (storageACKProtocolRegistered) return 'registered';
           if (onChainIdentityId > 0n) {
-            const registrationSucceeded = await ensureACKCandidateWalletsRegistered(attemptCtx);
+            const registrationSucceeded = options.repairWallets === false
+              ? true
+              : await ensureACKCandidateWalletsRegistered(attemptCtx);
             const signerResolution = await this.resolveConfirmedACKSigner(
               onChainIdentityId,
               ackSignerCandidates,
@@ -867,8 +872,8 @@ export class DKGAgent {
                 );
               },
               onSignerUnregistered: () => {
-                if (storageACKProtocolUnregistered) return;
-                storageACKProtocolUnregistered = true;
+                if (storageACKFailoverInFlight) return;
+                storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
                 this.router.unregister(PROTOCOL_STORAGE_ACK);
                 this.log.warn(
@@ -876,6 +881,26 @@ export class DKGAgent {
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
                   `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
                 );
+                attemptStorageACKRegistration(
+                  createOperationContext('connect'),
+                  { repairWallets: false },
+                )
+                  .then((result) => {
+                    if (result === 'retryable') {
+                      scheduleStorageACKRegistrationRetry({ repairWallets: false });
+                    }
+                  })
+                  .catch((err: unknown) => {
+                    this.log.warn(
+                      attemptCtx,
+                      `V10 StorageACK signer failover failed: ` +
+                      `${err instanceof Error ? err.message : String(err)}`,
+                    );
+                    scheduleStorageACKRegistrationRetry({ repairWallets: false });
+                  })
+                  .finally(() => {
+                    storageACKFailoverInFlight = false;
+                  });
               },
               onSignerRegistrationLookupFailed: (err) => {
                 this.log.warn(
@@ -900,16 +925,16 @@ export class DKGAgent {
           return 'disabled';
         };
 
-        const scheduleStorageACKRegistrationRetry = () => {
+        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean } = {}) => {
           if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
           this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${STORAGE_ACK_REGISTRATION_RETRY_MS}ms`);
           this.storageACKRegistrationRetryTimer = setTimeout(() => {
             this.storageACKRegistrationRetryTimer = null;
             if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
             this.storageACKRegistrationRetryInFlight = true;
-            attemptStorageACKRegistration(createOperationContext('connect'))
+            attemptStorageACKRegistration(createOperationContext('connect'), options)
               .then((result) => {
-                if (result === 'retryable') scheduleStorageACKRegistrationRetry();
+                if (result === 'retryable') scheduleStorageACKRegistrationRetry(options);
               })
               .catch((err: unknown) => {
                 this.log.warn(
@@ -917,7 +942,7 @@ export class DKGAgent {
                   `V10 StorageACK handler registration retry failed: ` +
                   `${err instanceof Error ? err.message : String(err)}`,
                 );
-                scheduleStorageACKRegistrationRetry();
+                scheduleStorageACKRegistrationRetry(options);
               })
               .finally(() => {
                 this.storageACKRegistrationRetryInFlight = false;

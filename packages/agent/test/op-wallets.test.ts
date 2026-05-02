@@ -32,6 +32,14 @@ describe('operational wallet config', () => {
     expect(raw.wallets).toHaveLength(2);
   });
 
+  it('rejects invalid generated wallet counts before writing wallets.json', async () => {
+    const dir = await tempDir();
+
+    expect(() => generateWallets(0)).toThrow('wallet count must be at least 1');
+    await expect(loadOpWallets(dir, 0)).rejects.toThrow('wallet count must be at least 1');
+    await expect(readFile(join(dir, 'wallets.json'), 'utf-8')).rejects.toThrow();
+  });
+
   it('loads legacy operational-only wallets.json without inventing an admin wallet', async () => {
     const dir = await tempDir();
     const operational = ethers.Wallet.createRandom();

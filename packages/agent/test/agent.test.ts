@@ -864,6 +864,31 @@ describe('DKGAgent ACK signer gating', () => {
     }
   });
 
+  it('does not auto-register ACK signer candidates for edge nodes', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 46n);
+
+    const agent = await DKGAgent.create({
+      name: 'EdgeAckSignerNoAutoRegister',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'edge',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(46n, ackSigner.address)).toBe(false);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not register StorageACK when no ACK key is confirmed on-chain', async () => {
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();

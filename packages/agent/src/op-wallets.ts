@@ -72,6 +72,9 @@ export async function loadOpWallets(
 }
 
 export function generateWallets(count: number): OpWalletsConfig {
+  if (!Number.isInteger(count) || count < 1) {
+    throw new Error('wallet count must be at least 1');
+  }
   const adminWallet = createWalletEntry();
   const wallets: WalletEntry[] = [];
   for (let i = 0; i < count; i++) {

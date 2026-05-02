@@ -158,8 +158,22 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('accepts randomSamplingHubRefreshMs=0 (event-/error-driven only) without RPC contact', () => {
-    const a = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 0 }));
-    expect(a.chainType).toBe('evm');
+  it('coerces randomSamplingHubRefreshMs<=0 to the default TTL (no "disable refresh" mode)', () => {
+    // The "disable refresh entirely" mode is intentionally not
+    // supported — without a TTL backstop, a missed Hub event on a
+    // read-only path (e.g. getActiveProofPeriodStatus) would leave
+    // the adapter pinned to a stale RandomSampling address until
+    // restart. The constructor coerces values <=0 (and undefined) to
+    // the same 5-minute default. We verify by peeking the underlying
+    // cache's ttlMs option.
+    const DEFAULT_TTL_MS = 5 * 60 * 1000;
+    const aZero = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 0 }));
+    const aNeg = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: -42 }));
+    const aDefault = new EVMChainAdapter(minimalConfig());
+    const ttlOf = (a: EVMChainAdapter) =>
+      ((a as any).randomSamplingPairCache.opts as { ttlMs: number }).ttlMs;
+    expect(ttlOf(aZero)).toBe(DEFAULT_TTL_MS);
+    expect(ttlOf(aNeg)).toBe(DEFAULT_TTL_MS);
+    expect(ttlOf(aDefault)).toBe(DEFAULT_TTL_MS);
   });
 });

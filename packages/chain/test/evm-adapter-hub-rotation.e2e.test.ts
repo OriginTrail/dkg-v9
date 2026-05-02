@@ -129,9 +129,11 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
 
       // Drive cache population through the public surface.
       await adapter.getActiveProofPeriodStatus!();
-      const cachedBefore: Contract | null = (adapter as any).randomSamplingCache.peek();
+      const cachedBefore = (adapter as any).randomSamplingPairCache.peek() as
+        | { rs: Contract; rss: Contract }
+        | null;
       expect(cachedBefore).not.toBeNull();
-      const addrA: string = await cachedBefore!.getAddress();
+      const addrA: string = await cachedBefore!.rs.getAddress();
 
       // Isolate the TTL path from the event-listener path so this test
       // doesn't trivially pass via event-driven invalidation.
@@ -145,7 +147,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
 
         // Sanity: with the listener removed, immediate inspection still
         // shows the stale cached address — TTL hasn't fired yet.
-        const stillCached = await ((adapter as any).randomSamplingCache.peek() as Contract).getAddress();
+        const peeked = (adapter as any).randomSamplingPairCache.peek() as
+          | { rs: Contract; rss: Contract }
+          | null;
+        const stillCached = await peeked!.rs.getAddress();
         expect(stillCached.toLowerCase()).toBe(addrA.toLowerCase());
 
         // Wait past TTL; the next get() is forced to re-resolve.
@@ -164,6 +169,42 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
+    'Hub event listener: rotating RandomSamplingStorage ALSO invalidates the pair cache (coupled refresh)',
+    async () => {
+      // RS and RSS are deliberately treated as a coupled unit because
+      // RS.initialize() snapshots its RSS address. If the listener
+      // only invalidated on a name match, a single-side rotation
+      // (rare but possible) could leave the adapter holding a mixed
+      // pair — the exact bug Codex flagged on round 1. This test
+      // verifies that ROTATING ONLY RandomSamplingStorage still
+      // invalidates the pair cache.
+      const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
+      (adapter as any).provider.pollingInterval = 250;
+
+      await adapter.getActiveProofPeriodStatus!();
+      expect((adapter as any).randomSamplingPairCache.peek()).not.toBeNull();
+
+      const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
+      const realRssAddr = await readHubAddress(ctx.hubAddress, deployer, 'RandomSamplingStorage');
+      const replacementAddr = freshAddress();
+
+      try {
+        await rotateHubContract(ctx.hubAddress, deployer, 'RandomSamplingStorage', replacementAddr);
+
+        const invalidated = await waitFor(
+          () => (adapter as any).randomSamplingPairCache.peek() === null,
+          15_000,
+          100,
+        );
+        expect(invalidated).toBe(true);
+      } finally {
+        await rotateHubContract(ctx.hubAddress, deployer, 'RandomSamplingStorage', realRssAddr);
+      }
+    },
+    60_000,
+  );
+
+  it(
     'Hub event listener: ContractChanged invalidates the RandomSampling cache',
     async () => {
       // High TTL (10 min) far exceeds the test's lifetime, so the only
@@ -176,7 +217,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       (adapter as any).provider.pollingInterval = 250;
 
       await adapter.getActiveProofPeriodStatus!();
-      const addrA: string = await ((adapter as any).randomSamplingCache.peek() as Contract).getAddress();
+      const peekedA = (adapter as any).randomSamplingPairCache.peek() as
+        | { rs: Contract; rss: Contract }
+        | null;
+      const addrA: string = await peekedA!.rs.getAddress();
 
       const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
       const replacementAddr = freshAddress();
@@ -187,7 +231,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
         // The listener should observe `ContractChanged('RandomSampling', ...)`
         // within a few polling cycles and call `cache.invalidate()`.
         const invalidated = await waitFor(
-          () => (adapter as any).randomSamplingCache.peek() === null,
+          () => (adapter as any).randomSamplingPairCache.peek() === null,
           15_000,
           100,
         );
@@ -205,16 +249,14 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'withHubStaleRetry: marker error invalidates RS+RSS caches and retries the operation exactly once',
+    'withHubStaleRetry: marker error invalidates the RS pair cache and retries the operation exactly once',
     async () => {
       // High TTL keeps the cache from "spontaneously" re-resolving
       // mid-test; the wrapper's invalidate() is the only signal we
       // care about here.
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       await adapter.getActiveProofPeriodStatus!();
-      // After init both RS-side caches are populated.
-      expect((adapter as any).randomSamplingCache.peek()).not.toBeNull();
-      expect((adapter as any).randomSamplingStorageCache.peek()).not.toBeNull();
+      expect((adapter as any).randomSamplingPairCache.peek()).not.toBeNull();
 
       let calls = 0;
       const result = await (adapter as any).withHubStaleRetry(async () => {
@@ -232,12 +274,11 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
 
       expect(result).toBe('ok');
       expect(calls).toBe(2);
-      // Both caches were invalidated on the first throw — no subsequent
-      // get() inside the wrapper, so they're still empty here.
-      expect((adapter as any).randomSamplingCache.peek()).toBeNull();
-      expect((adapter as any).randomSamplingStorageCache.peek()).toBeNull();
+      // The pair cache was invalidated on the first throw — no
+      // subsequent get() inside the wrapper, so it's still empty here.
+      expect((adapter as any).randomSamplingPairCache.peek()).toBeNull();
 
-      // A follow-up adapter call refills the cache from the live Hub.
+      // A follow-up adapter call refills the pair from the live Hub.
       const { rs, rss } = await (adapter as any).getRandomSampling();
       expect(typeof (await rs.getAddress())).toBe('string');
       expect(typeof (await rss.getAddress())).toBe('string');
@@ -250,10 +291,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
     async () => {
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       await adapter.getActiveProofPeriodStatus!();
-      const cachedRsBefore = (adapter as any).randomSamplingCache.peek();
-      const cachedRssBefore = (adapter as any).randomSamplingStorageCache.peek();
-      expect(cachedRsBefore).not.toBeNull();
-      expect(cachedRssBefore).not.toBeNull();
+      const cachedBefore = (adapter as any).randomSamplingPairCache.peek();
+      expect(cachedBefore).not.toBeNull();
 
       let calls = 0;
       let caught: Error | null = null;
@@ -271,9 +310,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       expect(caught!.message).toMatch(/ProfileDoesntExist/);
       expect(calls).toBe(1);
 
-      // Cache references are unchanged (same Contract instances).
-      expect((adapter as any).randomSamplingCache.peek()).toBe(cachedRsBefore);
-      expect((adapter as any).randomSamplingStorageCache.peek()).toBe(cachedRssBefore);
+      // Cache reference unchanged (same { rs, rss } object).
+      expect((adapter as any).randomSamplingPairCache.peek()).toBe(cachedBefore);
     },
     30_000,
   );
@@ -290,9 +328,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
 
       const before = await adapter.getActiveProofPeriodStatus!();
       expect(typeof before.activeProofPeriodStartBlock).toBe('bigint');
-      const cachedAddrBefore: string = await (
-        (adapter as any).randomSamplingCache.peek() as Contract
-      ).getAddress();
+      const peekedBefore = (adapter as any).randomSamplingPairCache.peek() as
+        | { rs: Contract; rss: Contract }
+        | null;
+      const cachedAddrBefore: string = await peekedBefore!.rs.getAddress();
       expect(cachedAddrBefore.toLowerCase()).toBe(realRsAddr.toLowerCase());
 
       // Rotate to a non-RS address — getActiveProofPeriodStatus would
@@ -302,7 +341,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
 
       // Wait for invalidation (event listener path; TTL also covers it).
       const invalidatedFirst = await waitFor(
-        () => (adapter as any).randomSamplingCache.peek() === null,
+        () => (adapter as any).randomSamplingPairCache.peek() === null,
         15_000,
       );
       expect(invalidatedFirst).toBe(true);
@@ -318,9 +357,11 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       const recovered = await waitFor(async () => {
         try {
           after = await adapter.getActiveProofPeriodStatus!();
-          const cached: Contract | null = (adapter as any).randomSamplingCache.peek();
+          const cached = (adapter as any).randomSamplingPairCache.peek() as
+            | { rs: Contract; rss: Contract }
+            | null;
           if (!cached) return false;
-          const addr = await cached.getAddress();
+          const addr = await cached.rs.getAddress();
           return addr.toLowerCase() === realRsAddr.toLowerCase();
         } catch {
           return false;

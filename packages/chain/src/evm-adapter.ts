@@ -232,17 +232,29 @@ export class EVMChainAdapter implements ChainAdapter {
   private contracts: ContractCache;
   private initialized = false;
   /**
-   * Self-refreshing caches for the two `RandomSampling`-side contracts.
-   * RS is the highest-value Hub-resolved surface (it gates per-period
-   * proof rewards), so it gets stricter freshness guarantees than the
-   * one-shot resolution every other contract uses. See
-   * `HubResolutionCache` for the semantics; the listener installed in
-   * `init()` invalidates these on `Hub.ContractChanged` /
-   * `Hub.NewContract` events, and `withHubStaleRetry()` invalidates
-   * them when a write surfaces `UnauthorizedAccess(Only Contracts in Hub)`.
+   * Single self-refreshing cache for the `RandomSampling` /
+   * `RandomSamplingStorage` pair. RS is the highest-value Hub-resolved
+   * surface (it gates per-period proof rewards), so it gets stricter
+   * freshness guarantees than the one-shot resolution every other
+   * contract uses.
+   *
+   * The two addresses are deliberately treated as a **coupled unit**
+   * because `RandomSampling.initialize()` snapshots its
+   * `RandomSamplingStorage` address once at deploy time. If the
+   * adapter ever held a mixed pair (e.g. new RS + old RSS, or the
+   * inverse) `createChallenge()` would write through one contract
+   * and `getNodeChallenge()` would read from the other — producing
+   * the empty-struct / state-mismatch failures the prover already
+   * has a defensive guard against. Resolving both names atomically
+   * inside one cache eliminates that race.
+   *
+   * See `HubResolutionCache` for the semantics; the listener
+   * installed in `init()` invalidates this cache on
+   * `Hub.ContractChanged` / `Hub.NewContract` for **either** name,
+   * and `withHubStaleRetry()` invalidates it when a write surfaces
+   * `UnauthorizedAccess(Only Contracts in Hub)`.
    */
-  private readonly randomSamplingCache: HubResolutionCache<Contract>;
-  private readonly randomSamplingStorageCache: HubResolutionCache<Contract>;
+  private readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
   private hubRotationListenerStarted = false;
 
   constructor(config: EVMAdapterConfig) {
@@ -273,12 +285,17 @@ export class EVMChainAdapter implements ChainAdapter {
     // would silently pin the adapter to a stale address until restart.
     const rawRsRefreshMs = config.randomSamplingHubRefreshMs ?? DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
     const rsRefreshMs = rawRsRefreshMs > 0 ? rawRsRefreshMs : DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
-    this.randomSamplingCache = new HubResolutionCache(
-      () => this.resolveContract('RandomSampling'),
-      { ttlMs: rsRefreshMs },
-    );
-    this.randomSamplingStorageCache = new HubResolutionCache(
-      () => this.resolveContract('RandomSamplingStorage'),
+    this.randomSamplingPairCache = new HubResolutionCache(
+      async () => {
+        // Resolve both names in a single round (Promise.all) so that
+        // the cache only ever holds a coherent pair: when this
+        // resolves, both addresses came from the same Hub view.
+        const [rs, rss] = await Promise.all([
+          this.resolveContract('RandomSampling'),
+          this.resolveContract('RandomSamplingStorage'),
+        ]);
+        return { rs, rss };
+      },
       { ttlMs: rsRefreshMs },
     );
   }
@@ -491,8 +508,9 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     try {
-      this.contracts.randomSampling = await this.randomSamplingCache.get();
-      this.contracts.randomSamplingStorage = await this.randomSamplingStorageCache.get();
+      const pair = await this.randomSamplingPairCache.get();
+      this.contracts.randomSampling = pair.rs;
+      this.contracts.randomSamplingStorage = pair.rss;
     } catch {
       // RandomSampling not deployed — proof submission unavailable
     }
@@ -2396,11 +2414,10 @@ export class EVMChainAdapter implements ChainAdapter {
    */
   private async getRandomSampling(): Promise<{ rs: Contract; rss: Contract }> {
     try {
-      const rs = await this.randomSamplingCache.get();
-      const rss = await this.randomSamplingStorageCache.get();
-      this.contracts.randomSampling = rs;
-      this.contracts.randomSamplingStorage = rss;
-      return { rs, rss };
+      const pair = await this.randomSamplingPairCache.get();
+      this.contracts.randomSampling = pair.rs;
+      this.contracts.randomSamplingStorage = pair.rss;
+      return pair;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('not found in Hub at')) {
@@ -2417,11 +2434,11 @@ export class EVMChainAdapter implements ChainAdapter {
   /**
    * Run `fn` and, if it fails with the unique "this caller is no
    * longer registered as a Hub contract" revert, drop the cached RS
-   * addresses and retry exactly once. This is the safety net for the
+   * pair and retry exactly once. This is the safety net for the
    * rare case where (a) the daemon missed the `Hub.ContractChanged`
    * event (RPC reconnect, dropped subscription, etc.) AND (b) the TTL
    * hasn't expired yet. After the retry, the cache holds the freshly
-   * resolved addresses for subsequent ticks.
+   * resolved pair for subsequent ticks.
    */
   private async withHubStaleRetry<T>(fn: () => Promise<T>): Promise<T> {
     try {
@@ -2429,8 +2446,7 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
       if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
-        this.randomSamplingCache.invalidate();
-        this.randomSamplingStorageCache.invalidate();
+        this.randomSamplingPairCache.invalidate();
         return await fn();
       }
       throw err;
@@ -2439,7 +2455,10 @@ export class EVMChainAdapter implements ChainAdapter {
 
   /**
    * Subscribe to Hub `ContractChanged` / `NewContract` events and
-   * invalidate the RS caches whenever either RS-side name is rotated.
+   * invalidate the RS pair cache whenever **either** RS-side name is
+   * rotated. The pair is treated as a single coupled unit (see the
+   * `randomSamplingPairCache` field comment) — invalidating on either
+   * name forces an atomic re-resolve of both.
    *
    * `Hub._setContractAddress` is double-tap-emitting (`Hub-extra.test.ts`
    * E-7): on the new-contract path it emits `NewContract` twice, and
@@ -2455,8 +2474,9 @@ export class EVMChainAdapter implements ChainAdapter {
     this.hubRotationListenerStarted = true;
     const onChange = (name: unknown): void => {
       if (typeof name !== 'string') return;
-      if (name === 'RandomSampling') this.randomSamplingCache.invalidate();
-      if (name === 'RandomSamplingStorage') this.randomSamplingStorageCache.invalidate();
+      if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
+        this.randomSamplingPairCache.invalidate();
+      }
     };
     try {
       void this.contracts.hub.on('ContractChanged', onChange);

@@ -3394,6 +3394,144 @@ describe('DkgNodePlugin', () => {
     expect(typedHookEvents).toContain('agent_end');
   });
 
+  it('T359 - only supported typed agent_end plus internal message hooks are wired to ChatTurnWriter', async () => {
+    const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map<string, any[]>([
+      ['message:received', []],
+      ['message:sent', []],
+    ]);
+    const workspaceDir = fs.mkdtempSync(path.join(tmpdir(), 'dkg-node-t359-typed-'));
+    const typedHandlers = new Map<string, (...args: any[]) => unknown>();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
+        typedHandlers.set(event, handler);
+      }) as any,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      workspaceDir,
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      plugin.register(mockApi);
+      const client = (plugin as any).client;
+      client.storeChatTurn = vi.fn().mockResolvedValue(undefined);
+
+      expect(typedHandlers.has('agent_end')).toBe(true);
+      expect(typedHandlers.has('agent.end')).toBe(false);
+      expect(typedHandlers.has('message_received')).toBe(false);
+      expect(typedHandlers.has('message_sent')).toBe(false);
+      expect(typedHandlers.has('message.received')).toBe(false);
+      expect(typedHandlers.has('message.sent')).toBe(false);
+
+      typedHandlers.get('agent_end')!(
+        { messages: [{ role: 'user', content: 'healthy q' }, { role: 'assistant', content: 'healthy a' }] },
+        { channelId: 'telegram', sessionKey: 'healthy-sk' },
+      );
+      await (plugin as any).chatTurnWriter.flush();
+      expect(client.storeChatTurn).toHaveBeenCalledTimes(1);
+
+      const hookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL] as Map<string, any[]>;
+      hookMap.get('message:received')![0]({
+        sessionKey: 'internal-sk',
+        context: { channelId: 'telegram', conversationId: 'chat-1', content: 'internal q' },
+      });
+      await hookMap.get('message:sent')![0]({
+        sessionKey: 'internal-sk',
+        context: { channelId: 'telegram', conversationId: 'chat-1', content: 'internal a', success: true },
+      });
+      await (plugin as any).chatTurnWriter.flush();
+      expect(client.storeChatTurn).toHaveBeenCalledTimes(2);
+      expect(client.storeChatTurn.mock.calls[1][1]).toBe('internal q');
+      expect(client.storeChatTurn.mock.calls[1][2]).toBe('internal a');
+    } finally {
+      await plugin.stop();
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+      if (previousHookMap === undefined) delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      else (globalThis as any)[INTERNAL_HOOK_SYMBOL] = previousHookMap;
+    }
+  });
+
+  it('T359 - gateway-preloaded internal handlers do not suppress adapter handlers', async () => {
+    const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+    const hookMap = new Map<string, any[]>([
+      ['message:received', [vi.fn()]],
+      ['message:sent', [vi.fn()]],
+    ]);
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = hookMap;
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      plugin.register(mockApi);
+      expect(hookMap.get('message:received')).toHaveLength(2);
+      expect(hookMap.get('message:sent')).toHaveLength(2);
+    } finally {
+      await plugin.stop();
+      if (previousHookMap === undefined) delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      else (globalThis as any)[INTERNAL_HOOK_SYMBOL] = previousHookMap;
+    }
+  });
+
+  it('T359 - replacing the internal hook map triggers same-api reinstall', async () => {
+    const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+    const firstMap = new Map<string, any[]>([
+      ['message:received', []],
+      ['message:sent', []],
+    ]);
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = firstMap;
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    try {
+      plugin.register(mockApi);
+      expect(firstMap.get('message:received')).toHaveLength(1);
+      expect(firstMap.get('message:sent')).toHaveLength(1);
+
+      const replacementMap = new Map<string, any[]>([
+        ['message:received', []],
+        ['message:sent', []],
+      ]);
+      (globalThis as any)[INTERNAL_HOOK_SYMBOL] = replacementMap;
+      plugin.register(mockApi);
+      expect(replacementMap.get('message:received')).toHaveLength(1);
+      expect(replacementMap.get('message:sent')).toHaveLength(1);
+    } finally {
+      await plugin.stop();
+      if (previousHookMap === undefined) delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      else (globalThis as any)[INTERNAL_HOOK_SYMBOL] = previousHookMap;
+    }
+  });
+
   it('R14.3 / T52 / T58 — setup-only registers only session_end (no channel server, no typed/internal hooks)', () => {
     // R14.3: setup-only must NOT wire prompt-injection / turn-
     // persistence handlers (`before_prompt_build`, `agent_end`,
@@ -3514,7 +3652,8 @@ describe('DkgNodePlugin', () => {
       expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("typed:before_compaction"))).toBe(false);
       expect(warnMessages.some((msg) => msg.includes("typed:before_reset"))).toBe(false);
-      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
+      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(false);
+      expect(debugMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
     } finally {
       await plugin.stop();
       if (previousHookMap === undefined) {

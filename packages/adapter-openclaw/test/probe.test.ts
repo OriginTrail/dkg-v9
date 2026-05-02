@@ -95,9 +95,10 @@ describe('DkgNodePlugin registration-mode probe', () => {
     const plugin = new DkgNodePlugin();
     plugin.register(api);
 
-    // Should attempt to register on each event via each mechanism
-    // api.on and api.registerHook are called for each of 6 events
-    const numEvents = 6; // before_prompt_build, agent_end, before_compaction, before_reset, message_received, message_sent
+    // Should attempt to register on each accepted lifecycle event via each
+    // mechanism. Unsupported typed message/dotted aliases are intentionally
+    // not probed because 2026.4.15 rejects or never fires them.
+    const numEvents = 4;
     
     expect(onSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
     expect(registerHookSpy.mock.calls.length).toBeGreaterThanOrEqual(numEvents);
@@ -185,6 +186,11 @@ describe('DkgNodePlugin registration-mode probe', () => {
     const events = onSpy.mock.calls.map((c) => c[0]);
     expect(events).toContain('before_prompt_build');
     expect(events).toContain('agent_end');
+    expect(events).toContain('before_compaction');
+    expect(events).toContain('before_reset');
+    expect(events).not.toContain('message_sent');
+    expect(events).not.toContain('message_sending');
+    expect(events).not.toContain('message.sent');
   });
 
   it('probe gracefully handles missing globalThis internal-hook map', () => {

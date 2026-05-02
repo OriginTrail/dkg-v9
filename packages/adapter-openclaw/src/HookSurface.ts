@@ -42,8 +42,8 @@
  * I4 — deterministic commit timing. After first observed fire OR a 30s
  * grace period (whichever first), each event's `commitState` flips to
  * `committed-by-fire`, `committed-by-peer-fire`, or
- * `committed-by-timeout`. Callers can surface a warn if a typed-hook
- * event never fires within the grace period.
+ * `committed-by-timeout`. Timeout is diagnostic only: a hook can fire later,
+ * at which point stats move to `committed-by-fire`.
  *
  * C5 — double-registration guard. The same `(kind, event, handler)` triple
  * is a no-op on repeat install; we return the existing unsubscribe.
@@ -129,6 +129,12 @@ export class HookSurface {
    */
   private readonly installedHandlers = new Map<string, { handler: HookHandler; unsubscribe: Unsubscribe }>();
   /**
+   * Internal hooks are stored in a mutable process-global map owned by the
+   * gateway. Stats only tell us an install once succeeded; this map lets the
+   * adapter prove its own wrapper is still present in the current live map.
+   */
+  private readonly internalWrappedHandlers = new Map<string, HookHandler>();
+  /**
    * R21.1 — Soft "destroyed" flag. OpenClaw's `api.on` and `api.registerHook`
    * have no unsubscribe primitives, so `destroy()`'s no-op unsubscribes for
    * typed and legacy hooks leave handlers live in the upstream registry.
@@ -183,15 +189,26 @@ export class HookSurface {
 
     const existing = this.installedHandlers.get(key);
     if (existing) {
-      if (existing.handler === handler) {
-        this.logger.debug?.(`[hook-surface] install dedup (same handler): ${key}`);
-        return existing.unsubscribe;
+      if (kind === 'internal' && !this.ownsCurrentInternalHook(event)) {
+        this.clearCommitTimer(key);
+        try {
+          existing.unsubscribe();
+        } catch {
+          /* best-effort stale teardown */
+        }
+        this.installedHandlers.delete(key);
+        this.internalWrappedHandlers.delete(event);
+      } else {
+        if (existing.handler === handler) {
+          this.logger.debug?.(`[hook-surface] install dedup (same handler): ${key}`);
+          return existing.unsubscribe;
+        }
+        this.logger.warn?.(
+          `[hook-surface] install REJECTED: ${key} already has a different handler registered. ` +
+            `Unsubscribe the prior install before re-installing.`,
+        );
+        return null;
       }
-      this.logger.warn?.(
-        `[hook-surface] install REJECTED: ${key} already has a different handler registered. ` +
-          `Unsubscribe the prior install before re-installing.`,
-      );
-      return null;
     }
 
     let unsubscribe: Unsubscribe | null;
@@ -220,6 +237,7 @@ export class HookSurface {
     if (!unsubscribe) return null;
 
     this.installedHandlers.set(key, { handler, unsubscribe });
+    this.clearCommitTimer(key);
 
     const timer = setTimeout(() => {
       const s = this.stats.get(key);
@@ -235,10 +253,11 @@ export class HookSurface {
           const msg =
             `[hook-surface] commit-by-timeout: ${key} never fired within ${this.commitGraceMs}ms. ` +
             `installedVia=${s.installedVia}, fireCount=0.`;
-          // Rare-fire hooks (e.g. before_compaction, before_reset) don't
-          // fire in routine traffic; surface at debug so real install
-          // failures on frequent hooks aren't drowned out by startup noise.
-          if (this.rareFireKeys.has(key)) {
+          // Startup-window timeouts are not proof a hook is dead: live
+          // Telegram smoke showed `agent_end` firing after the 30s window.
+          // Keep install failures loud, but make timeout liveness debug-only
+          // for typed hooks and explicitly rare hooks.
+          if (kind === 'typed' || this.rareFireKeys.has(key)) {
             this.logger.debug?.(msg);
           } else {
             this.logger.warn?.(msg);
@@ -263,6 +282,21 @@ export class HookSurface {
   }
 
   /**
+   * True only when this surface's adapter-owned wrapper for `event` is still
+   * present in the current process-global internal hook map.
+   */
+  ownsCurrentInternalHook(event: string): boolean {
+    if (this.destroyed) return false;
+    const wrapped = this.internalWrappedHandlers.get(event);
+    if (!wrapped) return false;
+    const g = globalThis as unknown as Record<symbol, unknown>;
+    const existing = g[INTERNAL_HOOK_SYMBOL];
+    if (!(existing instanceof Map)) return false;
+    const handlers = (existing as Map<string, HookHandler[]>).get(event);
+    return Array.isArray(handlers) && handlers.includes(wrapped);
+  }
+
+  /**
    * Tear down all installed handlers and cancel pending commit timers.
    * Idempotent. Called from `DkgNodePlugin.stop()` via the existing
    * `session_end` legacy hook.
@@ -284,6 +318,7 @@ export class HookSurface {
       }
     }
     this.installedHandlers.clear();
+    this.internalWrappedHandlers.clear();
     for (const timer of this.commitTimers.values()) clearTimeout(timer);
     this.commitTimers.clear();
   }
@@ -387,6 +422,7 @@ export class HookSurface {
     };
 
     hookMap.get(event)!.push(wrapped);
+    this.internalWrappedHandlers.set(event, wrapped);
     this.setStat(key, { installedVia: 'globalThis', commitState: 'pending' });
     this.logger.debug?.(`[hook-surface] installed internal hook via globalThis: ${event}`);
 
@@ -394,6 +430,9 @@ export class HookSurface {
       const arr = hookMap.get(event);
       if (!arr) return;
       hookMap.set(event, arr.filter((h) => h !== wrapped));
+      if (this.internalWrappedHandlers.get(event) === wrapped) {
+        this.internalWrappedHandlers.delete(event);
+      }
     };
   }
 
@@ -464,18 +503,23 @@ export class HookSurface {
     if (!prev) return;
     const fireCount = prev.fireCount + 1;
     const nextState: CommitState =
-      prev.commitState === 'pending' || prev.commitState === 'committed-by-peer-fire'
+      prev.commitState === 'pending' ||
+      prev.commitState === 'committed-by-peer-fire' ||
+      prev.commitState === 'committed-by-timeout'
         ? 'committed-by-fire'
         : prev.commitState;
     this.stats.set(key, { ...prev, fireCount, commitState: nextState });
 
     if (fireCount === 1) {
-      const timer = this.commitTimers.get(key);
-      if (timer) {
-        clearTimeout(timer);
-        this.commitTimers.delete(key);
-      }
+      this.clearCommitTimer(key);
     }
+  }
+
+  private clearCommitTimer(key: string): void {
+    const timer = this.commitTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.commitTimers.delete(key);
   }
 }
 

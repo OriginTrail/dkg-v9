@@ -7,11 +7,15 @@ import { createHash } from "crypto";
  * `markExternalTurnPersistedDurable` creates content-bound markers only after
  * channel-side daemon `storeChatTurn` succeeds; marker keys include `turnId`
  * plus canonical user/assistant text to avoid false dedupe for reused IDs or
- * content. W4a consumes them in `consumeExternalTurnMarkersForPair` during
+ * content. W4a matches them in `consumeExternalTurnMarkersForPair` during
  * `runAgentEndPersist`, advancing pair watermarks only after durable commit.
- * Create/consume failures roll back marker snapshots when
- * `commitWatermarkStateSync` fails; `setStateDir` migrates per-session `m`
+ * Create failures roll back marker snapshots when `commitWatermarkStateSync`
+ * fails; `setStateDir` migrates per-session `m`
  * markers, and graceful `DkgChannelPlugin.stop()` drains in-flight first writes.
+ * Telegram persistence is owned by W4a `agent_end` plus the colon-form
+ * internal W4b hooks (`message:received` / `message:sent`). W4b replay
+ * markers are retained and bound to provider message IDs so repeated
+ * reset/compaction replays skip same-text occurrences safely.
  */
 
 interface Logger {
@@ -50,6 +54,8 @@ interface ComputedChatTurnPair {
   pairIndex: number;
   externalTurnIds: string[];
   externalDirect: boolean;
+  messageIds: string[];
+  assistantMessageIds: string[];
 }
 
 interface ExternalMarkerAction {
@@ -88,6 +94,12 @@ export interface InternalMessageEvent {
   };
 }
 
+interface PendingUserMessageMeta {
+  messageId?: string;
+  arrivalId?: string;
+  typedSessionIdFallback?: boolean;
+}
+
 /**
  * Pull the message text out of the envelope, preferring the canonical
  * `context.content` over the test-fixture `text` shorthand.
@@ -99,6 +111,14 @@ function readEventText(ev: InternalMessageEvent): string {
   return "";
 }
 
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
+}
+
 export class ChatTurnWriter {
   private client: any;
   private logger: Logger;
@@ -108,6 +128,12 @@ export class ChatTurnWriter {
   // first reply are both retained; `onMessageSent` consumes the oldest so the
   // first outbound reply pairs with the first inbound, not the most recent.
   private pendingUserMessages: Map<string, string[]> = new Map();
+  // Parallel metadata queue for pending user messages. Some gateway
+  // `message:sent` envelopes lack an outbound messageId, so we carry the inbound
+  // provider messageId forward and use it as the durable W4b turnId
+  // discriminator when the outbound envelope cannot provide one.
+  private pendingUserMessageMeta: Map<string, PendingUserMessageMeta[]> = new Map();
+  private pendingUserMessageSeq = 0;
   private debounceTimers: Map<string, { timer: NodeJS.Timeout; pendingIndex: number }> = new Map();
   private watermarkFilePath: string;
   // Cross-path dedup (W4a agent_end vs. W4b message:sent). The gateway fires
@@ -161,6 +187,10 @@ export class ChatTurnWriter {
   // persist jobs here, otherwise the reset assumption "all persists for
   // this session are tracked" is silently violated.
   private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
+  // Job-scoped content origins for active W4b persists. These let a later W4a
+  // skip the exact in-flight turn without copying queues/counts/jobs from a
+  // conversationless session into an unrelated concrete chat.
+  private persistJobOriginKeys: Map<Promise<void>, Set<string>> = new Map();
   // Per-session reset promises. `onAgentEnd` / `onMessageSent` await these
   // before processing so a compacted message array can't be read against
   // a stale watermark while the reset is still draining.
@@ -207,6 +237,17 @@ export class ChatTurnWriter {
   // (e.g. an unhandled throw outside the wrapped try/catch).
   private crossPathInflight: Map<string, number> = new Map();
   private static readonly CROSS_PATH_INFLIGHT_TTL_MS = 60_000;
+  private messageHookDedup: Map<string, number> = new Map();
+  private messageHookInboundQueueKeys: Map<string, string> = new Map();
+  private messageHookDedupSessionKeys: Map<string, string> = new Map();
+  private messageHookNoIdInboundBatch: Set<string> = new Set();
+  private messageHookNoIdInboundBatchClearScheduled = false;
+  private static readonly MESSAGE_HOOK_DEDUP_TTL_MS = 60_000;
+  private static readonly MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS = 5_000;
+  private static readonly MESSAGE_HOOK_DEDUP_MAX_ENTRIES = 2_048;
+  private static readonly MESSAGE_HOOK_NO_ID_INBOUND_PREFIX = "message-hook::inbound::text-batch::";
+  private messageHookLastSweepAt = 0;
+  private static readonly WEAK_SESSION_PREFIX = "weak-";
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -475,7 +516,11 @@ export class ChatTurnWriter {
     if (ctx?.channelId === "dkg-ui") return;
     const sessionId = this.deriveSessionId(ctx);
     if (!sessionId) return;
-    const externalCursorKey = this.externalCursorKeyFromHookPayload(undefined, ctx);
+    const identity = this.identityFieldsFromPayload(ctx);
+    const externalCursorKey = this.externalCursorKeyFromSessionKey(identity.sessionKey);
+    const typedW4bCursorKeys = this.typedW4bMarkerCursorKeys(identity);
+    const w4bInflightSessionIds = this.w4bInflightGuardSessionIds(identity, sessionId);
+    const w4aCrossPathSessionIds = this.w4aCrossPathSessionIds(identity, sessionId);
     // T4 — Serialize agent_end calls per session via a Promise chain.
     // The full computeDelta + per-pair persist loop runs INSIDE the
     // chain so a later fire's `computeDelta` reads the earlier fire's
@@ -495,7 +540,14 @@ export class ChatTurnWriter {
       .catch(() => undefined)
       .then(async () => {
         if (resetAtSchedule) await resetAtSchedule;
-        await this.runAgentEndPersist(event, sessionId, externalCursorKey);
+        await this.runAgentEndPersist(
+          event,
+          sessionId,
+          externalCursorKey,
+          typedW4bCursorKeys,
+          w4bInflightSessionIds,
+          w4aCrossPathSessionIds,
+        );
       });
     this.w4aSessionChains.set(sessionId, work);
     work.finally(() => {
@@ -510,7 +562,14 @@ export class ChatTurnWriter {
     // ordering; flush() drains via inFlightPersists.
   }
 
-  private async runAgentEndPersist(event: AgentEndContext, sessionId: string, externalCursorKey?: string): Promise<void> {
+  private async runAgentEndPersist(
+    event: AgentEndContext,
+    sessionId: string,
+    externalCursorKey?: string,
+    typedW4bCursorKeys: string[] = [],
+    w4bInflightSessionIds: string[] = [sessionId],
+    w4aCrossPathSessionIds: string[] = [sessionId],
+  ): Promise<void> {
     try {
       // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
       // session count (minus 1, because count is 1-based). When typed
@@ -532,7 +591,7 @@ export class ChatTurnWriter {
       const lastIdx = pairs.length - 1;
       const job = this.trackPersistJob(sessionId, async () => {
         for (let i = 0; i < pairs.length; i++) {
-          const { user, assistant, pairIndex, externalTurnIds } = pairs[i];
+          const { user, assistant, pairIndex, externalTurnIds, messageIds, assistantMessageIds } = pairs[i];
           if (!user && !assistant) continue;
           const externalMarkerAction = externalCursorKey
             ? this.consumeExternalTurnMarkersForPair(
@@ -554,6 +613,32 @@ export class ChatTurnWriter {
             }
             if (externalMarkerAction.skip) continue;
           }
+          const typedW4bMarkerHit = this.findTypedW4bExternalMarker(
+            typedW4bCursorKeys,
+            user,
+            assistant,
+            messageIds,
+            assistantMessageIds,
+          );
+          if (typedW4bMarkerHit) {
+            const watermarkSnapshot = this.snapshotWatermarkState(sessionId);
+            // Typed W4b markers are durable daemon-success facts, not
+            // one-shot tickets. Keep them so later reset/compaction replays
+            // can skip the same provider-message occurrence again.
+            this.bumpWatermark(sessionId, pairIndex);
+            if (!this.commitWatermarkStateSync(sessionId)) {
+              this.restoreWatermarkState(sessionId, watermarkSnapshot);
+              throw new Error("Failed to write typed W4b chat-turn marker watermark");
+            }
+            continue;
+          }
+          const typedW4bInflightOrigins = this.typedW4bInflightOrigins(
+            typedW4bCursorKeys,
+            user,
+            assistant,
+            messageIds,
+            assistantMessageIds,
+          );
           // W4a turnId mixes pair position into the hash so backfill of
           // two same-text pairs (e.g. user said "hi" twice) produces
           // distinct turnIds and BOTH persist.
@@ -570,6 +655,9 @@ export class ChatTurnWriter {
           // within the TTL window collide on the W4a→W4a self-stamp
           // (R13.1).
           if (i === lastIdx) {
+            if (this.hasAnyInFlightPersistOrigin(typedW4bInflightOrigins)) {
+              continue;
+            }
             const w4bOrigin = this.w4bOriginKey(user, assistant);
             if (this.peekCrossPathStamp(sessionId, w4bOrigin)) {
               // W4b already persisted this pair via `message:sent`. The
@@ -595,7 +683,7 @@ export class ChatTurnWriter {
             // and a future outbound re-pairs; the unchanged watermark
             // means the next `agent_end` will re-yield this pair as
             // backfill (correct retry behavior).
-            if (this.peekCrossPathInflight(sessionId, w4bOrigin)) {
+            if (this.hasW4bInflightOrigin(w4bInflightSessionIds, w4bOrigin)) {
               continue;
             }
           }
@@ -606,7 +694,11 @@ export class ChatTurnWriter {
           // with W4b (earlier pairs are historical backfill). Cleared
           // in `finally` so a failure doesn't leak the reservation.
           const w4aInflightKey = i === lastIdx ? this.w4aOriginKey(user, assistant) : null;
-          if (w4aInflightKey) this.markCrossPathInflight(sessionId, w4aInflightKey);
+          if (w4aInflightKey) {
+            for (const crossPathSessionId of w4aCrossPathSessionIds) {
+              this.markCrossPathInflight(crossPathSessionId, w4aInflightKey);
+            }
+          }
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
             // T55 — Only stamp W4a-origin for the LAST (live) pair.
@@ -626,7 +718,10 @@ export class ChatTurnWriter {
             // content turn outside the cross-path window doesn't
             // false-dedup.
             if (i === lastIdx) {
-              this.markCrossPathStamp(sessionId, this.w4aOriginKey(user, assistant));
+              const w4aOrigin = this.w4aOriginKey(user, assistant);
+              for (const crossPathSessionId of w4aCrossPathSessionIds) {
+                this.markCrossPathStamp(crossPathSessionId, w4aOrigin);
+              }
             }
           } catch (err) {
             // Release the turnId reservation so a retry can re-attempt.
@@ -634,10 +729,18 @@ export class ChatTurnWriter {
             // now a non-mutating peek (R13.1), so W4a never reserved it.
             this.releaseTurnIdReservation(sessionId, turnId);
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
-            if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
+            if (w4aInflightKey) {
+              for (const crossPathSessionId of w4aCrossPathSessionIds) {
+                this.unmarkCrossPathInflight(crossPathSessionId, w4aInflightKey);
+              }
+            }
             return; // leave watermark at last successful pair
           }
-          if (w4aInflightKey) this.unmarkCrossPathInflight(sessionId, w4aInflightKey);
+          if (w4aInflightKey) {
+            for (const crossPathSessionId of w4aCrossPathSessionIds) {
+              this.unmarkCrossPathInflight(crossPathSessionId, w4aInflightKey);
+            }
+          }
         }
       });
       // T4 — AWAIT the persist job so the per-session chain in
@@ -665,13 +768,64 @@ export class ChatTurnWriter {
     const job = run();
     bucket.add(job);
     job.finally(() => {
-      const b = this.inFlightPersists.get(sessionId);
-      if (b) {
-        b.delete(job);
-        if (b.size === 0) this.inFlightPersists.delete(sessionId);
-      }
+      this.deleteTrackedPersistJob(sessionId, job);
     }).catch(() => {});
     return job;
+  }
+
+  private markPersistJobOrigin(job: Promise<void>, originKey: string): void {
+    const origins = this.persistJobOriginKeys.get(job) ?? new Set<string>();
+    origins.add(originKey);
+    this.persistJobOriginKeys.set(job, origins);
+  }
+
+  private hasInFlightPersistOrigin(sessionId: string, originKey: string): boolean {
+    const bucket = this.inFlightPersists.get(sessionId);
+    if (!bucket) return false;
+    for (const job of bucket) {
+      if (this.persistJobOriginKeys.get(job)?.has(originKey)) return true;
+    }
+    return false;
+  }
+
+  private hasAnyInFlightPersistOrigin(originKeys: string[]): boolean {
+    const wanted = new Set(originKeys.filter((key) => key.length > 0));
+    if (wanted.size === 0) return false;
+    for (const bucket of this.inFlightPersists.values()) {
+      for (const job of bucket) {
+        const origins = this.persistJobOriginKeys.get(job);
+        if (!origins) continue;
+        for (const origin of wanted) {
+          if (origins.has(origin)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private hasW4bInflightOrigin(sessionIds: string[], originKey: string): boolean {
+    for (const sessionId of Array.from(new Set(sessionIds))) {
+      if (this.peekCrossPathInflight(sessionId, originKey) || this.hasInFlightPersistOrigin(sessionId, originKey)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private deleteTrackedPersistJob(sessionId: string, job: Promise<void>): void {
+    let removed = false;
+    const bucket = this.inFlightPersists.get(sessionId);
+    if (bucket) {
+      removed = bucket.delete(job);
+      if (bucket.size === 0) this.inFlightPersists.delete(sessionId);
+    }
+    this.persistJobOriginKeys.delete(job);
+    if (removed) return;
+    for (const [key, bucket] of Array.from(this.inFlightPersists.entries())) {
+      if (!bucket.delete(job)) continue;
+      if (bucket.size === 0) this.inFlightPersists.delete(key);
+      break;
+    }
   }
 
   async onBeforeCompaction(event: any, ctx?: any): Promise<void> {
@@ -852,6 +1006,7 @@ export class ChatTurnWriter {
       // raw `:` (e.g. the `agent:<agentId>:<identity>` keys created in
       // `DkgChannelPlugin`).
       this.pendingUserMessages.delete(sessionId);
+      this.pendingUserMessageMeta.delete(sessionId);
       this.clearSessionTurnIds(sessionId);
       // R18.2 — Reset the W4b session count too. After compaction the
       // `messages[]` array is rewritten, so the W4b count's "I persisted
@@ -859,10 +1014,174 @@ export class ChatTurnWriter {
       // count would skip new pairs in `computeDelta`.
       this.w4bSessionCounts.delete(sessionId);
     }
+    this.clearMessageHookDedupForSessions(ids);
     // External markers record daemon-success facts from direct-channel
     // persists. Preserve them across reset/compaction so the reset W4a replay
     // can still consume the marker instead of duplicating the stored UI turn.
     this.writeWatermarkFile();
+  }
+
+  onTypedMessageReceived(event: any, ctx?: any): void {
+    const ev = this.normalizeTypedMessageEvent("inbound", event, ctx);
+    if (!ev) return;
+    this.onMessageReceived(ev);
+  }
+
+  async onTypedMessageSent(event: any, ctx?: any): Promise<void> {
+    const ev = this.normalizeTypedMessageEvent("outbound", event, ctx);
+    if (!ev) return;
+    await this.onMessageSent(ev);
+  }
+
+  private normalizeTypedMessageEvent(
+    direction: "inbound" | "outbound",
+    eventPayload?: any,
+    hookCtx?: any,
+  ): InternalMessageEvent | null {
+    const event = eventPayload && typeof eventPayload === "object" ? eventPayload : {};
+    const ctx = hookCtx && typeof hookCtx === "object" ? hookCtx : {};
+    const eventContext = event.context && typeof event.context === "object" ? event.context : {};
+    const metadata = event.metadata && typeof event.metadata === "object" ? event.metadata : {};
+    const content = this.extractTypedMessageContent(event, eventContext, metadata, ctx);
+    const successValue = eventContext.success ?? event.success;
+    const isOutboundFailure = direction === "outbound" && successValue === false;
+    if (!content && !isOutboundFailure) return null;
+
+    const channelId = firstString(
+      ctx.channelId,
+      event.channelId,
+      eventContext.channelId,
+      metadata.channelId,
+      metadata.originatingChannel,
+      metadata.provider,
+    );
+    if (channelId === "dkg-ui") return null;
+    const accountId = firstString(ctx.accountId, event.accountId, eventContext.accountId, metadata.accountId, metadata.botId);
+    const conversationId = this.typedHookConversationId(event, eventContext, metadata, ctx);
+    const explicitSessionKey = firstString(
+      ctx.sessionKey,
+      event.sessionKey,
+      eventContext.sessionKey,
+      metadata.sessionKey,
+    );
+    const typedSessionIdFallback = firstString(
+      ctx.sessionId,
+      event.sessionId,
+      eventContext.sessionId,
+      metadata.sessionId,
+    );
+    const strongSessionKey = explicitSessionKey ?? typedSessionIdFallback;
+    const sessionKey = strongSessionKey ?? this.weakSessionKey(channelId, accountId, conversationId);
+    if (!channelId || !sessionKey) {
+      this.logger.debug?.("[ChatTurnWriter] Dropping typed message hook without channel/session identity");
+      return null;
+    }
+
+    const messageId = this.typedHookMessageId(event, eventContext, metadata, ctx);
+    const context: NonNullable<InternalMessageEvent["context"]> = {
+      channelId,
+      content,
+    };
+    if (accountId) context.accountId = accountId;
+    if (conversationId) context.conversationId = conversationId;
+    if (messageId) context.messageId = messageId;
+    if (typeof successValue === "boolean") context.success = successValue;
+    if (direction === "outbound" && typeof context.success !== "boolean") context.success = true;
+    if (!explicitSessionKey && typedSessionIdFallback) (context as any).typedSessionIdFallback = true;
+
+    return {
+      sessionKey,
+      direction,
+      text: content,
+      context,
+    };
+  }
+
+  private extractTypedMessageContent(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string {
+    for (const value of [
+      event.content,
+      event.text,
+      event.body,
+      eventContext.content,
+      metadata.content,
+      ctx.content,
+    ]) {
+      const text = this.extractText(value as ChatTurnMessage["content"]).trim();
+      if (text) return text;
+    }
+    return "";
+  }
+
+  private typedHookMessageId(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string | undefined {
+    return firstString(
+      ctx.messageId,
+      ctx.MessageId,
+      ctx.message_id,
+      event.messageId,
+      event.MessageId,
+      event.message_id,
+      eventContext.messageId,
+      eventContext.MessageId,
+      eventContext.message_id,
+      metadata.messageId,
+      metadata.MessageId,
+      metadata.message_id,
+    );
+  }
+
+  private typedHookConversationId(
+    event: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
+    metadata: Record<string, unknown>,
+    ctx: Record<string, unknown>,
+  ): string | undefined {
+    const explicit = firstString(
+      ctx.conversationId,
+      event.conversationId,
+      eventContext.conversationId,
+      metadata.conversationId,
+      ctx.conversation_id,
+      event.conversation_id,
+      eventContext.conversation_id,
+      metadata.conversation_id,
+    );
+    if (explicit) return explicit;
+    const chatId = firstString(
+      ctx.chatId,
+      event.chatId,
+      eventContext.chatId,
+      metadata.chatId,
+      ctx.chat_id,
+      event.chat_id,
+      eventContext.chat_id,
+      metadata.chat_id,
+    );
+    const threadId = firstString(
+      ctx.threadId,
+      event.threadId,
+      eventContext.threadId,
+      metadata.threadId,
+      ctx.thread_id,
+      event.thread_id,
+      eventContext.thread_id,
+      metadata.thread_id,
+      ctx.message_thread_id,
+      event.message_thread_id,
+      eventContext.message_thread_id,
+      metadata.message_thread_id,
+    );
+    if (chatId && threadId) return `${chatId}:${threadId}`;
+    return threadId ?? chatId;
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {
@@ -886,9 +1205,30 @@ export class ChatTurnWriter {
       // textual inbound. Drop until we add a recoverable representation for
       // attachment-only turns.
       if (!text) return;
+      const inboundDedupKey = this.messageHookDedupKey("inbound", ev, text);
+      if (inboundDedupKey) {
+        const existingConversationKey = this.messageHookInboundQueueKeys.get(inboundDedupKey);
+        if (existingConversationKey && existingConversationKey !== conversationKey) {
+          if (this.shouldMoveInboundQueue(existingConversationKey, conversationKey)) {
+            this.movePendingInboundQueue(existingConversationKey, conversationKey);
+            this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
+            this.messageHookDedupSessionKeys.set(inboundDedupKey, conversationKey);
+          }
+          return;
+        }
+        if (this.markMessageHookDuplicate(inboundDedupKey, conversationKey)) return;
+      }
       const queue = this.pendingUserMessages.get(conversationKey) ?? [];
       queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
+      const metaQueue = this.pendingUserMessageMeta.get(conversationKey) ?? [];
+      metaQueue.push({
+        messageId: this.messageEventId(ev),
+        arrivalId: this.nextPendingUserArrivalId(),
+        typedSessionIdFallback: (ev as any)?.context?.typedSessionIdFallback === true,
+      });
+      this.pendingUserMessageMeta.set(conversationKey, metaQueue);
+      if (inboundDedupKey) this.messageHookInboundQueueKeys.set(inboundDedupKey, conversationKey);
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageReceived] Error", { err });
     }
@@ -908,6 +1248,7 @@ export class ChatTurnWriter {
       // so we don't write a turn whose state was about to be wiped.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
+      this.promotePendingInboundQueueForOutbound(conversationKey);
       const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Consume the SAME set of pending inbounds that
@@ -920,7 +1261,10 @@ export class ChatTurnWriter {
       // makes them get mis-paired with the next unrelated reply. Delete
       // the whole queue here to match the success consumption.
       if (success === false) {
+        const droppedInboundDedupKeys = this.messageHookInboundDedupKeysForQueue(conversationKey);
         this.pendingUserMessages.delete(conversationKey);
+        this.pendingUserMessageMeta.delete(conversationKey);
+        this.deleteMessageHookInboundDedupKeys(droppedInboundDedupKeys);
         return;
       }
       // Strip injected `<recalled-memory>` from assistant text — the model may
@@ -961,8 +1305,18 @@ export class ChatTurnWriter {
       // string), preserving structure if a later inbound arrives
       // before the retry.
       const queuedItems = [...queue];
+      const queuedMeta = [...(this.pendingUserMessageMeta.get(conversationKey) ?? [])];
+      const consumedInboundDedupKeys = this.messageHookInboundDedupKeysForQueue(conversationKey);
       const userText = queuedItems.join("\n");
+      const outboundDedupKey = this.messageHookDedupKey("outbound", ev, assistantText, queuedMeta, userText);
+      if (this.markMessageHookDuplicate(outboundDedupKey, sessionId)) {
+        this.pendingUserMessages.delete(conversationKey);
+        this.pendingUserMessageMeta.delete(conversationKey);
+        this.clearMessageHookInboundDedupKeys(consumedInboundDedupKeys);
+        return;
+      }
       this.pendingUserMessages.delete(conversationKey);
+      this.pendingUserMessageMeta.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side (T5: short-TTL stamp map):
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
@@ -979,13 +1333,17 @@ export class ChatTurnWriter {
           // same-content turn where W4a fired for turn 1 but skipped
           // turn 2" — much rarer in practice.
           this.consumeCrossPathStamp(sessionId, w4aOrigin);
+          this.clearMessageHookInboundDedupKeys(consumedInboundDedupKeys);
           return; // W4a already wrote
         }
         // T10 — Cross-path in-flight check. If W4a is mid-persist for
         // this pair, skip; W4a will own the persist. We've already
         // consumed the pending user above (line 508), which is correct
         // because W4a IS persisting it.
-        if (this.peekCrossPathInflight(sessionId, w4aOrigin)) return;
+        if (this.peekCrossPathInflight(sessionId, w4aOrigin)) {
+          this.clearMessageHookInboundDedupKeys(consumedInboundDedupKeys);
+          return;
+        }
         // R15.1 — In-flight guard with per-turn discriminator.
         //   The cross-path stamp (`w4bOrigin`, content-only) is held for
         //   3s post-success so W4a's later last-pair peek can find it.
@@ -998,7 +1356,7 @@ export class ChatTurnWriter {
         //   monotonic in-process sequence when the envelope omits it
         //   (concurrent same-content fires for a single messageId-less
         //   turn are vanishingly rare in that path).
-        const w4bInflight = this.w4bInflightKey(ev, userText, assistantText);
+        const w4bInflight = this.w4bInflightKey(ev, userText, assistantText, queuedMeta);
         if (this.markTurnIdSeen(sessionId, w4bInflight)) return; // concurrent W4b dispatch
         // T33 — Mix the gateway-provided `messageId` (or the
         // monotonic fallback) into the daemon-facing turnId so
@@ -1009,7 +1367,14 @@ export class ChatTurnWriter {
         // is stable across process boundaries. Two LEGITIMATE same-
         // content turns within a session still get distinct ids
         // because their messageIds differ.
-        const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev);
+        const w4bDiscriminator = this.w4bDaemonTurnIdDiscriminator(ev, queuedMeta);
+        const w4bMarkerOccurrences = this.typedW4bMarkerOccurrences(w4bDiscriminator, queuedMeta);
+        const w4bInflightMarkerOrigins = this.typedW4bInflightOriginsFromOccurrences(
+          sessionId,
+          userText,
+          assistantText,
+          w4bMarkerOccurrences,
+        );
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText, w4bDiscriminator);
         // T10 — Reserve cross-path in-flight on W4b-origin BEFORE
         // persistOne so a concurrent W4a `agent_end` fire's
@@ -1021,7 +1386,8 @@ export class ChatTurnWriter {
         // reset gate sees this in-flight write and `Promise.allSettled`s
         // it. Without tracking, a `message:sent` write mid-compaction
         // could land its `saveWatermark()` after the reset clears state.
-        this.trackPersistJob(sessionId, async () => {
+        let w4bJob: Promise<void> | undefined;
+        w4bJob = this.trackPersistJob(sessionId, async () => {
           let daemonPersisted = false;
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
@@ -1033,10 +1399,10 @@ export class ChatTurnWriter {
             // repeated same-content turn arriving outside the 5s
             // cross-path window doesn't false-dedup against this stamp.
             this.markCrossPathStamp(sessionId, this.w4bOriginKey(userText, assistantText));
-            // R18.2 — Track the W4b session count so a later `agent_end`
-            // (typically after a `setup-runtime → full` upgrade) sees a
-            // raised `savedUpTo` floor in `computeDelta` and doesn't
-            // re-persist turns W4b already wrote.
+            // R18.2 — Track the W4b session count under the durable session
+            // we can prove. Conversationless typed turns keep their isolated
+            // conversationless count and add per-message markers; promotion
+            // must not copy that count into the first later concrete chat.
             // R20.2 — Only count when the persist consumed BOTH a user
             // message and assistant text — i.e. it represents a complete
             // logical turn pair as `computeDelta` would emit. Counting
@@ -1048,22 +1414,30 @@ export class ChatTurnWriter {
             // additional `userText` check here filters chunk-2+ deliveries
             // that ran out of pending users on chunk 1.
             if (userText) {
+              const markerChanged = this.markTypedW4bTurnPersisted(
+                sessionId,
+                userText,
+                assistantText,
+                w4bMarkerOccurrences,
+              );
+              const countChanged = true;
               this.w4bSessionCounts.set(
                 sessionId,
                 (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
               );
-              // T17 — Persist the new count to disk via the
-              // debounced flush so a process restart preserves
-              // the "skip these pairs in computeDelta" floor.
+              // T17 — Persist the new count/marker to disk via the
+              // debounced flush so a process restart preserves the
+              // "skip these pairs in computeDelta" fact.
               // Without this, setup-runtime → restart → upgrade
               // to full would replay every W4b-persisted turn as
               // backfill (count resets to 0, watermark file is
               // still -1, savedUpTo computes to -1, computeDelta
               // emits everything).
-              if (!this.commitWatermarkStateSync(sessionId)) {
+              if ((markerChanged || countChanged) && !this.commitWatermarkStateSync(sessionId)) {
                 this.scheduleWatermarkFlush(sessionId, { retryOnFailure: true, attempts: 3 });
                 throw new Error("Failed to write W4b chat-turn watermark");
               }
+              this.clearMessageHookInboundDedupKeys(consumedInboundDedupKeys);
             }
           } catch (err) {
             if (daemonPersisted) {
@@ -1089,10 +1463,14 @@ export class ChatTurnWriter {
               const restored = this.pendingUserMessages.get(conversationKey) ?? [];
               restored.unshift(...queuedItems);
               this.pendingUserMessages.set(conversationKey, restored);
+              const restoredMeta = this.pendingUserMessageMeta.get(conversationKey) ?? [];
+              restoredMeta.unshift(...queuedMeta);
+              this.pendingUserMessageMeta.set(conversationKey, restoredMeta);
             }
             // Release the in-flight reservation so a retry can proceed.
             // No `w4bOrigin` release needed — we don't stamp it pre-persist
             // anymore; only stamping happens post-success above.
+            if (outboundDedupKey) this.deleteMessageHookDedupKey(outboundDedupKey);
             this.releaseTurnIdReservation(sessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           } finally {
@@ -1103,7 +1481,12 @@ export class ChatTurnWriter {
             // not leak to block legitimate later same-content turns.
             this.unmarkCrossPathInflight(sessionId, w4bOriginKey);
           }
-        }).catch(() => {});
+        });
+        this.markPersistJobOrigin(w4bJob, w4bOriginKey);
+        for (const origin of w4bInflightMarkerOrigins) {
+          this.markPersistJobOrigin(w4bJob, origin);
+        }
+        w4bJob.catch(() => {});
       }
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageSent] Error", { err });
@@ -1131,6 +1514,296 @@ export class ChatTurnWriter {
     if (this.recentTurnIds.has(key)) return true;
     this.recentTurnIds.set(key, now);
     return false;
+  }
+
+  private messageEventId(ev: InternalMessageEvent): string | undefined {
+    const ctx = (ev as any)?.context ?? {};
+    return firstString(ctx.messageId, (ev as any)?.messageId);
+  }
+
+  private nextPendingUserArrivalId(): string {
+    this.pendingUserMessageSeq = (this.pendingUserMessageSeq + 1) >>> 0;
+    return `arrival::${this.pendingUserMessageSeq}`;
+  }
+
+  private pendingUserArrivalOrder(meta?: PendingUserMessageMeta): number {
+    const match = typeof meta?.arrivalId === "string" ? /^arrival::(\d+)$/.exec(meta.arrivalId) : null;
+    return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+  }
+
+  private messageHookDedupKey(
+    direction: "inbound" | "outbound",
+    ev: InternalMessageEvent,
+    text: string,
+    pendingMeta: PendingUserMessageMeta[] = [],
+    userText = "",
+  ): string {
+    const ctx = (ev as any)?.context ?? {};
+    const channelId = firstString(ctx.channelId, (ev as any)?.channelId) ?? "unknown";
+    if (channelId === "dkg-ui") return "";
+    const accountId = firstString(ctx.accountId) ?? "";
+    const conversationId = firstString(ctx.conversationId) ?? "";
+    const sessionKey = firstString(ev.sessionKey, ctx.sessionKey) ?? "";
+    const scopeParts = conversationId
+      ? [channelId, accountId, conversationId]
+      : [channelId, accountId, conversationId, sessionKey];
+    const messageId = this.messageEventId(ev);
+    if (messageId) {
+      return [
+        "message-hook",
+        direction,
+        "msg",
+        this.identityHash([...scopeParts, messageId]),
+      ].join("::");
+    }
+    if (direction === "inbound") {
+      // Without a provider messageId, only dedupe duplicate hook surfaces
+      // delivered in the same dispatch batch. A longer text cache would drop
+      // legitimate repeated user messages before one assistant reply.
+      return [
+        ChatTurnWriter.MESSAGE_HOOK_NO_ID_INBOUND_PREFIX,
+        this.identityHash([...scopeParts, text]),
+      ].join("");
+    }
+    if (direction === "outbound") {
+      const inboundIds = pendingMeta
+        .map((meta) => meta.messageId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      if (inboundIds.length > 0) {
+        return [
+          "message-hook",
+          direction,
+          "inbound-msg",
+          this.identityHash([...scopeParts, ...inboundIds, text]),
+        ].join("::");
+      }
+      const arrivalIds = pendingMeta
+        .map((meta) => meta.arrivalId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+      if (arrivalIds.length > 0) {
+        return [
+          "message-hook",
+          direction,
+          "arrival",
+          this.identityHash([...scopeParts, ...arrivalIds, text]),
+        ].join("::");
+      }
+      return [
+        "message-hook",
+        direction,
+        "turn-text",
+        this.identityHash([...scopeParts, userText, text]),
+      ].join("::");
+    }
+    return "";
+  }
+
+  private markMessageHookDuplicate(key: string, sessionId?: string): boolean {
+    if (!key) return false;
+    if (this.isNoIdInboundBatchKey(key)) {
+      return this.markNoIdInboundBatchDuplicate(key, sessionId);
+    }
+    const now = Date.now();
+    const ttl = ChatTurnWriter.MESSAGE_HOOK_DEDUP_TTL_MS;
+    const existingTs = this.messageHookDedup.get(key);
+    if (existingTs !== undefined) {
+      if (now - existingTs <= ttl) return true;
+      this.deleteMessageHookDedupKey(key);
+    }
+    if (
+      now - this.messageHookLastSweepAt >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_SWEEP_INTERVAL_MS ||
+      this.messageHookDedup.size >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_MAX_ENTRIES
+    ) {
+      for (const [existingKey, ts] of this.messageHookDedup) {
+        if (now - ts > ttl) {
+          this.deleteMessageHookDedupKey(existingKey);
+        }
+      }
+      this.messageHookLastSweepAt = now;
+    }
+    while (this.messageHookDedup.size >= ChatTurnWriter.MESSAGE_HOOK_DEDUP_MAX_ENTRIES) {
+      const oldestKey = this.messageHookDedup.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      this.deleteMessageHookDedupKey(oldestKey);
+    }
+    this.messageHookDedup.set(key, now);
+    if (sessionId) this.messageHookDedupSessionKeys.set(key, sessionId);
+    else this.messageHookDedupSessionKeys.delete(key);
+    return false;
+  }
+
+  private isNoIdInboundBatchKey(key: string): boolean {
+    return key.startsWith(ChatTurnWriter.MESSAGE_HOOK_NO_ID_INBOUND_PREFIX);
+  }
+
+  private markNoIdInboundBatchDuplicate(key: string, sessionId?: string): boolean {
+    if (this.messageHookNoIdInboundBatch.has(key)) return true;
+    this.messageHookNoIdInboundBatch.add(key);
+    if (sessionId) this.messageHookDedupSessionKeys.set(key, sessionId);
+    else this.messageHookDedupSessionKeys.delete(key);
+    if (!this.messageHookNoIdInboundBatchClearScheduled) {
+      this.messageHookNoIdInboundBatchClearScheduled = true;
+      queueMicrotask(() => {
+        this.messageHookNoIdInboundBatchClearScheduled = false;
+        const keys = Array.from(this.messageHookNoIdInboundBatch);
+        this.messageHookNoIdInboundBatch.clear();
+        for (const batchKey of keys) {
+          this.deleteMessageHookDedupKey(batchKey);
+        }
+      });
+    }
+    return false;
+  }
+
+  private deleteMessageHookDedupKey(key: string): void {
+    this.messageHookDedup.delete(key);
+    this.messageHookNoIdInboundBatch.delete(key);
+    this.messageHookInboundQueueKeys.delete(key);
+    this.messageHookDedupSessionKeys.delete(key);
+  }
+
+  private clearMessageHookDedupForSessions(sessionIds: Iterable<string>): void {
+    const ids = new Set(Array.from(sessionIds).filter((id) => typeof id === "string" && id.length > 0));
+    if (ids.size === 0) return;
+    for (const [key, sessionId] of Array.from(this.messageHookDedupSessionKeys.entries())) {
+      if (ids.has(sessionId)) this.deleteMessageHookDedupKey(key);
+    }
+    for (const [key, queueKey] of Array.from(this.messageHookInboundQueueKeys.entries())) {
+      if (ids.has(queueKey)) this.deleteMessageHookDedupKey(key);
+    }
+  }
+
+  private messageHookInboundDedupKeysForQueue(queueKey: string): string[] {
+    return Array.from(this.messageHookInboundQueueKeys.entries())
+      .filter(([, currentQueueKey]) => currentQueueKey === queueKey)
+      .map(([key]) => key);
+  }
+
+  private clearMessageHookInboundDedupKeys(keys: string[]): void {
+    for (const key of keys) {
+      // Provider messageId keys stay in the TTL cache after the queue is
+      // consumed, so a late retry of the same inbound cannot seed stale text
+      // for the next outbound. Only batch-scoped no-ID keys are disposable.
+      if (this.isNoIdInboundBatchKey(key)) {
+        this.deleteMessageHookDedupKey(key);
+      }
+    }
+  }
+
+  private deleteMessageHookInboundDedupKeys(keys: string[]): void {
+    for (const key of keys) {
+      this.deleteMessageHookDedupKey(key);
+    }
+  }
+
+  private shouldMoveInboundQueue(existingKey: string, candidateKey: string): boolean {
+    const existing = this.parseComposedSessionId(existingKey);
+    const candidate = this.parseComposedSessionId(candidateKey);
+    if (!existing || !candidate) return false;
+    const existingStrong = existing.sessionKey.length > 0 && !this.isWeakSessionKey(existing.sessionKey);
+    const candidateStrong = candidate.sessionKey.length > 0 && !this.isWeakSessionKey(candidate.sessionKey);
+    if (existingStrong && candidateStrong) {
+      return (
+        existing.channelId === candidate.channelId &&
+        existing.accountId === candidate.accountId &&
+        existing.conversationId === candidate.conversationId &&
+        existing.sessionKey !== candidate.sessionKey
+      );
+    }
+    return candidateStrong && !existingStrong;
+  }
+
+  private pendingQueueUsesTypedSessionFallback(queueKey: string): boolean {
+    const messages = this.pendingUserMessages.get(queueKey) ?? [];
+    const meta = this.pendingUserMessageMeta.get(queueKey) ?? [];
+    return messages.length > 0 && messages.every((_, index) => meta[index]?.typedSessionIdFallback === true);
+  }
+
+  private shouldMoveInboundQueueForOutbound(
+    existingKey: string,
+    targetKey: string,
+  ): boolean {
+    const existing = this.parseComposedSessionId(existingKey);
+    const target = this.parseComposedSessionId(targetKey);
+    if (!existing || !target) return false;
+    if (!target.conversationId) return false;
+    if (existing.channelId !== target.channelId) return false;
+    if (existing.accountId !== target.accountId) return false;
+    if (existing.conversationId !== target.conversationId) return false;
+    const existingWeak = this.isWeakSessionKey(existing.sessionKey);
+    const targetWeak = this.isWeakSessionKey(target.sessionKey);
+    if (existingWeak !== targetWeak) return true;
+    if (this.pendingQueueUsesTypedSessionFallback(existingKey) && !targetWeak) return true;
+    return false;
+  }
+
+  private promotePendingInboundQueueForOutbound(targetKey: string): void {
+    const candidates: string[] = [];
+    for (const [candidateKey, messages] of Array.from(this.pendingUserMessages.entries())) {
+      if (candidateKey === targetKey || !messages || messages.length === 0) continue;
+      if (this.shouldMoveInboundQueueForOutbound(candidateKey, targetKey)) {
+        candidates.push(candidateKey);
+      }
+    }
+    for (const candidateKey of candidates) this.movePendingInboundQueue(candidateKey, targetKey);
+  }
+
+  private movePendingInboundQueue(fromKey: string, toKey: string): void {
+    if (fromKey === toKey) return;
+    const messages = this.pendingUserMessages.get(fromKey);
+    const meta = this.pendingUserMessageMeta.get(fromKey);
+    if (messages && messages.length > 0) {
+      const targetMessages = this.pendingUserMessages.get(toKey) ?? [];
+      const targetMeta = this.pendingUserMessageMeta.get(toKey) ?? [];
+      const merged = [
+        ...targetMessages.map((text, index) => ({ text, meta: targetMeta[index] })),
+        ...messages.map((text, index) => ({ text, meta: meta?.[index] })),
+      ].sort((a, b) => this.pendingUserArrivalOrder(a.meta) - this.pendingUserArrivalOrder(b.meta));
+      this.pendingUserMessages.set(toKey, merged.map((item) => item.text));
+      this.pendingUserMessageMeta.set(toKey, merged.map((item) => item.meta ?? {}));
+      this.pendingUserMessages.delete(fromKey);
+    }
+    this.pendingUserMessageMeta.delete(fromKey);
+    this.rebindMessageHookInboundQueueKeys(fromKey, toKey);
+  }
+
+  private rebindMessageHookInboundQueueKeys(fromKey: string, toKey: string): void {
+    for (const [key, queueKey] of Array.from(this.messageHookInboundQueueKeys.entries())) {
+      if (queueKey !== fromKey) continue;
+      this.messageHookInboundQueueKeys.set(key, toKey);
+      this.messageHookDedupSessionKeys.set(key, toKey);
+    }
+  }
+
+  private w4bInflightGuardSessionIds(identity: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }, sessionId: string): string[] {
+    const ids = new Set<string>([sessionId]);
+    if (identity.channelId && identity.conversationId) {
+      const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+      if (weakSession) {
+        ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
+      }
+    }
+    return Array.from(ids);
+  }
+
+  private w4aCrossPathSessionIds(identity: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }, sessionId: string): string[] {
+    const ids = new Set<string>([sessionId]);
+    if (!identity.channelId || !identity.conversationId) return Array.from(ids);
+    const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+    if (weakSession) {
+      ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
+    }
+    return Array.from(ids);
   }
 
   /**
@@ -1383,19 +2056,49 @@ export class ChatTurnWriter {
     //     intermediate steps that included assistant text alongside
     //     the tool call, so the tool-call step was paired as a turn
     //     and the real final reply ended up paired with an empty user.
-    // Both shapes are handled by accumulating consecutive user messages
-    // into a queue and flushing the queue (joined) into the next
-    // non-tool-call assistant turn. Any assistant carrying tool calls
-    // is treated as intermediate regardless of whether it also has
-    // text content.
+    // Both shapes are handled by accumulating consecutive real user
+    // messages, keeping the latest textual non-tool assistant candidate,
+    // and flushing only when the next real user arrives (or the transcript
+    // ends). Any assistant carrying tool calls is treated as intermediate
+    // regardless of whether it also has text content.
     const pendingUsers: Array<{
       text: string;
       externalTurnIds: string[];
       externalDirect: boolean;
+      messageIds: string[];
     }> = [];
+    let pendingAssistant: {
+      text: string;
+      assistantMessageIds: string[];
+    } | null = null;
     let pairIndex = 0;
+    const flushPair = () => {
+      if (!pendingAssistant || pendingUsers.length === 0) return;
+      const userText = pendingUsers.map((pending) => pending.text).join("\n");
+      const externalDirect = pendingUsers.length === 1 && pendingUsers[0].externalDirect;
+      const externalTurnIds = externalDirect
+        ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
+        : [];
+      const messageIds = Array.from(new Set(pendingUsers.flatMap((pending) => pending.messageIds)));
+      pendingUsers.length = 0;
+      if (pairIndex > savedUpTo) {
+        pairs.push({
+          user: userText,
+          assistant: this.stripRecalledMemory(pendingAssistant.text),
+          pairIndex,
+          externalTurnIds,
+          externalDirect,
+          messageIds,
+          assistantMessageIds: pendingAssistant.assistantMessageIds,
+        });
+      }
+      pendingAssistant = null;
+      pairIndex++;
+    };
     for (const msg of messages) {
+      if (this.isTranscriptScaffoldingMessage(msg)) continue;
       if (msg.role === "user") {
+        flushPair();
         // T28 — Skip image/attachment-only user messages whose
         // `extractText()` returns "" (the multi-modal content array
         // contained no `type === "text"` parts). W4b's
@@ -1410,19 +2113,19 @@ export class ChatTurnWriter {
             text: userText,
             externalTurnIds: this.extractExternalTurnIds(msg),
             externalDirect: this.hasExternalDirectChannelMetadata(msg),
+            messageIds: this.extractMessageIds(msg),
           });
         }
       } else if (msg.role === "assistant") {
         const text = this.extractText(msg.content);
-        const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
-          : Array.isArray(msg.tool_calls) ? msg.tool_calls.length > 0
-          : false;
+        const hasToolCalls = this.hasToolCalls(msg);
         if (hasToolCalls) {
           // Intermediate tool-call step — do NOT count as a pair, do NOT
           // advance pairIndex (the watermark counts user-visible turns),
           // and do NOT consume `pendingUsers`. The next non-tool-call
           // assistant is the real final reply that belongs to the
           // accumulated user side.
+          pendingAssistant = null;
           continue;
         }
         if (pendingUsers.length === 0) {
@@ -1452,26 +2155,42 @@ export class ChatTurnWriter {
           // put so a later real reply gets the same index.
           continue;
         }
-        const userText = pendingUsers.map((pending) => pending.text).join("\n");
-        const externalDirect = pendingUsers.length === 1 && pendingUsers[0].externalDirect;
-        const externalTurnIds = externalDirect
-          ? Array.from(new Set(pendingUsers.flatMap((pending) => pending.externalTurnIds)))
-          : [];
-        pendingUsers.length = 0;
-        if (pairIndex > savedUpTo) {
-          pairs.push({
-            user: userText,
-            assistant: this.stripRecalledMemory(text),
-            pairIndex,
-            externalTurnIds,
-            externalDirect,
-          });
-        }
-        pairIndex++;
+        pendingAssistant = {
+          text,
+          assistantMessageIds: this.extractMessageIds(msg),
+        };
       }
       // Skip `tool` and `system` messages — they don't form turns.
     }
+    flushPair();
     return pairs;
+  }
+
+  private hasToolCalls(msg: ChatTurnMessage): boolean {
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    return [
+      (msg as any).toolCalls,
+      (msg as any).tool_calls,
+      (context as any).toolCalls,
+      (context as any).tool_calls,
+      (metadata as any).toolCalls,
+      (metadata as any).tool_calls,
+    ].some((value) => Array.isArray(value) && value.length > 0);
+  }
+
+  private isTranscriptScaffoldingMessage(msg: ChatTurnMessage): boolean {
+    const role = (msg as any)?.role;
+    if (role === "system" || role === "tool" || role === "function") return true;
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    const values = [msg as any, context as any, metadata as any];
+    return values.some((value) =>
+      value.toolCallId !== undefined ||
+      value.tool_call_id !== undefined ||
+      value.toolResult === true ||
+      value.tool_result === true,
+    );
   }
 
   /**
@@ -1549,6 +2268,23 @@ export class ChatTurnWriter {
     }
 
     return Array.from(ids);
+  }
+
+  private extractMessageIds(msg: ChatTurnMessage): string[] {
+    const context = msg.context && typeof msg.context === "object" ? msg.context : {};
+    const metadata = msg.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
+    const messageId = firstString(
+      (msg as any).messageId,
+      (context as any).messageId,
+      (metadata as any).messageId,
+      (msg as any).MessageId,
+      (context as any).MessageId,
+      (metadata as any).MessageId,
+      (msg as any).message_id,
+      (context as any).message_id,
+      (metadata as any).message_id,
+    );
+    return messageId ? [messageId] : [];
   }
 
   private hasExternalDirectChannelMetadata(msg: ChatTurnMessage): boolean {
@@ -1646,6 +2382,31 @@ export class ChatTurnWriter {
     return `w4b-content::${this.contentHash(user, assistant)}`;
   }
 
+  private identityHash(parts: string[]): string {
+    return createHash("sha256")
+      .update(JSON.stringify(parts))
+      .digest("hex")
+      .slice(0, 16);
+  }
+
+  private weakSessionKey(
+    channelId?: string,
+    accountId?: string,
+    conversationId?: string,
+  ): string {
+    const weakIdentity = firstString(conversationId);
+    if (!channelId || !weakIdentity) return "";
+    return `${ChatTurnWriter.WEAK_SESSION_PREFIX}${this.identityHash([
+      channelId,
+      accountId ?? "",
+      weakIdentity,
+    ])}`;
+  }
+
+  private isWeakSessionKey(sessionKey?: unknown): boolean {
+    return typeof sessionKey === "string" && sessionKey.startsWith(ChatTurnWriter.WEAK_SESSION_PREFIX);
+  }
+
   private externalTurnMarkerId(turnId?: unknown, user?: string, assistant?: string): string {
     if (typeof turnId !== "string" || turnId.trim().length === 0) return "";
     const idHash = createHash("sha256").update(turnId.trim()).digest("hex").slice(0, 16);
@@ -1653,6 +2414,108 @@ export class ChatTurnWriter {
       return `external-id::${idHash}`;
     }
     return `external-id::${idHash}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
+  }
+
+  private typedW4bExternalMarkerId(user: string, assistant: string, occurrence: string): string {
+    if (!occurrence) return "";
+    return `weak-w4b::${this.identityHash([occurrence])}::${this.contentHash(user, this.stripRecalledMemory(assistant))}`;
+  }
+
+  private typedW4bExternalMarkerIds(
+    user: string,
+    assistant: string,
+    messageIds: string[],
+    assistantMessageIds: string[] = [],
+  ): string[] {
+    const markers = new Set<string>();
+    const inboundOccurrence = this.w4bInboundMessageDiscriminator(messageIds);
+    const inboundMarker = this.typedW4bExternalMarkerId(user, assistant, inboundOccurrence);
+    if (inboundMarker) markers.add(inboundMarker);
+    for (const outboundOccurrence of this.w4bOutboundMessageDiscriminators(assistantMessageIds)) {
+      const outboundMarker = this.typedW4bExternalMarkerId(user, assistant, outboundOccurrence);
+      if (outboundMarker) markers.add(outboundMarker);
+    }
+    return Array.from(markers);
+  }
+
+  private typedW4bInflightOrigin(cursorKey: string, marker: string): string {
+    return `typed-w4b-marker::${this.identityHash([cursorKey, marker])}`;
+  }
+
+  private typedW4bInflightOrigins(
+    cursorKeys: string[],
+    user: string,
+    assistant: string,
+    messageIds: string[],
+    assistantMessageIds: string[] = [],
+  ): string[] {
+    return this.typedW4bInflightOriginsForMarkers(
+      cursorKeys,
+      this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds),
+    );
+  }
+
+  private typedW4bInflightOriginsFromOccurrences(
+    sessionId: string,
+    user: string,
+    assistant: string,
+    occurrences: string[],
+  ): string[] {
+    const markers = occurrences
+      .map((occurrence) => this.typedW4bExternalMarkerId(user, assistant, occurrence))
+      .filter((marker) => marker.length > 0);
+    return this.typedW4bInflightOriginsForMarkers(
+      this.typedW4bMarkerCursorKeysFromSessionId(sessionId),
+      markers,
+    );
+  }
+
+  private typedW4bInflightOriginsForMarkers(cursorKeys: string[], markers: string[]): string[] {
+    const origins = new Set<string>();
+    for (const cursorKey of cursorKeys) {
+      for (const marker of markers) {
+        origins.add(this.typedW4bInflightOrigin(cursorKey, marker));
+      }
+    }
+    return Array.from(origins);
+  }
+
+  private findTypedW4bExternalMarker(
+    cursorKeys: string[],
+    user: string,
+    assistant: string,
+    messageIds: string[],
+    assistantMessageIds: string[] = [],
+  ): { cursorKey: string; marker: string } | null {
+    const markers = this.typedW4bExternalMarkerIds(user, assistant, messageIds, assistantMessageIds);
+    for (const cursorKey of cursorKeys) {
+      for (const marker of markers) {
+        if (this.hasExternalTurnMarker(cursorKey, marker)) return { cursorKey, marker };
+      }
+    }
+    return null;
+  }
+
+  private markTypedW4bTurnPersisted(
+    sessionId: string,
+    user: string,
+    assistant: string,
+    occurrences: string[],
+  ): boolean {
+    const cursors = this.typedW4bMarkerCursorKeysFromSessionId(sessionId);
+    if (cursors.length === 0) return false;
+    let changed = false;
+    for (const cursor of cursors) {
+      const bucket = this.externalTurnMarkers.get(cursor) ?? new Map<string, number>();
+      for (const occurrence of occurrences) {
+        const marker = this.typedW4bExternalMarkerId(user, assistant, occurrence);
+        if (!marker) continue;
+        bucket.set(marker, (bucket.get(marker) ?? 0) + 1);
+        changed = true;
+      }
+      if (bucket.size > 0) this.externalTurnMarkers.set(cursor, bucket);
+    }
+    return changed;
   }
 
   private consumeExternalTurnMarkersForPair(
@@ -1758,9 +2621,14 @@ export class ChatTurnWriter {
    * envelopes don't exhibit the race in practice.
    */
   private w4bInflightSeq = 0;
-  private w4bInflightKey(ev: InternalMessageEvent, user: string, assistant: string): string {
-    const messageId = (ev as any)?.context?.messageId;
-    if (typeof messageId === "string" && messageId.length > 0) {
+  private w4bInflightKey(
+    ev: InternalMessageEvent,
+    user: string,
+    assistant: string,
+    pendingMeta: PendingUserMessageMeta[] = [],
+  ): string {
+    const messageId = this.w4bMessageDiscriminator(ev, pendingMeta);
+    if (messageId) {
       return `w4b-inflight::msg::${messageId}`;
     }
     this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
@@ -1783,14 +2651,63 @@ export class ChatTurnWriter {
    * fallback-counter — but the messageId path is the production case
    * and is unambiguously stable.
    */
-  private w4bDaemonTurnIdDiscriminator(ev: InternalMessageEvent): string {
-    const messageId = (ev as any)?.context?.messageId;
-    if (typeof messageId === "string" && messageId.length > 0) {
+  private w4bDaemonTurnIdDiscriminator(
+    ev: InternalMessageEvent,
+    pendingMeta: PendingUserMessageMeta[] = [],
+  ): string {
+    const messageId = this.w4bMessageDiscriminator(ev, pendingMeta);
+    if (messageId) {
       return `msg::${messageId}`;
     }
     // Reuse the same monotonic counter — fallback is rare and best-effort.
     this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
     return `seq::${this.w4bInflightSeq}`;
+  }
+
+  private w4bMessageDiscriminator(
+    ev: InternalMessageEvent,
+    pendingMeta: PendingUserMessageMeta[],
+  ): string {
+    const outboundMessageId = this.messageEventId(ev);
+    if (outboundMessageId) return `out::${outboundMessageId}`;
+    const inboundIds = pendingMeta
+      .map((meta) => meta.messageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    return this.w4bInboundMessageDiscriminator(inboundIds);
+  }
+
+  private w4bInboundMessageDiscriminator(messageIds: string[]): string {
+    const ids = messageIds
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+    if (ids.length === 0) return "";
+    return `in::${this.identityHash(ids)}`;
+  }
+
+  private w4bOutboundMessageDiscriminators(messageIds: string[]): string[] {
+    return Array.from(new Set(messageIds
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0)
+      .map((id) => `out::${id}`)));
+  }
+
+  private typedW4bMarkerOccurrences(
+    discriminator: string,
+    pendingMeta: PendingUserMessageMeta[],
+  ): string[] {
+    const occurrences = new Set<string>();
+    const normalizedDiscriminator = discriminator.startsWith("msg::")
+      ? discriminator.slice("msg::".length)
+      : discriminator;
+    if (normalizedDiscriminator.startsWith("in::") || normalizedDiscriminator.startsWith("out::")) {
+      occurrences.add(normalizedDiscriminator);
+    }
+    const inboundIds = pendingMeta
+      .map((meta) => meta.messageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    const inboundDiscriminator = this.w4bInboundMessageDiscriminator(inboundIds);
+    if (inboundDiscriminator) occurrences.add(inboundDiscriminator);
+    return Array.from(occurrences);
   }
   /**
    * @deprecated Kept temporarily for tests that inspect the dedup-map key
@@ -1894,12 +2811,6 @@ export class ChatTurnWriter {
     };
   }
 
-  private externalCursorKeyFromHookPayload(event?: any, ctx?: any): string {
-    const ctxFields = this.identityFieldsFromPayload(ctx);
-    const eventFields = this.identityFieldsFromPayload(event);
-    return this.externalCursorKeyFromSessionKey(ctxFields.sessionKey ?? eventFields.sessionKey);
-  }
-
   /**
    * DKG-side session id for an internal message event. Uses the full
    * envelope (`channelId + accountId + conversationId + sessionKey`)
@@ -1909,12 +2820,13 @@ export class ChatTurnWriter {
    */
   private deriveSessionIdFromEvent(ev: InternalMessageEvent): string {
     const ctx = (ev as any)?.context ?? {};
-    return this.composeSessionId({
+    const identity = {
       channelId: ctx.channelId ?? (ev as any)?.channelId,
       accountId: ctx.accountId,
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
-    });
+    };
+    return this.composeSessionId(identity);
   }
 
   /**
@@ -1953,6 +2865,96 @@ export class ChatTurnWriter {
     return `openclaw:transcript:${this.encodeIdField(this.sanitize(sessionKey))}`;
   }
 
+  private weakConversationCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+  }): string {
+    if (!parts.channelId || !parts.conversationId) return "";
+    return `openclaw:weak:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.conversationId)),
+    ])}`;
+  }
+
+  private weakConversationCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || !parsed.conversationId) return "";
+    return `openclaw:weak:${this.identityHash([parsed.channelId, parsed.accountId, parsed.conversationId])}`;
+  }
+
+  private concreteSessionCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string {
+    if (!parts.channelId || !parts.conversationId || !parts.sessionKey || this.isWeakSessionKey(parts.sessionKey)) {
+      return "";
+    }
+    return `openclaw:typed:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.conversationId)),
+      this.encodeIdField(this.sanitize(parts.sessionKey)),
+    ])}`;
+  }
+
+  private concreteSessionCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || !parsed.conversationId || !parsed.sessionKey || this.isWeakSessionKey(parsed.sessionKey)) return "";
+    return `openclaw:typed:${this.identityHash([
+      parsed.channelId,
+      parsed.accountId,
+      parsed.conversationId,
+      parsed.sessionKey,
+    ])}`;
+  }
+
+  private conversationlessSessionCursorKey(parts: {
+    channelId?: string;
+    accountId?: string;
+    sessionKey?: string;
+  }): string {
+    if (!parts.channelId || !parts.sessionKey || this.isWeakSessionKey(parts.sessionKey)) return "";
+    return `openclaw:session:${this.identityHash([
+      this.encodeIdField(this.sanitize(parts.channelId)),
+      this.encodeIdField(this.sanitize(parts.accountId ?? "")),
+      this.encodeIdField(this.sanitize(parts.sessionKey)),
+    ])}`;
+  }
+
+  private conversationlessSessionCursorKeyFromSessionId(sessionId: string): string {
+    const parsed = this.parseComposedSessionId(sessionId);
+    if (!parsed || parsed.conversationId || this.isWeakSessionKey(parsed.sessionKey)) return "";
+    return `openclaw:session:${this.identityHash([parsed.channelId, parsed.accountId, parsed.sessionKey])}`;
+  }
+
+  private typedW4bMarkerCursorKeys(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string[] {
+    const cursors = [
+      this.concreteSessionCursorKey(parts),
+      this.weakConversationCursorKey(parts),
+    ];
+    if (!parts.conversationId) {
+      cursors.push(this.conversationlessSessionCursorKey(parts));
+    }
+    return Array.from(new Set(cursors.filter((key) => key.length > 0)));
+  }
+
+  private typedW4bMarkerCursorKeysFromSessionId(sessionId: string): string[] {
+    return Array.from(new Set([
+      this.concreteSessionCursorKeyFromSessionId(sessionId),
+      this.weakConversationCursorKeyFromSessionId(sessionId),
+      this.conversationlessSessionCursorKeyFromSessionId(sessionId),
+    ].filter((key) => key.length > 0)));
+  }
+
   private collectResetSessionIds(identity: {
     sessionId: string;
     channelId?: string;
@@ -1962,6 +2964,12 @@ export class ChatTurnWriter {
   }): string[] {
     const ids = new Set<string>();
     if (identity.sessionId) ids.add(identity.sessionId);
+    if (identity.channelId && identity.conversationId) {
+      const weakSession = this.weakSessionKey(identity.channelId, identity.accountId, identity.conversationId);
+      if (weakSession) {
+        ids.add(this.composeSessionId({ ...identity, sessionKey: weakSession }));
+      }
+    }
     if (!identity.channelId || !identity.sessionKey) return Array.from(ids);
     if (typeof identity.accountId !== "string" || typeof identity.conversationId !== "string") {
       return Array.from(ids);
@@ -1993,6 +3001,9 @@ export class ChatTurnWriter {
     for (const key of this.w4bSessionCounts.keys()) add(key);
     for (const key of this.debounceTimers.keys()) add(key);
     for (const key of this.pendingUserMessages.keys()) add(key);
+    for (const key of this.pendingUserMessageMeta.keys()) add(key);
+    for (const key of this.messageHookInboundQueueKeys.values()) add(key);
+    for (const key of this.messageHookDedupSessionKeys.values()) add(key);
     for (const key of this.inFlightPersists.keys()) add(key);
     for (const key of this.w4aSessionChains.keys()) add(key);
     for (const key of this.recentTurnIds.keys()) {
@@ -2043,12 +3054,13 @@ export class ChatTurnWriter {
       return "";
     }
     const ctx = (ev as any)?.context ?? {};
-    return this.composeSessionId({
+    const identity = {
       channelId: ctx.channelId ?? (ev as any)?.channelId,
       accountId: ctx.accountId,
       conversationId: ctx.conversationId,
       sessionKey: ev.sessionKey,
-    });
+    };
+    return this.composeSessionId(identity);
   }
 
   private extractText(content: string | Array<{ type: string; text?: string }>): string {

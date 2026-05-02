@@ -96,6 +96,52 @@ describe("HookSurface", () => {
       expect(hookMapSym.get("message:sent")?.length).toBe(1);
       expect(logger.warn).toHaveBeenCalled();
     });
+
+    it("tracks whether this surface still owns the live internal wrapper", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+
+      (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map([["message:sent", [vi.fn()]]]);
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(false);
+    });
+
+    it("re-installs an internal hook on the same surface after the global map is replaced", () => {
+      const hs = new HookSurface(mkApi(), mkLogger());
+      hs.install("internal", "message:sent", vi.fn());
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+
+      const replacement = new Map<string, any[]>([["message:sent", []]]);
+      (globalThis as any)[INTERNAL_HOOK_SYMBOL] = replacement;
+      const unsub = hs.install("internal", "message:sent", vi.fn());
+      expect(unsub).not.toBeNull();
+      expect(replacement.get("message:sent")).toHaveLength(1);
+      expect(hs.ownsCurrentInternalHook("message:sent")).toBe(true);
+    });
+
+    it("resets the commit timer when re-installing a stale internal hook", () => {
+      vi.useFakeTimers();
+      try {
+        const logger = mkLogger();
+        const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 100 });
+        hs.install("internal", "message:sent", vi.fn());
+        vi.advanceTimersByTime(50);
+
+        const replacement = new Map<string, any[]>([["message:sent", []]]);
+        (globalThis as any)[INTERNAL_HOOK_SYMBOL] = replacement;
+        hs.install("internal", "message:sent", vi.fn());
+
+        vi.advanceTimersByTime(49);
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+        vi.advanceTimersByTime(1);
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+
+        vi.advanceTimersByTime(50);
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("internal:message:sent"));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("legacy kind (api.registerHook)", () => {
@@ -286,13 +332,30 @@ describe("HookSurface", () => {
       expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
     });
 
-    it("logs non-rare commit timeouts at warn", async () => {
+    it("logs typed commit timeouts at debug because late fires can still prove liveness", async () => {
       const logger = mkLogger();
       const hs = new HookSurface(mkApi(), logger, "auto", { commitGraceMs: 10 });
       hs.install("typed", "agent_end", vi.fn());
       await new Promise((r) => setTimeout(r, 30));
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
-      expect(logger.debug).not.toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("typed:agent_end"));
+    });
+
+    it("late fire after timeout moves commitState to committed-by-fire", async () => {
+      const handlers = new Map<string, Array<(...args: any[]) => unknown>>();
+      const api = mkApi({
+        on: vi.fn((event: string, handler: (...args: any[]) => unknown) => {
+          handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        }) as any,
+      });
+      const hs = new HookSurface(api, mkLogger(), "auto", { commitGraceMs: 10 });
+      hs.install("typed", "agent_end", vi.fn());
+      await new Promise((r) => setTimeout(r, 30));
+      expect(hs.getDispatchStats()["typed:agent_end"]?.commitState).toBe("committed-by-timeout");
+      handlers.get("agent_end")![0]();
+      const stats = hs.getDispatchStats();
+      expect(stats["typed:agent_end"]?.fireCount).toBe(1);
+      expect(stats["typed:agent_end"]?.commitState).toBe("committed-by-fire");
     });
 
     it("logs rare-fire commit timeouts at debug for infrequent hooks", async () => {

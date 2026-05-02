@@ -801,7 +801,7 @@ export class DkgNodePlugin {
         // dispatch primitive is now available.
         const internalNeedsRetry = (event: string) => {
           const s = stats[`internal:${event}`];
-          return s === undefined || s.installedVia === 'none';
+          return s === undefined || s.installedVia === 'none' || !this.internalHookEventIsLive(event);
         };
         const typedNeedsRetry = (event: string) => {
           const s = stats[`typed:${event}`];
@@ -905,7 +905,6 @@ export class DkgNodePlugin {
     // (`installedVia === 'globalThis'`). If yes, skip — already live.
     // If no, retry on the new surface; the global map may have
     // appeared between the prior register and this one.
-    const internalHooksAlreadyLive = this.internalHooksAreLive();
     this.hookSurface = new HookSurface(api, api.logger);
     this.hookSurfaceApi = api;
     this.allHookSurfaces.add(this.hookSurface);
@@ -977,8 +976,10 @@ export class DkgNodePlugin {
     // already succeeded" rather than "first surface" so a failed initial
     // install (globalThis hook map not yet created at first-register time)
     // still gets retried on the next surface.
-    if (!internalHooksAlreadyLive) {
+    if (!this.internalHookEventIsLive('message:received')) {
       this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler(), { rareFireExpected: true });
+    }
+    if (!this.internalHookEventIsLive('message:sent')) {
       this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler(), { rareFireExpected: true });
     }
 
@@ -1057,19 +1058,12 @@ export class DkgNodePlugin {
   }
 
   /**
-   * T32 — True if any prior hook surface has SUCCESSFULLY installed an
-   * internal hook (`installedVia: 'globalThis'`). Used by the
-   * `installHooksIfNeeded` rebuild path to gate internal-hook re-install
-   * on actual past success rather than "is this the first surface" —
-   * the prior gate broke the retry path when surface #1 itself failed
-   * to install (e.g., because `globalThis[…internalHookHandlers]` was
-   * absent at first-register time).
+   * True only when a retained surface still owns the adapter wrapper for
+   * this internal event in the current global hook map.
    */
-  private internalHooksAreLive(): boolean {
+  private internalHookEventIsLive(event: string): boolean {
     for (const surface of this.allHookSurfaces) {
-      const stats = surface.getDispatchStats();
-      if (stats['internal:message:received']?.installedVia === 'globalThis') return true;
-      if (stats['internal:message:sent']?.installedVia === 'globalThis') return true;
+      if (surface.ownsCurrentInternalHook(event)) return true;
     }
     return false;
   }
@@ -1137,7 +1131,7 @@ export class DkgNodePlugin {
       const stats = surface.getDispatchStats();
       // T36 — Exempt the surface that currently owns the live process-
       // global internal-hook registration. New surfaces skip installing
-      // internal hooks via `internalHooksAreLive()` (T32), so destroying
+      // internal hooks via adapter-owned live-wrapper checks, so destroying
       // the only owner — even if its typed/legacy hooks have never
       // fired — would unsubscribe the global wrappers and silently
       // disable W4b cross-channel persistence permanently. The
@@ -1146,8 +1140,8 @@ export class DkgNodePlugin {
       // the global registration is via `stop()`, which destroys all
       // surfaces deliberately.
       if (
-        stats['internal:message:received']?.installedVia === 'globalThis' ||
-        stats['internal:message:sent']?.installedVia === 'globalThis'
+        surface.ownsCurrentInternalHook('message:received') ||
+        surface.ownsCurrentInternalHook('message:sent')
       ) {
         continue;
       }
@@ -3158,8 +3152,15 @@ export class DkgNodePlugin {
       };
     };
 
-    // Typed hooks (api.on / api.registerHook) use underscore-separated names.
-    const typedEvents = ['before_prompt_build', 'agent_end', 'before_compaction', 'before_reset', 'message_received', 'message_sent'];
+    // Typed probe candidates intentionally mirror accepted lifecycle hooks.
+    // Dotted aliases and typed message_* names were rejected or silent on
+    // OpenClaw 2026.4.15, so probing them only adds startup warning noise.
+    const typedEvents = [
+      'before_prompt_build',
+      'agent_end',
+      'before_compaction',
+      'before_reset',
+    ];
     // Internal-hook map (globalThis symbol) uses colon-separated names per
     // openclaw/src/infra/outbound/deliver.ts — probing the underscore form
     // here would never observe the real internal dispatch path and would

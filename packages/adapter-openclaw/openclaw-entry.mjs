@@ -188,7 +188,7 @@ function resolveEntryConfig(api, options = {}) {
     !!currentWorkspaceDir &&
     !currentWorkspaceMatchesConfiguredStateDir;
   const configWorkspaceDir = currentRouteWorkspaceIsStale
-    ? undefined
+    ? fallbackWorkspaceDir
     : currentWorkspaceDir ?? fallbackWorkspaceDir;
   const workspaceDir = apiWorkspaceDir ?? configWorkspaceDir ?? installedWorkspaceDir;
   const apiWorkspaceDirToAssign = apiWorkspaceDir ? undefined : configWorkspaceDir;

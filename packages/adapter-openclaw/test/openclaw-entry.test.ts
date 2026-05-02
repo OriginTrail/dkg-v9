@@ -1186,6 +1186,56 @@ describe('openclaw-entry', () => {
     expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
   });
 
+  it('uses runtime fallback workspace when current route workspace is stale', async () => {
+    const staleRouteWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-current-route-'));
+    const installedWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-installed-fallback-'));
+    const runtimeWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-runtime-fallback-'));
+    tempRoots.push(staleRouteWorkspace, installedWorkspace, runtimeWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'runtime fallback skill' });
+    const api = makeDirectPluginConfigApi(undefined as any, {
+      cfg: {
+        agents: {
+          defaults: {
+            workspace: staleRouteWorkspace,
+          },
+        },
+      },
+      config: {
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: join(installedWorkspace, '.dkg-adapter'),
+                stateDirSource: 'setup-default',
+                installedWorkspace,
+              },
+            },
+          },
+        },
+      },
+      runtime: {
+        config: {
+          agents: {
+            defaults: {
+              workspace: runtimeWorkspace,
+            },
+          },
+        },
+      },
+    });
+    delete (api as any).pluginConfig;
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect((api as any).workspaceDir).toBe(runtimeWorkspace);
+    expect(instance.config.installedWorkspace).toBe(installedWorkspace);
+    expect(instance.workspaceDirsAtRegister).toEqual([runtimeWorkspace]);
+    expect(readFileSync(join(runtimeWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('runtime fallback skill');
+    expect(existsSync(join(staleRouteWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    expect(existsSync(join(installedWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
   it('merges state-only first load with fallback runtime entry config', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

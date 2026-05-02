@@ -256,7 +256,7 @@ describe('DkgMemoryPlugin.register', () => {
     expect(result.error).toContain('disabled');
   });
 
-  it('treats omitted memory in a refreshed module-shaped direct full snapshot as disabled', async () => {
+  it('does not stamp disabled memory for a channel-only direct refresh', async () => {
     const api = makeApi();
     api.config = {
       memory: { enabled: true },
@@ -269,13 +269,10 @@ describe('DkgMemoryPlugin.register', () => {
       channel: { enabled: false },
     } as any;
 
-    expect(plugin.disable(api)).toBe(true);
+    expect(plugin.disable(api)).toBe(false);
 
-    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
-    const disabledCapability = api.registerMemoryCapability.mock.calls[1][0] as MemoryPluginCapability;
-    const result = await disabledCapability.runtime!.getMemorySearchManager({} as MemoryRuntimeRequest);
-    expect(result.manager).toBeNull();
-    expect(result.error).toContain('disabled');
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(plugin.isRegistered()).toBe(false);
   });
 
   it('does not treat module-shaped direct config without enabled as memory disable intent', () => {
@@ -366,6 +363,35 @@ describe('DkgMemoryPlugin.register', () => {
 
     expect(plugin.register(api)).toBe(true);
     expect(api.registerMemoryCapability).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves direct memory ownership across channel-only direct config refreshes', () => {
+    const api = makeApi();
+    api.config = {
+      memory: { enabled: true },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    api.config = {
+      channel: { enabled: true, port: 9401 },
+    } as any;
+
+    expect(plugin.register(api)).toBe(true);
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not treat channel-only direct config as an explicit memory disable', () => {
+    const api = makeApi();
+    api.config = {
+      channel: { enabled: true, port: 9402 },
+    } as any;
+
+    expect(plugin.register(api)).toBe(false);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('memory.enabled is false'));
   });
 
   it('honors runtime direct memory disable behind state metadata-only current config', () => {

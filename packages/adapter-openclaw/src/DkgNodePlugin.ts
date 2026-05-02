@@ -1564,10 +1564,36 @@ export class DkgNodePlugin {
       dkgPrimaryMemory: memoryActive,
       wmImportPipeline: memoryActive,
     };
+    const channelEnabled = () => this.config.channel?.enabled === true;
     void Promise.resolve().then(async () => {
       if (generation !== this.daemonClientGeneration) return;
+      if (channelEnabled()) return;
       const existing = await this.loadStoredOpenClawIntegration(api, generation, client);
-      if (generation !== this.daemonClientGeneration || existing === undefined) return;
+      if (generation !== this.daemonClientGeneration) return;
+      if (channelEnabled()) return;
+      if (existing === undefined) {
+        const reason = this.lastLocalAgentIntegrationLoadError ?? 'fetch failed';
+        const retryMessage =
+          '[dkg] Stored OpenClaw integration state could not be loaded; retrying disabled-channel status update to preserve any persisted disconnect state' +
+          ` (reason: ${reason})`;
+        if (this.lastLocalAgentIntegrationWarnReason !== reason) {
+          api.logger.warn?.(retryMessage);
+          this.lastLocalAgentIntegrationWarnReason = reason;
+        } else {
+          api.logger.debug?.(retryMessage);
+        }
+        this.scheduleLocalAgentIntegrationRetry(api, registrationMode, generation, 'clear-disabled-channel');
+        return;
+      }
+      this.clearLocalAgentIntegrationRetry();
+      if (this.localAgentIntegrationRetryAttempt > 0) {
+        api.logger.info?.(
+          `[dkg] Stored OpenClaw integration state loaded for disabled-channel cleanup after ${this.localAgentIntegrationRetryAttempt} retry attempt(s)`,
+        );
+      }
+      this.localAgentIntegrationRetryAttempt = 0;
+      this.lastLocalAgentIntegrationWarnReason = null;
+      this.lastLocalAgentIntegrationLoadError = null;
       if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
         api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping disabled-channel status update');
         return;
@@ -1605,6 +1631,7 @@ export class DkgNodePlugin {
     api: OpenClawPluginApi,
     registrationMode: string,
     generation = this.daemonClientGeneration,
+    retryAction: 'sync' | 'clear-disabled-channel' = 'sync',
   ): void {
     if (this.localAgentIntegrationRetryTimer) return;
     // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped). On every
@@ -1620,6 +1647,10 @@ export class DkgNodePlugin {
     this.localAgentIntegrationRetryTimer = setTimeout(() => {
       this.localAgentIntegrationRetryTimer = null;
       if (generation !== this.daemonClientGeneration) return;
+      if (retryAction === 'clear-disabled-channel') {
+        this.clearLocalAgentChannelIntegration(api, registrationMode);
+        return;
+      }
       void this.syncLocalAgentIntegrationState(api, registrationMode, generation);
     }, delay);
   }

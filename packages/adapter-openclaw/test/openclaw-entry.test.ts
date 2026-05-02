@@ -1088,6 +1088,51 @@ describe('openclaw-entry', () => {
     expect(instance.updateConfigCalls[0].options).toEqual({ partial: true });
   });
 
+  it('uses current entry setup metadata to reject a stale route workspace even when direct config exists', async () => {
+    const staleWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-stale-route-workspace-'));
+    const freshWorkspace = mkdtempSync(join(tmpdir(), 'openclaw-fresh-entry-workspace-'));
+    tempRoots.push(staleWorkspace, freshWorkspace);
+    const entry = await loadEntryWithFakeRuntime({ skillText: 'fresh skill' });
+    const api = makeDirectPluginConfigApi(undefined as any, {
+      cfg: {
+        channel: { port: 9861 },
+      },
+      config: {
+        agents: {
+          defaults: {
+            workspace: staleWorkspace,
+          },
+        },
+        plugins: {
+          entries: {
+            'adapter-openclaw': {
+              config: {
+                stateDir: join(freshWorkspace, '.dkg-adapter'),
+                stateDirSource: 'setup-default',
+                installedWorkspace: freshWorkspace,
+              },
+            },
+          },
+        },
+      },
+    });
+    delete (api as any).pluginConfig;
+
+    entry(api);
+
+    const instance = globalThis.__openclawEntryTestInstances![0];
+    expect(instance.config).toMatchObject({
+      stateDir: join(freshWorkspace, '.dkg-adapter'),
+      stateDirSource: 'setup-default',
+      installedWorkspace: freshWorkspace,
+      channel: { port: 9861 },
+    });
+    expect((api as any).workspaceDir).toBeUndefined();
+    expect(instance.workspaceDirsAtRegister).toEqual([undefined]);
+    expect(readFileSync(join(freshWorkspace, 'skills', 'dkg-node', 'SKILL.md'), 'utf8')).toBe('fresh skill');
+    expect(existsSync(join(staleWorkspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+  });
+
   it('merges state-only first load with fallback runtime entry config', async () => {
     const entry = await loadEntryWithFakeRuntime();
     const api = makeDirectPluginConfigApi({

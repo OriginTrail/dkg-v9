@@ -2464,6 +2464,111 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('retries disabled-channel local-agent cleanup after a transient stored-state load failure', async () => {
+    vi.useFakeTimers();
+    const warn = vi.fn();
+    const debug = vi.fn();
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    (plugin as any).channelPlugin = null;
+    (plugin as any).channelPluginStopInFlight = null;
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn, debug },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying disabled-channel status update'));
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(2);
+      expect(updateLocalAgentIntegration).toHaveBeenCalledWith(
+        'openclaw',
+        expect.objectContaining({
+          enabled: false,
+          metadata: expect.objectContaining({ transportMode: 'disabled' }),
+          runtime: expect.objectContaining({ status: 'configured', ready: false }),
+        }),
+      );
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('loaded for disabled-channel cleanup after 1 retry attempt'));
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
+  it('does not let a stale disabled-channel cleanup retry overwrite a later re-enable', async () => {
+    vi.useFakeTimers();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn()
+      .mockRejectedValueOnce(new Error('daemon cold start'))
+      .mockResolvedValueOnce(null);
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+
+    try {
+      (plugin as any).registerIntegrationModules(mockApi, {
+        enableFullRuntime: true,
+        registrationMode: 'full',
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+
+      (plugin as any).config.channel = { enabled: true, port: 0 };
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(getLocalAgentIntegration).toHaveBeenCalledTimes(1);
+      expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await plugin.stop();
+    }
+  });
+
   it('cancels a pending local-agent retry when clearing a disabled channel', async () => {
     vi.useFakeTimers();
     const plugin = new DkgNodePlugin({
@@ -3374,10 +3479,10 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('does not retry stored-integration loads when both memory and channel are disabled', async () => {
-    // A disabled channel performs one best-effort load so it can preserve
-    // explicit user disconnects, but the startup retry loop still must stay
-    // off when both runtime integrations are disabled.
+  it('retries only disabled-channel cleanup when both memory and channel are disabled', async () => {
+    // A disabled channel still retries the cleanup path so it can clear stale
+    // bridge state after daemon cold-start races. It must not run startup
+    // re-registration or reconnect the bridge while both integrations are off.
     vi.useFakeTimers();
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn();
@@ -3401,14 +3506,18 @@ describe('DkgNodePlugin', () => {
 
       plugin.register(mockApi);
       await Promise.resolve();
-      // Advance a full minute — if the retry loop were active we'd see
-      // multiple GETs by now.
+      // Advance a full minute. Disabled cleanup retries at 5s, 10s, then 20s;
+      // the 40s follow-up lands after this window.
       await vi.advanceTimersByTimeAsync(60_000);
 
       const getCalls = fakeFetch.mock.calls.filter((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
       );
-      expect(getCalls).toHaveLength(1);
+      const connectCalls = fakeFetch.mock.calls.filter((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(getCalls).toHaveLength(4);
+      expect(connectCalls).toHaveLength(0);
     } finally {
       vi.useRealTimers();
       await plugin?.stop();

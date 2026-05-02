@@ -105,7 +105,7 @@ function hasMergedPluginConfigSignal(value: Record<string, unknown>): boolean {
 }
 
 function hasRouteMetadataConfigSignal(value: Record<string, unknown>): boolean {
-  return isObjectRecord(value.agents) || typeof value.workspace === 'string';
+  return isObjectRecord(value.agents) || isObjectRecord(value.session) || typeof value.workspace === 'string';
 }
 
 export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
@@ -127,15 +127,46 @@ export function resolveOpenClawMergedConfig(api: OpenClawPluginApi): Record<stri
 export function resolveOpenClawRouteMetadataConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
   const anyApi = api as any;
   const runtime = anyApi?.runtime;
-  return [
-    anyApi?.cfg,
-    anyApi?.config,
-    runtime?.cfg,
+  const candidates = [
     runtime?.config,
-  ].find((candidate) =>
+    runtime?.cfg,
+    anyApi?.config,
+    anyApi?.cfg,
+  ].filter((candidate) =>
     isObjectRecord(candidate) &&
     !looksLikeAdapterPluginConfig(candidate) &&
     !hasMergedPluginConfigSignal(candidate) &&
     hasRouteMetadataConfigSignal(candidate)
   );
+  return candidates.length > 0
+    ? mergeRouteMetadataConfigs(...candidates)
+    : undefined;
+}
+
+function mergeRouteMetadataConfigs(
+  ...configs: Record<string, unknown>[]
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const config of configs) {
+    const priorAgents = isObjectRecord(merged.agents) ? merged.agents : undefined;
+    const priorSession = isObjectRecord(merged.session) ? merged.session : undefined;
+    const nextAgents = isObjectRecord(config.agents) ? config.agents : undefined;
+    const nextSession = isObjectRecord(config.session) ? config.session : undefined;
+    Object.assign(merged, config);
+    if (priorAgents || nextAgents) {
+      merged.agents = { ...(priorAgents ?? {}), ...(nextAgents ?? {}) };
+      const priorDefaults = isObjectRecord(priorAgents?.defaults) ? priorAgents.defaults : undefined;
+      const nextDefaults = isObjectRecord(nextAgents?.defaults) ? nextAgents.defaults : undefined;
+      if (priorDefaults || nextDefaults) {
+        (merged.agents as Record<string, unknown>).defaults = {
+          ...(priorDefaults ?? {}),
+          ...(nextDefaults ?? {}),
+        };
+      }
+    }
+    if (priorSession || nextSession) {
+      merged.session = { ...(priorSession ?? {}), ...(nextSession ?? {}) };
+    }
+  }
+  return merged;
 }

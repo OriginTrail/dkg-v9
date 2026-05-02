@@ -324,6 +324,43 @@ describe('DkgChannelPlugin', () => {
     expect((routeMetadata as any).plugins).toBeUndefined();
   });
 
+  it('keeps session-only route metadata while overlaying direct plugin config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Session metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9510',
+      channel: { enabled: true, port: 0 },
+    };
+    const routeMetadata = {
+      session: { dmScope: 'main', ttlMs: 30_000 },
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-session-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Session metadata fallback reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      session: routeMetadata.session,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+  });
+
   it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
     const reassertSpy = vi.fn();
     plugin.setPreDispatchReAssert(reassertSpy);
@@ -1677,7 +1714,7 @@ describe('DkgChannelPlugin', () => {
     expect(reply.text).toBe('Hello from legacy runtime');
     expect(dispatchCalls).toHaveLength(1);
     expect(dispatchCalls[0][0]).toMatchObject({ BodyForAgent: 'Hello', SessionKey: 'session-1' });
-    expect(dispatchCalls[0][1]).toBe(mockCfg);
+    expect(dispatchCalls[0][1]).toEqual(mockCfg);
     expect(dispatchCalls[0][2]).toMatchObject({
       deliver: expect.any(Function),
       onError: expect.any(Function),

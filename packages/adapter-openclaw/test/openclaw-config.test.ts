@@ -142,7 +142,7 @@ describe('openclaw-config helpers', () => {
     } as any;
 
     expect(resolveOpenClawMergedConfig(api)).toBeUndefined();
-    expect(resolveOpenClawRouteMetadataConfig(api)).toBe(routeConfig);
+    expect(resolveOpenClawRouteMetadataConfig(api)).toEqual(routeConfig);
   });
 
   it('keeps route metadata separate from direct plugin config fallback', () => {
@@ -163,10 +163,15 @@ describe('openclaw-config helpers', () => {
     } as any;
 
     expect(resolveOpenClawMergedConfig(api)).toBeUndefined();
-    expect(resolveOpenClawRouteMetadataConfig(api)).toBe(routeConfig);
+    expect(resolveOpenClawRouteMetadataConfig(api)).toEqual(routeConfig);
   });
 
-  it('skips session-only route metadata and falls back to runtime config', () => {
+  it('keeps session-only route metadata separate from merged plugin config', () => {
+    const routeConfig = {
+      session: {
+        dmScope: 'main',
+      },
+    };
     const runtimeConfig = {
       plugins: {
         slots: {
@@ -175,17 +180,46 @@ describe('openclaw-config helpers', () => {
       },
     };
     const api = {
-      config: {
-        session: {
-          dmScope: 'main',
-        },
-      },
+      config: routeConfig,
       runtime: {
         config: runtimeConfig,
       },
     } as any;
 
     expect(resolveOpenClawMergedConfig(api)).toBe(runtimeConfig);
+    expect(resolveOpenClawRouteMetadataConfig(api)).toEqual(routeConfig);
+  });
+
+  it('merges session-only route metadata with lower-priority workspace route metadata', () => {
+    const api = {
+      cfg: {
+        session: {
+          dmScope: 'main',
+        },
+      },
+      config: {
+        agents: {
+          defaults: {
+            workspace: '/workspace',
+          },
+        },
+        session: {
+          ttlMs: 30_000,
+        },
+      },
+    } as any;
+
+    expect(resolveOpenClawRouteMetadataConfig(api)).toEqual({
+      agents: {
+        defaults: {
+          workspace: '/workspace',
+        },
+      },
+      session: {
+        ttlMs: 30_000,
+        dmScope: 'main',
+      },
+    });
   });
 
   it('deep-merges memory and channel partials without dropping prior subconfig', () => {

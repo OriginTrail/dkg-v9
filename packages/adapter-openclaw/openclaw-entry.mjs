@@ -164,10 +164,17 @@ function resolveEntryConfig(api, options = {}) {
     : undefined;
   const currentWorkspaceDir = workspaceDirFromConfig(currentWorkspaceConfig);
   const fallbackWorkspaceDir = workspaceDirFromConfig(fallbackWorkspaceConfig);
+  const currentDirectConfigMatchesInstalledWorkspace =
+    config.stateDirSource === 'setup-default' &&
+    stateDirMatchesWorkspaceDefault(config.stateDir, installedWorkspaceDir);
+  const currentWorkspaceMatchesConfiguredStateDir =
+    stateDirMatchesWorkspaceDefault(config.stateDir, currentWorkspaceDir);
   const currentRouteWorkspaceIsStale =
     currentDirectConfigs.length > 0 &&
     !!installedWorkspaceDir &&
-    !!currentWorkspaceDir;
+    !!currentWorkspaceDir &&
+    currentDirectConfigMatchesInstalledWorkspace &&
+    !currentWorkspaceMatchesConfiguredStateDir;
   const configWorkspaceDir = currentRouteWorkspaceIsStale
     ? undefined
     : currentWorkspaceDir ?? fallbackWorkspaceDir;
@@ -190,6 +197,15 @@ function hasWorkspaceConfig(config) {
 
 function workspaceDirFromConfig(config) {
   return config?.agents?.defaults?.workspace ?? config?.workspace;
+}
+
+function stateDirMatchesWorkspaceDefault(stateDir, workspaceDir) {
+  if (typeof stateDir !== 'string' || typeof workspaceDir !== 'string') return false;
+  return normalizePath(stateDir) === normalizePath(join(workspaceDir, '.dkg-adapter'));
+}
+
+function normalizePath(value) {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 function setEntryAssignedWorkspaceDir(api, workspaceDir) {

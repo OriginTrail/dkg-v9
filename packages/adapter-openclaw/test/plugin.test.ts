@@ -2382,8 +2382,9 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: false },
     });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
-    (plugin as any).client = { updateLocalAgentIntegration };
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).channelPlugin = null;
     (plugin as any).channelPluginStopInFlight = Promise.resolve(true);
     const mockApi: OpenClawPluginApi = {
@@ -2418,8 +2419,9 @@ describe('DkgNodePlugin', () => {
       channel: { enabled: false },
       memory: { enabled: false },
     });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
-    (plugin as any).client = { updateLocalAgentIntegration };
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).channelPlugin = null;
     (plugin as any).channelPluginStopInFlight = null;
     const mockApi: OpenClawPluginApi = {
@@ -2448,19 +2450,56 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  it('does not re-enable an explicitly disconnected stored bridge when channel is disabled', async () => {
+    const info = vi.fn();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue({
+      id: 'openclaw',
+      enabled: false,
+      runtime: { status: 'disconnected', ready: false },
+      metadata: { userDisabled: true },
+    });
+    const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info, warn: vi.fn(), debug: vi.fn() },
+    };
+
+    (plugin as any).registerIntegrationModules(mockApi, {
+      enableFullRuntime: true,
+      registrationMode: 'full',
+    });
+
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration).toHaveBeenCalledWith('openclaw');
+    });
+    expect(updateLocalAgentIntegration).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+  });
+
   it('does not advertise memory capabilities when clearing a disabled channel during memory disable', async () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       channel: { enabled: false },
       memory: { enabled: false },
     });
+    const getLocalAgentIntegration = vi.fn().mockResolvedValue(null);
     const updateLocalAgentIntegration = vi.fn().mockResolvedValue({});
     const memoryPlugin = {
       isRegistered: vi.fn(() => true),
       disable: vi.fn(() => true),
       close: vi.fn(async () => {}),
     };
-    (plugin as any).client = { updateLocalAgentIntegration };
+    (plugin as any).client = { getLocalAgentIntegration, updateLocalAgentIntegration };
     (plugin as any).memoryPlugin = memoryPlugin;
     const mockApi: OpenClawPluginApi = {
       config: {},
@@ -3272,12 +3311,10 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('skips the stored-integration retry loop entirely when both memory and channel are disabled', async () => {
-    // Live-validation follow-up: when the adapter has nothing runtime
-    // to sync (both integrations disabled), the daemon fetch is pure
-    // overhead and used to loop at 1 Hz. With the fix it short-circuits
-    // before the first load call so cold daemons do not burn CPU or
-    // log spam on metadata-only plugin loads.
+  it('does not retry stored-integration loads when both memory and channel are disabled', async () => {
+    // A disabled channel performs one best-effort load so it can preserve
+    // explicit user disconnects, but the startup retry loop still must stay
+    // off when both runtime integrations are disabled.
     vi.useFakeTimers();
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn();
@@ -3308,7 +3345,7 @@ describe('DkgNodePlugin', () => {
       const getCalls = fakeFetch.mock.calls.filter((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
       );
-      expect(getCalls).toHaveLength(0);
+      expect(getCalls).toHaveLength(1);
     } finally {
       vi.useRealTimers();
       await plugin?.stop();

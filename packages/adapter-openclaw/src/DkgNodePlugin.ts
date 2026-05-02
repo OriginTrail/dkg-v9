@@ -1563,6 +1563,12 @@ export class DkgNodePlugin {
     };
     void Promise.resolve().then(async () => {
       if (generation !== this.daemonClientGeneration) return;
+      const existing = await this.loadStoredOpenClawIntegration(api, generation, client);
+      if (generation !== this.daemonClientGeneration || existing === undefined) return;
+      if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+        api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping disabled-channel status update');
+        return;
+      }
       await client.updateLocalAgentIntegration('openclaw', {
         enabled: true,
         description: 'Connect a local OpenClaw agent through the DKG node.',

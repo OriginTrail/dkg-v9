@@ -45,6 +45,7 @@ export class NoChainAdapter implements ChainAdapter {
   async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> { noChain(); }
   async revealContextGraphMetadata(_contextGraphId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
   async createKnowledgeAssetsV10(_params: V10PublishDirectParams): Promise<OnChainPublishResult> { noChain(); }
+  async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
   async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
   isV10Ready(): boolean { return false; }

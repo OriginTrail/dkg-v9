@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -39,7 +39,10 @@ describe('StorageACKHandler', () => {
   const coreIdentityId = 42n;
   const fakePeerId = { toString: () => 'publisher-peer' };
 
-  async function createHandler(storeQuads: Quad[]) {
+  async function createHandler(
+    storeQuads: Quad[],
+    configOverrides: Partial<StorageACKHandlerConfig> = {},
+  ) {
     const store = new OxigraphStore();
 
     const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
@@ -57,6 +60,7 @@ describe('StorageACKHandler', () => {
         `did:dkg:context-graph:${cgId}/_shared_memory`,
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      ...configOverrides,
     };
 
     return new StorageACKHandler(store as any, config, new TypedEventBus() as any);
@@ -105,6 +109,56 @@ describe('StorageACKHandler', () => {
         ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
     });
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
+  });
+
+  it('refuses to sign when the signer is no longer confirmed registered', async () => {
+    const handler = await createHandler(swmQuads, {
+      isSignerRegistered: async () => false,
+    });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 2,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+    });
+
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      'StorageACK signer is not confirmed on-chain as an operational wallet',
+    );
+  });
+
+  it('refuses to sign when signer registration lookup fails', async () => {
+    const lookupFailed = vi.fn();
+    const unregistered = vi.fn();
+    const handler = await createHandler(swmQuads, {
+      isSignerRegistered: async () => { throw new Error('rpc unavailable'); },
+      onSignerRegistrationLookupFailed: lookupFailed,
+      onSignerUnregistered: unregistered,
+    });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 2,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+    });
+
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      'StorageACK signer registration lookup failed; refusing to sign',
+    );
+    expect(lookupFailed).toHaveBeenCalledOnce();
+    expect(unregistered).not.toHaveBeenCalled();
   });
 
   it('rejects when SWM has no data', async () => {

@@ -26,6 +26,7 @@ import type {
   NodeChallenge,
   ProofPeriodStatus,
   CreateChallengeResult,
+  OperationalWalletRegistrationResult,
 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -720,6 +721,47 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
+  async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
+    return this.verifyACKIdentity(address, identityId);
+  }
+
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }): Promise<OperationalWalletRegistrationResult> {
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    const result: OperationalWalletRegistrationResult = {
+      identityId,
+      registered: [],
+      alreadyRegistered: [],
+      taken: [],
+    };
+    if (identityId === 0n) return result;
+
+    const candidates = [this.signerAddress, ...(options?.additionalAddresses ?? [])];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      const address = ethers.getAddress(candidate);
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const existing = [...this.identities.entries()].find(
+        ([addr]) => addr.toLowerCase() === key,
+      );
+      if (existing?.[1] === identityId) {
+        result.alreadyRegistered.push(address);
+      } else if (existing) {
+        result.taken.push({ address, identityId: existing[1] });
+      } else {
+        this.identities.set(address, identityId);
+        result.registered.push(address);
+      }
+    }
+
+    return result;
+  }
+
   async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
     return this.verifyACKIdentity(recoveredAddress, claimedIdentityId);
   }
@@ -732,6 +774,10 @@ export class MockChainAdapter implements ChainAdapter {
 
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
     if (!this.mockACKSigner) return undefined;
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n || !(await this.isOperationalWalletRegistered(identityId, this.mockACKSigner.address))) {
+      return undefined;
+    }
     const { ethers: eth } = await import('ethers');
     const sig = eth.Signature.from(await this.mockACKSigner.signMessage(digest));
     return {

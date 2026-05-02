@@ -386,7 +386,10 @@ program
     try {
       const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());
-      walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
+      walletAddresses = [
+        ...(opWallets.adminWallet ? [opWallets.adminWallet.address] : []),
+        ...opWallets.wallets.map((w: { address: string }) => w.address),
+      ];
     } catch (err: any) {
       console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
       console.warn('Wallets will be auto-generated on first "dkg start".');
@@ -431,7 +434,7 @@ program
     // Auto-fund from testnet faucet if available
     if (network?.faucet?.url && walletAddresses.length > 0) {
       if (walletAddresses.length > 3) {
-        console.log(`\nNote: faucet supports up to 3 wallets; funding the first 3.`);
+        console.log(`\nNote: faucet supports up to 3 wallets per request; funding wallets in batches.`);
       }
       console.log(`\nRequesting testnet tokens from faucet...`);
       try {
@@ -440,6 +443,12 @@ program
         );
         if (result.success) {
           console.log(`  Funded: ${result.funded.join(', ')}`);
+          if (result.error) {
+            console.log(`  Faucet partially completed (${result.error}). Retry later for any remaining wallets.`);
+            if (result.failedWallets?.length) {
+              console.log(`  Remaining: ${result.failedWallets.join(', ')}`);
+            }
+          }
         } else if (result.error) {
           console.log(`  Faucet request failed (${result.error}). Fund manually or retry later.`);
         } else {
@@ -2564,7 +2573,7 @@ program
 
 program
   .command('wallet')
-  .description('Show operational wallet addresses and balances')
+  .description('Show admin and operational wallet addresses and balances')
   .action(async () => {
     try {
       const config = await loadConfig();
@@ -2602,6 +2611,22 @@ program
         }
       }
 
+      console.log(`\nAdmin wallet:\n`);
+      if (opWallets.adminWallet) {
+        console.log(`  ${opWallets.adminWallet.address}`);
+        if (provider) {
+          try {
+            const ethBal = await provider.getBalance(opWallets.adminWallet.address);
+            const tracBal = token ? await token.balanceOf(opWallets.adminWallet.address) : 0n;
+            console.log(`  ETH: ${ethers.formatEther(ethBal)}  ${tokenSymbol}: ${ethers.formatEther(tracBal)}`);
+          } catch {
+            console.log('  (unable to query balances)');
+          }
+        }
+      } else {
+        console.log('  (missing from legacy wallets.json; add the profile admin key to enable key management)');
+      }
+
       console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
       for (let i = 0; i < opWallets.wallets.length; i++) {
         const addr = opWallets.wallets[i].address;
@@ -2622,7 +2647,11 @@ program
       if (rpcUrl) console.log(`  RPC:   ${rpcUrl}`);
       console.log(`  File:  ~/.dkg/wallets.json`);
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
-      console.log('The primary wallet is used for identity registration. All wallets are used for publishing.\n');
+      if (opWallets.adminWallet) {
+        console.log('The admin wallet is used for profile key management. The primary operational wallet is used for staking; all operational wallets are used for publishing.\n');
+      } else {
+        console.log('Add the real profile admin key to wallets.json to enable profile key management and operational-wallet repair.\n');
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

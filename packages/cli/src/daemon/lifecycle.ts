@@ -491,8 +491,14 @@ export async function runDaemonInner(
     );
   }
 
-  // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
+  // Load admin + operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());
+  log(`Admin wallet:`);
+  if (opWallets.adminWallet) {
+    log(`  ${opWallets.adminWallet.address}`);
+  } else {
+    log(`  (missing from legacy wallets.json; auto-registration requires adding the profile admin key)`);
+  }
   log(`Operational wallets (${opWallets.wallets.length}):`);
   for (const w of opWallets.wallets) {
     log(`  ${w.address}`);
@@ -566,6 +572,9 @@ export async function runDaemonInner(
     chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
       rpcUrl: chainBase.rpcUrl,
       hubAddress: chainBase.hubAddress,
+      ...(opWallets.adminWallet
+        ? { adminPrivateKey: opWallets.adminWallet.privateKey }
+        : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
     } : undefined,

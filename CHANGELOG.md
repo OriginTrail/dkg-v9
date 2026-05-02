@@ -5,13 +5,18 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 ## [Unreleased]
 
 ### Added
-- (Changes go here for the next release.)
+- **Persisted profile admin wallet**: `wallets.json` now contains a distinct admin wallet alongside operational wallets so newly-created profiles do not lose their admin key.
+- **Operational wallet self-healing for ACK signing**: core nodes now auto-register configured operational ACK signer wallets on-chain for their profile identity during startup.
+- **`Profile.addOperationalWallets(uint72,address[])` facade**: profile admins can add operational-only keys without using the lower-level generic key-management surface.
+- **End-to-end ACK signer registration coverage**: a real Hardhat/libp2p test now verifies startup registration, StorageACK signing by the confirmed key, and refusal to sign after the key is removed on-chain.
 
 ### Changed
-- (Optional.)
+- **Admin-only operational wallet registration**: `Profile.addOperationalWallets` requires a profile admin key; operational keys can no longer add more operational keys.
+- **New profile creation uses the persisted admin wallet**: `EVMChainAdapter.ensureProfile` now uses `chainConfig.adminPrivateKey` for the profile admin address instead of creating an unrecoverable random admin wallet.
+- **StorageACK signing is gated by on-chain confirmation**: core nodes only register/sign with ACK keys confirmed as `OPERATIONAL_KEY` for the node identity.
 
 ### Fixed
-- (Optional.)
+- **Invalid ACKs from unregistered wallets**: ACK handlers no longer produce signatures from local keys that are not confirmed operational wallets on-chain.
 
 ---
 

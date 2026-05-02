@@ -702,14 +702,39 @@ export function readWallets(): string[] {
     warn('wallets.json is malformed or still being written — skipping');
     return [];
   }
-  // The daemon writes { wallets: [{ address, privateKey }] }.
-  // Handle this shape first, then fall back to other formats.
+  // The daemon writes { adminWallet, wallets: [{ address, privateKey }] }.
+  // Include admin first so profile/key-management transactions have gas, then
+  // fall back to the legacy operational-only array shapes.
   const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
     : Array.isArray(raw) ? raw
     : [];
-  const addresses: string[] = [];
+  const operationalAddresses: string[] = [];
+  const operationalSeen = new Set<string>();
   for (const w of walletList) {
-    if (w?.address) addresses.push(w.address);
+    const address = w?.address;
+    if (typeof address !== 'string' || address.length === 0) continue;
+    const key = address.toLowerCase();
+    if (operationalSeen.has(key)) continue;
+    operationalSeen.add(key);
+    operationalAddresses.push(address);
+  }
+  if (operationalAddresses.length === 0) {
+    warn('wallets.json has no operational wallets — skipping faucet funding');
+    return [];
+  }
+
+  const addresses: string[] = [];
+  const seen = new Set<string>();
+  const addAddress = (address: unknown) => {
+    if (typeof address !== 'string' || address.length === 0) return;
+    const key = address.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    addresses.push(address);
+  };
+  addAddress(raw?.adminWallet?.address);
+  for (const address of operationalAddresses) {
+    addAddress(address);
   }
 
   if (addresses.length) {
@@ -723,25 +748,26 @@ export function readWallets(): string[] {
  * only on faucet failure; the caller is expected to continue (funding is
  * best-effort / non-fatal).
  *
- * Addresses are capped at the first 3 to match `requestFaucetFunding`'s
- * server-side cap (`packages/core/src/faucet.ts`). Including more wallets
- * in the body would be rejected by the faucet. When the caller passes >3
- * addresses, the extras are listed in a follow-on note so the operator
- * knows which wallets still need funding (via a separate request or a
- * re-run after cooldown).
+ * Addresses are split into batches of 3 to match the faucet's per-request
+ * cap. Including more wallets in one body would be rejected by the faucet.
  */
 export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
-  const fundable = addresses.slice(0, 3);
-  const extras = addresses.slice(3);
+  const batches: string[][] = [];
+  for (let i = 0; i < addresses.length; i += 3) {
+    batches.push(addresses.slice(i, i + 3));
+  }
   console.log('\nTo fund wallets manually, run:');
-  console.log(`  curl -X POST "${faucetUrl}" \\`);
-  console.log(`    -H "Content-Type: application/json" \\`);
-  console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
-  console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(fundable)}}'`);
-  if (extras.length > 0) {
-    console.log(`\nNote: faucet supports up to 3 wallets per call; the command above funds the first 3.`);
-    console.log(`Fund the remaining ${extras.length} wallet(s) with a separate request:`);
-    console.log(`  ${extras.join(', ')}`);
+  batches.forEach((batch, index) => {
+    if (batches.length > 1) {
+      console.log(`  # batch ${index + 1}/${batches.length}`);
+    }
+    console.log(`  curl -X POST "${faucetUrl}" \\`);
+    console.log(`    -H "Content-Type: application/json" \\`);
+    console.log(`    -H "Idempotency-Key: $(date +%s)-${index + 1}" \\`);
+    console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(batch)}}'`);
+  });
+  if (batches.length > 1) {
+    console.log(`\nNote: faucet supports up to 3 wallets per call; run each batch above.`);
   }
   console.log('');
 }
@@ -1929,6 +1955,14 @@ export async function runSetup(options: SetupOptions): Promise<void> {
           const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, effectiveAgentName);
           if (result.success) {
             log(`Funded: ${result.funded.join(', ')}`);
+            if (result.error) {
+              warn(`Faucet partially completed: ${result.error}`);
+              logManualFundingInstructions(
+                result.failedWallets?.length ? result.failedWallets : walletAddresses,
+                faucetUrl,
+                faucetMode,
+              );
+            }
           } else {
             warn(`Faucet request did not fund any wallets${result.error ? ` (${result.error})` : ''}`);
             logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);

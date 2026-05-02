@@ -185,6 +185,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
           privateKey: wallet.privateKey,
           hubAddress: args.chainBase.hubAddress,
           chainId: args.chainBase.chainId,
+          allowNoAdminSigner: true,
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();

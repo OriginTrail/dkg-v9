@@ -400,8 +400,14 @@ create_node_config() {
 }
 EOCONF
 
-  # Generate wallets.json: primary Hardhat key + NUM_OP_WALLETS additional
-  # operational wallets for parallel EVM transaction submission.
+  # Generate wallets.json in the post-PR-366 format:
+  #   - adminWallet: primary Hardhat key (pre-funded; used to createProfile +
+  #     register operational keys via Profile.addOperationalWallets)
+  #   - wallets[]: NUM_OP_WALLETS random operational wallets for parallel EVM
+  #     transaction submission (need explicit ETH+TRAC funding below)
+  # The admin/operational separation is enforced on-chain since PR 366 — admin
+  # key holds purpose=ADMIN_KEY, operational keys hold purpose=OPERATIONAL_KEY,
+  # and the two sets MUST be disjoint addresses.
   # Run from a package that has 'ethers' so require() resolves (pnpm workspace).
   local extra_addrs
   extra_addrs=$(cd "$REPO_ROOT/packages/evm-module" && node -e "
@@ -409,14 +415,15 @@ EOCONF
     const { ethers } = require('ethers');
     const fs = require('fs');
     const primary = new ethers.Wallet('${HARDHAT_KEYS[$key_idx]}');
-    const wallets = [{ privateKey: '${HARDHAT_KEYS[$key_idx]}', address: primary.address }];
+    const adminWallet = { privateKey: '${HARDHAT_KEYS[$key_idx]}', address: primary.address };
+    const wallets = [];
     for (let i = 0; i < ${NUM_OP_WALLETS}; i++) {
       const key = '0x' + crypto.randomBytes(32).toString('hex');
       const w = new ethers.Wallet(key);
       wallets.push({ privateKey: key, address: w.address });
     }
-    fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ wallets }, null, 2));
-    wallets.slice(1).forEach(w => console.log(w.address));
+    fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ adminWallet, wallets }, null, 2));
+    wallets.forEach(w => console.log(w.address));
   ")
 
   # Fund each additional wallet with ETH (gas) and TRAC (publish payments).
@@ -708,54 +715,84 @@ cmd_start() {
       const stakingV10Addr = c('StakingV10');
       const profile  = new ethers.Contract(c('Profile'),         ['function updateAsk(uint72,uint96)'], provider);
 
-      const signers = await provider.listAccounts();
-      const n = Math.min(signers.length, $NUM_NODES);
+      // Post-PR-366: each node's wallets.json has \`adminWallet\` (the Hardhat key,
+      // which holds purpose=ADMIN_KEY only) and \`wallets[]\` (random op keys
+      // holding purpose=OPERATIONAL_KEY only). The reverse-lookup map
+      // \`IdentityStorage.identityIds\` is operational-only by design (see
+      // IdentityStorage.sol:108-110), so we MUST query identity by op wallet
+      // address, not by admin/Hardhat-key address. createConviction + updateAsk
+      // also need to be signed by the op wallet (the address that owns the
+      // identity in the eyes of the staking + profile contracts).
+      const n = $NUM_NODES;
+      const opSigners = [];
+      const nodeRoles = [];
+      for (let i = 1; i <= n; i++) {
+        const w = JSON.parse(fs.readFileSync('$DEVNET_DIR/node' + i + '/wallets.json', 'utf8'));
+        opSigners.push(new ethers.Wallet(w.wallets[0].privateKey, provider));
+        const cfg = JSON.parse(fs.readFileSync('$DEVNET_DIR/node' + i + '/config.json', 'utf8'));
+        nodeRoles.push(cfg.nodeRole || 'core');
+      }
 
-      // Wait up to 60s for ALL nodes to have identities, not just the first
+      // Wait up to 60s for all CORE nodes to have identities. Edge nodes
+      // never create on-chain profiles by design (dkg-agent.ts skips
+      // ensureProfile for effectiveRole='edge'), so we don't wait on them.
+      // The daemon creates identities eagerly in agent.connect() (dkg-agent.ts
+      // ensureProfile path), typically within ~5s of node start.
+      const coreIdxs = nodeRoles.map((r, i) => r === 'core' ? i : -1).filter(i => i >= 0);
       const nodeIds = new Array(n).fill(0n);
       for (let attempt = 0; attempt < 30; attempt++) {
         let allReady = true;
-        for (let i = 0; i < n; i++) {
+        for (const i of coreIdxs) {
           if (nodeIds[i] === 0n) {
-            nodeIds[i] = await identity.getIdentityId(signers[i].address);
+            nodeIds[i] = await identity.getIdentityId(opSigners[i].address);
           }
           if (nodeIds[i] === 0n) allReady = false;
         }
         if (allReady) break;
-        const ready = nodeIds.filter(id => id > 0n).length;
-        if (attempt % 5 === 4) console.log('Waiting for identities: ' + ready + '/' + n + ' ready...');
+        const ready = coreIdxs.filter(i => nodeIds[i] > 0n).length;
+        if (attempt % 5 === 4) console.log('Waiting for core identities: ' + ready + '/' + coreIdxs.length + ' ready...');
         await new Promise(r => setTimeout(r, 2000));
       }
 
       let staked = 0, asked = 0;
+      const coreCount = coreIdxs.length;
       for (let i = 0; i < n; i++) {
-        const signer = signers[i];
-        const idId = nodeIds[i] || await identity.getIdentityId(signer.address);
-        if (idId === 0n) { console.log('Node ' + (i+1) + ': no identity after 60s, skipping'); continue; }
+        if (nodeRoles[i] !== 'core') continue;
+        const opSigner = opSigners[i];
+        const idId = nodeIds[i] || await identity.getIdentityId(opSigner.address);
+        if (idId === 0n) { console.log('Node ' + (i+1) + ' (core): no identity after 60s, skipping'); continue; }
 
         const stakeAmount = ethers.parseEther('50000');
         const askAmount = ethers.parseEther('1');
         // Lock tier 1 (1-month). Cheapest tier with non-zero multiplier; sufficient
         // for devnet random-sampling soak tests where we need nodeStakeV10 > 0.
         const lockTier = 1;
+
+        // The daemon's publisher shares this op wallet (registered as the
+        // StorageACK signer + first op wallet). It may have submitted txs
+        // already (addKey, addOperationalWallets) by the time we reach here,
+        // so we MUST query the latest nonce explicitly and pass it to each
+        // tx — relying on ethers' default nonce manager would race the daemon
+        // and yield 'nonce has already been used'.
+        let nonce = await provider.getTransactionCount(opSigner.address, 'latest');
         try {
           const deployer = await provider.getSigner(0);
-          await (await token.connect(deployer).mint(signer.address, stakeAmount)).wait();
+          await (await token.connect(deployer).mint(opSigner.address, stakeAmount)).wait();
           // StakingV10.stake pulls TRAC via transferFrom(staker, address(CSS), amount)
           // gated by allowance to StakingV10. Approve StakingV10 here, NOT the NFT —
           // the NFT is only the entry point and never custodies TRAC.
-          await (await token.connect(signer).approve(stakingV10Addr, stakeAmount)).wait();
-          await (await stakingNFT.connect(signer).createConviction(idId, stakeAmount, lockTier)).wait();
+          await (await token.connect(opSigner).approve(stakingV10Addr, stakeAmount, { nonce: nonce++ })).wait();
+          await (await stakingNFT.connect(opSigner).createConviction(idId, stakeAmount, lockTier, { nonce: nonce++ })).wait();
           staked++;
         } catch (e) { console.log('Stake failed for node ' + (i+1) + ': ' + e.message); }
 
         // Set ask price
         try {
-          await (await profile.connect(signer).updateAsk(idId, askAmount)).wait();
+          await (await profile.connect(opSigner).updateAsk(idId, askAmount, { nonce: nonce++ })).wait();
           asked++;
         } catch (e) { console.log('Ask failed for node ' + (i+1) + ': ' + e.message); }
       }
-      console.log('Staked 50k TRAC for ' + staked + '/' + n + ' node(s), ask set for ' + asked + '/' + n);
+      console.log('Staked 50k TRAC for ' + staked + '/' + coreCount + ' core node(s), ask set for ' + asked + '/' + coreCount);
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 
